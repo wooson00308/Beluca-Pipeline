@@ -88,7 +88,7 @@ class ShotBuilderTab(QWidget):
         self._server_root_edit.setPlaceholderText("예) W:/vfx/project_2026")
         srv_layout.addWidget(self._server_root_edit, 1)
         browse_btn = QPushButton("찾아보기")
-        browse_btn.setFixedWidth(90)
+        browse_btn.setFixedWidth(100)
         browse_btn.clicked.connect(self._browse_server_root)
         srv_layout.addWidget(browse_btn)
         form.addLayout(_form_row("서버 루트 경로", srv_input))

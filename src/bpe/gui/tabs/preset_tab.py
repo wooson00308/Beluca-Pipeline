@@ -143,7 +143,7 @@ class PresetTab(QWidget):
         self._inputs["ocio_path"] = QLineEdit()
         self._inputs["ocio_path"].setPlaceholderText("OCIO config 경로")
         browse_btn = QPushButton("찾아보기")
-        browse_btn.setFixedWidth(80)
+        browse_btn.setFixedWidth(100)
         browse_btn.clicked.connect(self._browse_ocio)
         ocio_row.addWidget(self._inputs["ocio_path"], 1)
         ocio_row.addWidget(browse_btn)

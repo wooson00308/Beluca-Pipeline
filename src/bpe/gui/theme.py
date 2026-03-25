@@ -202,8 +202,9 @@ def build_stylesheet() -> str:
         color: {TEXT};
         border: 1px solid {BORDER};
         border-radius: {BUTTON_RADIUS}px;
-        padding: 8px 24px;
+        padding: 8px 20px;
         min-height: {BUTTON_HEIGHT - 18}px;
+        min-width: 72px;
         font-size: {FONT_SIZE}px;
     }}
     QPushButton:hover {{
