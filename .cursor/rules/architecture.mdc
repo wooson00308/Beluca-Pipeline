@@ -1,0 +1,65 @@
+---
+description: BPE 프로젝트 아키텍처 규칙 — 모든 코드 수정 시 반드시 참조
+alwaysApply: true
+---
+
+# BPE (Beluca Pipeline Engine) 아키텍처
+
+## 모듈 구조 (절대 위반 금지)
+
+```
+src/bpe/
+├── core/          # 순수 로직 (GUI 없음, 표준 라이브러리만)
+├── shotgrid/      # ShotGrid API 래퍼 (shotgun_api3 의존)
+├── gui/           # PySide6 GUI (데스크톱 앱)
+│   ├── tabs/      # 탭별 UI
+│   ├── widgets/   # 재사용 위젯
+│   └── workers/   # QThread 워커
+└── nuke_plugin/   # Nuke 내부 실행 (PySide6 절대 금지)
+```
+
+## import 규칙 (반드시 지킬 것)
+
+1. `core/` → 표준 라이브러리만 import. PySide6, shotgun_api3 import 금지.
+2. `shotgrid/` → `core/` import 가능. `gui/` import 금지.
+3. `gui/` → `core/`, `shotgrid/` import 가능. 비즈니스 로직 직접 구현 금지.
+4. `nuke_plugin/` → `core/` import만 가능. PySide6, shotgrid/ import 절대 금지.
+
+위반하면 앱이 빌드에서 터지거나 Nuke에서 크래시 남.
+
+## config 참조 패턴
+
+config.py의 상수(APP_DIR 등)는 기본 인자로 쓰지 마. 런타임에 참조해야 테스트가 돌아감.
+
+```python
+# 올바른 방법
+import bpe.core.config as cfg
+def my_func():
+    return cfg.APP_DIR / "something"
+
+# 틀린 방법 (테스트에서 monkeypatch 안 먹힘)
+from bpe.core.config import APP_DIR
+def my_func(path=APP_DIR):  # ← 이러면 안 됨
+    return path / "something"
+```
+
+## 설정 파일 호환
+
+`~/.setup_pro/` 디렉토리의 JSON 포맷은 기존 BPE v1과 호환되어야 함.
+settings.json, presets.json, shot_builder.json 구조를 변경하면 기존 사용자 데이터가 깨짐.
+
+## QThread 규칙
+
+ShotGrid API 호출은 반드시 ShotGridWorker(QThread)로 감싸야 함.
+워커 참조는 `self._workers` 리스트에 append해서 GC 방지.
+
+```python
+# 올바른 방법
+w = ShotGridWorker(func)
+w.start()
+self._workers.append(w)
+
+# 틀린 방법 (이전 워커가 GC되면서 크래시)
+self._worker = ShotGridWorker(func)
+self._worker.start()
+```

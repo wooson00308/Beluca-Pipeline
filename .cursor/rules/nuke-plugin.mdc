@@ -1,0 +1,48 @@
+---
+description: Nuke 플러그인 수정 시 규칙 — PySide6 import 금지, Nuke API 전용
+globs: ["src/bpe/nuke_plugin/*.py"]
+alwaysApply: false
+---
+
+# Nuke 플러그인 규칙
+
+## 절대 금지
+
+- `from PySide6 import ...` — Nuke는 자체 PySide2를 씀. PySide6 import하면 충돌나서 Nuke가 크래시
+- `from bpe.gui import ...` — GUI 모듈 의존 금지
+- `from bpe.shotgrid import ...` — SG 모듈 의존 금지
+
+## 허용되는 import
+
+```python
+import nuke
+import nukescripts
+from bpe.core.presets import load_presets
+from bpe.core.settings import get_tools_settings
+from bpe.core.cache import save_nuke_formats_cache
+```
+
+## Nuke 콜백 안전 패턴
+
+beforeRender/afterRender 콜백 안에서 노드 생성/UI 조작은 금지.
+반드시 `nuke.executeDeferred()` 사용:
+
+```python
+def bpe_after_render():
+    # 여기서 노드 생성하면 안 됨
+    nuke.executeDeferred(_deferred_work)
+
+def _deferred_work():
+    # 여기서는 OK
+    nuke.createNode("Read")
+```
+
+## QC Checker 재렌더 방지
+
+`_bpe_qc_approved` set으로 이미 승인된 Write 노드 관리.
+이 패턴을 건드리면 무한 렌더 루프 발생.
+
+## 테스트 불가
+
+이 모듈은 `import nuke`가 Nuke 안에서만 가능해서 pytest로 테스트 못 함.
+수동 검증 필수: Nuke에서 메뉴 실행 → 프리셋 적용 → 렌더 콜백 확인.

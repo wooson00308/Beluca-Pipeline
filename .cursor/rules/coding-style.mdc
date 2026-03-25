@@ -1,0 +1,60 @@
+---
+description: 코딩 스타일 및 패턴 — 코드 작성/수정 시 참조
+alwaysApply: true
+---
+
+# 코딩 스타일
+
+## Python 버전
+
+Python 3.9 호환 필수. Nuke 13이 Python 3.9를 쓰기 때문.
+
+```python
+# 모든 파일 최상단에:
+from __future__ import annotations
+
+# 타입 힌트
+from typing import Dict, List, Optional, Any  # 3.9 호환
+# dict[str, Any] 대신 Dict[str, Any] 사용
+```
+
+## 린트
+
+ruff로 린트. line-length 100자. push 전에 반드시:
+```bash
+ruff check src/ tests/
+ruff format src/ tests/
+```
+
+## 로깅
+
+디버그 로그는 통합 로거만 사용:
+```python
+from bpe.core.logging import get_logger
+logger = get_logger("모듈이름")
+logger.info("메시지")
+```
+print()로 디버그하지 마. 별도 로그 파일 만들지 마.
+
+## 파일 I/O
+
+JSON 파일 읽기/쓰기는 반드시 atomic_io 사용:
+```python
+from bpe.core.atomic_io import read_json_file, write_json_file
+```
+직접 open()으로 JSON 쓰지 마. 네트워크 폴더에서 파일이 깨질 수 있음.
+
+## 에러 처리
+
+ShotGrid 관련 에러는 ShotGridError로 감싸기:
+```python
+from bpe.shotgrid.errors import ShotGridError
+raise ShotGridError("사용자에게 보여줄 메시지")
+```
+
+## 테스트
+
+새 기능 추가하면 테스트도 추가. tests/ 구조는 src/bpe/ 구조를 미러링.
+```bash
+python -m pytest tests/ -v
+```

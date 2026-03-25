@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys as _sys
+
 # Color tokens
 BG = "#1a1a1d"
 SIDEBAR_BG = "#111114"
@@ -20,7 +22,12 @@ ERROR = "#ff453a"
 SUCCESS = "#34c759"
 SUCCESS_DIM = "#2a9d4a"
 
-FONT_FAMILY = "Segoe UI, SF Pro Text, -apple-system, Helvetica Neue, sans-serif"
+if _sys.platform == "darwin":
+    FONT_FAMILY = "SF Pro Text, Helvetica Neue, sans-serif"
+elif _sys.platform == "win32":
+    FONT_FAMILY = "Segoe UI, sans-serif"
+else:
+    FONT_FAMILY = "sans-serif"
 FONT_SIZE = 13
 FONT_SIZE_SMALL = 11
 FONT_SIZE_TITLE = 20

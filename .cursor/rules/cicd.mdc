@@ -1,0 +1,87 @@
+---
+description: CI/CD 파이프라인 및 배포 가이드
+alwaysApply: true
+---
+
+# CI/CD 파이프라인
+
+## 구조
+
+```
+코드 수정 → git push → CI 자동 (lint + test)
+                              ↓ 통과
+                        개발 계속...
+                              ↓ 배포 준비 되면
+                        git tag v0.x.x → push → CD 자동 (빌드 + Release)
+```
+
+## CI (자동 — 매 push/PR)
+
+파일: `.github/workflows/ci.yml`
+
+매트릭스 6개 환경:
+- Ubuntu / Windows / macOS
+- Python 3.9 / 3.11
+
+각 환경에서:
+1. `ruff check src/ tests/` — 린트
+2. `pytest --tb=short -q` — 141+ 테스트
+
+## CD (수동 트리거 — 태그 push)
+
+파일: `.github/workflows/release.yml`
+
+`v*` 태그를 push하면:
+1. macOS + Windows에서 PyInstaller 빌드
+2. `BPE-macOS.zip`, `BPE-Windows.zip` 생성
+3. GitHub Release 페이지에 자동 업로드
+
+## 배포 방법
+
+```bash
+# 1. 코드 수정 완료 + push
+git add -A && git commit -m "설명" && git push
+
+# 2. CI 통과 확인
+gh run list --limit 1
+# "completed success" 확인
+
+# 3. 버전 태그 생성 + push
+git tag v0.2.2
+git push origin v0.2.2
+
+# 4. Release 빌드 완료 대기 (3~5분)
+gh run list --workflow=release.yml --limit 1
+
+# 5. 릴리즈 확인
+gh release view v0.2.2
+```
+
+## macOS 보안 해제
+
+macOS에서 다운받은 .app는 quarantine 때문에 실행이 막힘:
+```bash
+xattr -cr ~/Downloads/BPE.app
+```
+
+## 버전 규칙
+
+- `0.2.x` — 현재 개발 단계
+- 패치 올릴 때: `v0.2.1` → `v0.2.2` → ...
+- 기능 추가: `v0.3.0`
+- 안정 릴리즈: `v1.0.0`
+
+## push 전 체크리스트
+
+```bash
+ruff check src/ tests/       # 린트 에러 0
+ruff format src/ tests/      # 포맷 정리
+python -m pytest tests/ -q   # 테스트 전부 통과
+git push                     # CI가 나머지 검증
+```
+
+## 주의사항
+
+- `installer/bpe.spec` 수정하면 빌드가 깨질 수 있음. PyInstaller 숙지 후 수정할 것
+- `.github/workflows/` 수정 시 YAML 문법 주의. 들여쓰기 틀리면 CI가 안 돌아감
+- Release 태그는 한 번 push하면 되돌리기 번거로움. CI 통과 확인 후 태그 칠 것
