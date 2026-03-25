@@ -111,6 +111,7 @@ class MockShotgun:
 
 class _ConfigStub:
     """Mimics Shotgun().config for timeout_secs."""
+
     timeout_secs: float = 720.0
 
 

@@ -153,9 +153,7 @@ class PublishTab(QWidget):
         # Artist
         self._artist_edit = QLineEdit()
         self._artist_edit.setPlaceholderText("이름 또는 로그인 입력 (자동완성)")
-        self._artist_edit.textChanged.connect(
-            lambda: self._artist_timer.start(_AUTOCOMPLETE_DELAY)
-        )
+        self._artist_edit.textChanged.connect(lambda: self._artist_timer.start(_AUTOCOMPLETE_DELAY))
         lay.addLayout(_form_row("Artist", self._artist_edit))
 
         self._artist_combo = QComboBox()
@@ -171,9 +169,7 @@ class PublishTab(QWidget):
         # Task
         self._task_edit = QLineEdit()
         self._task_edit.setPlaceholderText("Task 이름 입력 (Shot 확정 후 자동완성)")
-        self._task_edit.textChanged.connect(
-            lambda: self._task_timer.start(_AUTOCOMPLETE_DELAY)
-        )
+        self._task_edit.textChanged.connect(lambda: self._task_timer.start(_AUTOCOMPLETE_DELAY))
         lay.addLayout(_form_row("Task", self._task_edit))
 
         self._task_combo = QComboBox()
@@ -227,7 +223,9 @@ class PublishTab(QWidget):
         self._percent_label = QLabel("0%")
         self._percent_label.setObjectName("status_msg")
         self._percent_label.setFixedWidth(40)
-        self._percent_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self._percent_label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
         prog_row.addWidget(self._percent_label)
         lay.addLayout(prog_row)
 
@@ -305,9 +303,7 @@ class PublishTab(QWidget):
         self._shot_data = shot
         proj = shot.get("project") or {}
         proj_name = proj.get("name") or proj.get("code") or ""
-        self._shot_info.setText(
-            f"✓ Shot #{shot.get('id')} — {shot.get('code', '')} ({proj_name})"
-        )
+        self._shot_info.setText(f"✓ Shot #{shot.get('id')} — {shot.get('code', '')} ({proj_name})")
         self._shot_info.setVisible(True)
         self._log_msg(f"샷 확인: {shot.get('code')} (project: {proj_name})")
         self._load_tasks_for_shot(shot["id"])
@@ -352,10 +348,7 @@ class PublishTab(QWidget):
             return
         q_lower = query.lower()
         self._task_combo.clear()
-        matched = [
-            t for t in self._tasks_cache
-            if q_lower in (t.get("content") or "").lower()
-        ]
+        matched = [t for t in self._tasks_cache if q_lower in (t.get("content") or "").lower()]
         if matched:
             self._task_combo.setVisible(True)
             for t in matched:

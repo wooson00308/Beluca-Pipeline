@@ -8,8 +8,8 @@ import pytest
 
 from bpe.core.shot_builder import build_shot_paths, parse_shot_name
 
-
 # ── parse_shot_name ──────────────────────────────────────────────
+
 
 class TestParseShotName:
     def test_normal(self):
@@ -32,17 +32,21 @@ class TestParseShotName:
         assert result is not None
         assert result["ep"] == "EP01"
 
-    @pytest.mark.parametrize("bad_input", [
-        "",
-        "   ",
-        "NOUNDERSCORES",
-        None,
-    ])
+    @pytest.mark.parametrize(
+        "bad_input",
+        [
+            "",
+            "   ",
+            "NOUNDERSCORES",
+            None,
+        ],
+    )
     def test_invalid_returns_none(self, bad_input):
         assert parse_shot_name(bad_input) is None
 
 
 # ── build_shot_paths ─────────────────────────────────────────────
+
 
 class TestBuildShotPaths:
     def test_structure(self):

@@ -25,6 +25,7 @@ _NK_VERSION_RE = re.compile(r"[vV](\d+)")
 # Junk-file filter
 # ---------------------------------------------------------------------------
 
+
 def _nk_is_junk_file(path: Path) -> bool:
     """autosave / backup 등 무시해야 할 NK 파일인지 판별."""
     name = path.name
@@ -42,6 +43,7 @@ def _nk_is_junk_file(path: Path) -> bool:
 # Network drive detection (Windows only)
 # ---------------------------------------------------------------------------
 
+
 def _path_is_likely_network(path: Path) -> bool:
     """Windows 네트워크 드라이브(UNC 경로 또는 매핑 드라이브) 여부를 추정한다."""
     if sys.platform != "win32":
@@ -51,6 +53,7 @@ def _path_is_likely_network(path: Path) -> bool:
         return True
     try:
         import ctypes  # noqa: local import — Windows 전용
+
         drive = os.path.splitdrive(s)[0]
         if drive and len(drive) == 2 and drive[1] == ":":
             DRIVE_REMOTE = 4
@@ -64,6 +67,7 @@ def _path_is_likely_network(path: Path) -> bool:
 # ---------------------------------------------------------------------------
 # Heuristic shot-root finder (BFS)
 # ---------------------------------------------------------------------------
+
 
 def _find_shot_root_heuristic(
     server_root: str,
@@ -121,6 +125,7 @@ def _find_shot_root_heuristic(
 # NK search-root candidates
 # ---------------------------------------------------------------------------
 
+
 def _nk_search_roots_from_shot_root(shot_root: Path) -> List[Path]:
     """shot_root 하위에서 NK 파일을 찾아볼 디렉토리 목록을 반환한다."""
     roots: List[Path] = []
@@ -149,9 +154,8 @@ def _nk_search_roots_from_shot_root(shot_root: Path) -> List[Path]:
 # Core finder
 # ---------------------------------------------------------------------------
 
-def find_latest_nk_path(
-    shot_name: str, project_code: str, server_root: str
-) -> Optional[Path]:
+
+def find_latest_nk_path(shot_name: str, project_code: str, server_root: str) -> Optional[Path]:
     """샷 폴더 하위에서 최신 .nk 경로를 탐색한다.
 
     버전 접미사(v###)가 있으면 최대 버전, 없으면 mtime 기준.
@@ -206,18 +210,13 @@ def find_latest_nk_path(
         return None
 
     needle = sn.lower()
-    matched = [
-        p for p in nk_files
-        if needle in p.stem.lower() or needle in p.name.lower()
-    ]
+    matched = [p for p in nk_files if needle in p.stem.lower() or needle in p.name.lower()]
     pool = matched if matched else nk_files
 
     def _sort_key(p: Path) -> Tuple[int, float]:
         try:
             name_nums = [int(m.group(1)) for m in _NK_VERSION_RE.finditer(p.name)]
-            parent_nums = [
-                int(m.group(1)) for m in _NK_VERSION_RE.finditer(p.parent.name)
-            ]
+            parent_nums = [int(m.group(1)) for m in _NK_VERSION_RE.finditer(p.parent.name)]
             merged = name_nums + parent_nums
             vmax = max(merged) if merged else -1
             mt = os.path.getmtime(p)
@@ -232,9 +231,8 @@ def find_latest_nk_path(
 # Open in OS default app
 # ---------------------------------------------------------------------------
 
-def find_latest_nk_and_open(
-    shot_name: str, project_code: str, server_root: str
-) -> Optional[Path]:
+
+def find_latest_nk_and_open(shot_name: str, project_code: str, server_root: str) -> Optional[Path]:
     """최신 NK를 찾아 OS 기본 앱으로 연다. 읽기 전용 — 파일을 수정하지 않는다."""
     path = find_latest_nk_path(shot_name, project_code, server_root)
     if path is None:

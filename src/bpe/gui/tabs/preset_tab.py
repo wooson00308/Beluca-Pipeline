@@ -21,10 +21,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from bpe.core.presets import delete_preset, load_presets, upsert_preset
 from bpe.core.cache import load_colorspaces_cache, load_datatypes_cache, load_nuke_formats_cache
-from bpe.gui.widgets.search_combo import SearchComboBox
+from bpe.core.presets import delete_preset, load_presets, upsert_preset
 from bpe.gui import theme
+from bpe.gui.widgets.search_combo import SearchComboBox
 
 
 def _form_row(label_text: str, widget: QWidget) -> QHBoxLayout:
@@ -82,7 +82,9 @@ class PresetTab(QWidget):
 
         # Splitter: form | preset list
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setContentsMargins(theme.CONTENT_MARGIN, 16, theme.CONTENT_MARGIN, theme.CONTENT_MARGIN)
+        splitter.setContentsMargins(
+            theme.CONTENT_MARGIN, 16, theme.CONTENT_MARGIN, theme.CONTENT_MARGIN
+        )
 
         splitter.addWidget(self._build_form_column())
         splitter.addWidget(self._build_list_column())
@@ -188,15 +190,11 @@ class PresetTab(QWidget):
         layout.addLayout(_form_row("Compression", self._inputs["write_compression"]))
 
         self._inputs["write_metadata"] = QComboBox()
-        self._inputs["write_metadata"].addItems(
-            ["no metadata", "default metadata", "all metadata"]
-        )
+        self._inputs["write_metadata"].addItems(["no metadata", "default metadata", "all metadata"])
         layout.addLayout(_form_row("Metadata", self._inputs["write_metadata"]))
 
         self._inputs["write_transform_type"] = QComboBox()
-        self._inputs["write_transform_type"].addItems(
-            ["Colorspace", "Display/View"]
-        )
+        self._inputs["write_transform_type"].addItems(["Colorspace", "Display/View"])
         layout.addLayout(_form_row("Transform Type", self._inputs["write_transform_type"]))
 
         colorspaces_w = load_colorspaces_cache()
@@ -230,9 +228,7 @@ class PresetTab(QWidget):
         layout.setSpacing(12)
 
         lbl = QLabel("저장된 프리셋")
-        lbl.setStyleSheet(
-            f"color: {theme.TEXT}; font-size: 14px; font-weight: 600;"
-        )
+        lbl.setStyleSheet(f"color: {theme.TEXT}; font-size: 14px; font-weight: 600;")
         layout.addWidget(lbl)
 
         self._preset_list = QListWidget()

@@ -5,9 +5,9 @@ from __future__ import annotations
 import nuke
 
 from bpe.core.cache import (
-    save_nuke_formats_cache,
     save_colorspaces_cache,
     save_datatypes_cache,
+    save_nuke_formats_cache,
 )
 
 
@@ -31,12 +31,19 @@ def refresh_setup_pro_caches() -> None:
     datatypes = []
     try:
         colorspace_candidates = [
-            "colorspace", "colorSpace",
-            "OCIO_colorspace", "ocio_colorspace", "ocioColorSpace",
+            "colorspace",
+            "colorSpace",
+            "OCIO_colorspace",
+            "ocio_colorspace",
+            "ocioColorSpace",
         ]
         datatype_candidates = [
-            "datatype", "dataType", "data_type",
-            "bitdepth", "bitDepth", "bit_depth",
+            "datatype",
+            "dataType",
+            "data_type",
+            "bitdepth",
+            "bitDepth",
+            "bit_depth",
         ]
 
         for knob_name in colorspace_candidates:

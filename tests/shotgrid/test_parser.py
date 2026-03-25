@@ -6,7 +6,6 @@ import pytest
 
 from bpe.shotgrid.parser import parse_shot_code_from_filename, parse_version_name_from_filename
 
-
 # ── parse_shot_code_from_filename ────────────────────────────────────
 
 
@@ -52,12 +51,17 @@ class TestParseShotCode:
 
 
 class TestParseVersionName:
-
     def test_strips_extension(self) -> None:
-        assert parse_version_name_from_filename("E107_S022_0080_comp_v001.mov") == "E107_S022_0080_comp_v001"
+        assert (
+            parse_version_name_from_filename("E107_S022_0080_comp_v001.mov")
+            == "E107_S022_0080_comp_v001"
+        )
 
     def test_sequence_with_frame_number(self) -> None:
-        assert parse_version_name_from_filename("E107_S022_0080_comp_v001.1001.mov") == "E107_S022_0080_comp_v001.1001"
+        assert (
+            parse_version_name_from_filename("E107_S022_0080_comp_v001.1001.mov")
+            == "E107_S022_0080_comp_v001.1001"
+        )
 
     def test_no_extension(self) -> None:
         assert parse_version_name_from_filename("just_a_name") == "just_a_name"

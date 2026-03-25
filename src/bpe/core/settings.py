@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from bpe.core.atomic_io import read_json_file, write_json_file
 import bpe.core.config as cfg
+from bpe.core.atomic_io import read_json_file, write_json_file
 
 _DEFAULT_TOOLS: Dict[str, Any] = {
     "qc_checker": {"enabled": False},
@@ -19,9 +19,7 @@ def load_settings(settings_file: Optional[Path] = None) -> Dict[str, Any]:
     return read_json_file(settings_file or cfg.SETTINGS_FILE, default={})
 
 
-def save_settings(
-    data: Dict[str, Any], settings_file: Optional[Path] = None
-) -> None:
+def save_settings(data: Dict[str, Any], settings_file: Optional[Path] = None) -> None:
     """Save the entire settings.json atomically."""
     cfg.APP_DIR.mkdir(parents=True, exist_ok=True)
     write_json_file(settings_file or cfg.SETTINGS_FILE, data)
@@ -36,9 +34,7 @@ def get_presets_dir(settings_file: Optional[Path] = None) -> Path:
     return cfg.APP_DIR
 
 
-def set_presets_dir(
-    path_str: str, settings_file: Optional[Path] = None
-) -> None:
+def set_presets_dir(path_str: str, settings_file: Optional[Path] = None) -> None:
     """Set a custom presets directory. Preserves other settings keys."""
     path = Path(path_str).expanduser().resolve()
     path.mkdir(parents=True, exist_ok=True)
@@ -63,9 +59,7 @@ def get_tools_settings(settings_file: Optional[Path] = None) -> Dict[str, Any]:
     return merged
 
 
-def save_tools_settings(
-    tools_data: Dict[str, Any], settings_file: Optional[Path] = None
-) -> None:
+def save_tools_settings(tools_data: Dict[str, Any], settings_file: Optional[Path] = None) -> None:
     """Update only the 'tools' key in settings.json."""
     settings = load_settings(settings_file)
     settings["tools"] = tools_data

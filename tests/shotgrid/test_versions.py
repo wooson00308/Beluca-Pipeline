@@ -11,12 +11,10 @@ from bpe.shotgrid.errors import ShotGridError
 from bpe.shotgrid.versions import create_version, upload_movie_to_version
 from tests.shotgrid.mock_sg import MockShotgun
 
-
 # ── create_version ───────────────────────────────────────────────────
 
 
 class TestCreateVersion:
-
     def _sg(self) -> MockShotgun:
         sg = MockShotgun()
         sg._add_entity("Project", {"id": 100, "name": "TestProj"})
@@ -59,7 +57,6 @@ class TestCreateVersion:
 
 
 class TestUploadMovie:
-
     def test_missing_file_raises(self) -> None:
         sg = MockShotgun()
         with pytest.raises(ShotGridError, match="파일을 찾을 수 없습니다"):

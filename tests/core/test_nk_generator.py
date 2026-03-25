@@ -5,8 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 from bpe.core.nk_generator import (
     _find_blocks_with_positions,
     _generate_nk_minimal,
@@ -20,10 +18,10 @@ from bpe.core.nk_generator import (
     generate_nk_content,
 )
 
-
 # ---------------------------------------------------------------------------
 # Low-level helpers
 # ---------------------------------------------------------------------------
+
 
 class TestToNkPath:
     def test_backslash(self):
@@ -51,6 +49,7 @@ class TestNkEscapeQuotes:
 # _find_blocks_with_positions
 # ---------------------------------------------------------------------------
 
+
 class TestFindBlocks:
     def test_single(self):
         nk = "Write {\n name Write2\n}\n"
@@ -61,7 +60,7 @@ class TestFindBlocks:
         assert nk[start:end] == "Write {\n name Write2\n}"
 
     def test_nested(self):
-        nk = 'Root {\n format {1920 1080}\n}\n'
+        nk = "Root {\n format {1920 1080}\n}\n"
         blocks = _find_blocks_with_positions(nk, "Root")
         assert len(blocks) == 1
         assert "format {1920 1080}" in blocks[0][2]
@@ -77,6 +76,7 @@ class TestFindBlocks:
 # ---------------------------------------------------------------------------
 # _replace_knob_in_block
 # ---------------------------------------------------------------------------
+
 
 class TestReplaceKnob:
     def test_quoted(self):
@@ -104,6 +104,7 @@ class TestReplaceKnob:
 # Preset helpers
 # ---------------------------------------------------------------------------
 
+
 class TestPresetHelpers:
     def test_datatype_16bit(self):
         assert _preset_datatype_string({"write_datatype": "16 bit half"}) == "16 bit half"
@@ -127,6 +128,7 @@ class TestPresetHelpers:
 # ---------------------------------------------------------------------------
 # Patch functions
 # ---------------------------------------------------------------------------
+
 
 class TestPatchReadColorspace:
     def test_patches_read4(self):
@@ -153,6 +155,7 @@ class TestPatchViewerFps:
 # ---------------------------------------------------------------------------
 # generate_nk_content — minimal fallback
 # ---------------------------------------------------------------------------
+
 
 class TestGenerateNkMinimal:
     def test_contains_root_and_nodes(self):
@@ -189,9 +192,7 @@ class TestGenerateNkContent:
             patch("bpe.core.nk_generator.load_preset_template", return_value=None),
             patch("bpe.core.nk_generator.get_shot_node_template_path", return_value=None),
         ):
-            content, warnings = generate_nk_content(
-                preset, "E01_S01_0010", paths, "v001"
-            )
+            content, warnings = generate_nk_content(preset, "E01_S01_0010", paths, "v001")
         assert "Root {" in content
         assert len(warnings) == 1
         assert "최소 NK" in warnings[0]
@@ -225,9 +226,7 @@ class TestGenerateNkContent:
             "bpe.core.nk_generator.load_preset_template",
             return_value=template_body,
         ):
-            content, warnings = generate_nk_content(
-                preset, "E01_S01_0010", paths, "v001"
-            )
+            content, warnings = generate_nk_content(preset, "E01_S01_0010", paths, "v001")
         assert "fps 30" in content
         # Root override block should be present
         assert content.count("Root {") >= 2
@@ -237,10 +236,10 @@ class TestGenerateNkContent:
         template_body = (
             "set cut_paste_input [stack 0]\n"
             "version 14.1 v4\n"
-            f"Read {{\n"
-            f" file W:/vfx/project_2026/SBS_030/04_sq/E107/E107_S022_0080/plate/E107_S022_0080.exr\n"
-            f" name Read4\n"
-            f"}}\n"
+            "Read {\n"
+            " file W:/vfx/project_2026/SBS_030/04_sq/E107/E107_S022_0080/plate/E107_S022_0080.exr\n"
+            " name Read4\n"
+            "}\n"
         )
         paths = {
             "shot_root": Path("/new/shot/root"),
@@ -258,9 +257,7 @@ class TestGenerateNkContent:
             "bpe.core.nk_generator.load_preset_template",
             return_value=template_body,
         ):
-            content, _ = generate_nk_content(
-                preset, "NEW_SHOT", paths, "v001"
-            )
+            content, _ = generate_nk_content(preset, "NEW_SHOT", paths, "v001")
         assert "E107_S022_0080" not in content
         assert "NEW_SHOT" in content
         assert "/new/shot/root" in content

@@ -56,9 +56,7 @@ def find_shot_any_project(sg: Any, shot_code: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def list_shots_for_project(
-    sg: Any, project_id: int, limit: int = 800
-) -> List[Dict[str, Any]]:
+def list_shots_for_project(sg: Any, project_id: int, limit: int = 800) -> List[Dict[str, Any]]:
     return sg.find(
         "Shot",
         [["project", "is", {"type": "Project", "id": int(project_id)}]],

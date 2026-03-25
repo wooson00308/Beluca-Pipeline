@@ -10,9 +10,7 @@ from bpe.core.logging import get_logger
 logger = get_logger("shotgrid.users")
 
 
-def search_human_users(
-    sg: Any, query: str, limit: int = 15
-) -> List[Dict[str, Any]]:
+def search_human_users(sg: Any, query: str, limit: int = 15) -> List[Dict[str, Any]]:
     """Search HumanUsers by name or login (for artist autocomplete)."""
     q = (query or "").strip()
     if not q:

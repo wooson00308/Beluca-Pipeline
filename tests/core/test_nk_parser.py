@@ -13,10 +13,10 @@ from bpe.core.nk_parser import (
     parse_nk_file,
 )
 
-
 # ---------------------------------------------------------------------------
 # _get_knob
 # ---------------------------------------------------------------------------
+
 
 class TestGetKnob:
     def test_quoted(self):
@@ -36,6 +36,7 @@ class TestGetKnob:
 # _extract_all_blocks / _find_named_block
 # ---------------------------------------------------------------------------
 
+
 class TestBlockExtraction:
     def test_single_block(self):
         nk = "Root {\n fps 24\n}\n"
@@ -44,7 +45,7 @@ class TestBlockExtraction:
         assert "fps 24" in blocks[0]
 
     def test_nested_braces(self):
-        nk = 'Root {\n format {1920 1080}\n}\n'
+        nk = "Root {\n format {1920 1080}\n}\n"
         blocks = _extract_all_blocks(nk, "Root")
         assert len(blocks) == 1
         assert "format {1920 1080}" in blocks[0]
@@ -69,14 +70,10 @@ class TestBlockExtraction:
 # parse_nk_file — full integration
 # ---------------------------------------------------------------------------
 
+
 class TestParseNkFile:
     def test_root_fps_and_format(self, tmp_path: Path):
-        nk = (
-            'Root {\n'
-            ' fps 24\n'
-            ' format "3840 2160 0 0 3840 2160 1 UHD"\n'
-            '}\n'
-        )
+        nk = 'Root {\n fps 24\n format "3840 2160 0 0 3840 2160 1 UHD"\n}\n'
         p = tmp_path / "test.nk"
         p.write_text(nk, encoding="utf-8")
         result = parse_nk_file(str(p))
@@ -85,11 +82,7 @@ class TestParseNkFile:
         assert result["plate_height"] == "2160"
 
     def test_root_ocio(self, tmp_path: Path):
-        nk = (
-            'Root {\n'
-            ' customOCIOConfigPath "/path/to/config.ocio"\n'
-            '}\n'
-        )
+        nk = 'Root {\n customOCIOConfigPath "/path/to/config.ocio"\n}\n'
         p = tmp_path / "test.nk"
         p.write_text(nk, encoding="utf-8")
         result = parse_nk_file(str(p))
@@ -97,15 +90,15 @@ class TestParseNkFile:
 
     def test_write_exr_16bit(self, tmp_path: Path):
         nk = (
-            'Write {\n'
-            ' file_type exr\n'
-            ' channels rgba\n'
+            "Write {\n"
+            " file_type exr\n"
+            " channels rgba\n"
             ' datatype "16 bit half"\n'
             ' compression "PIZ Wavelet"\n'
             ' metadata "all metadata"\n'
             ' ocioColorspace "ACES - ACEScg"\n'
-            ' name Write2\n'
-            '}\n'
+            " name Write2\n"
+            "}\n"
         )
         p = tmp_path / "test.nk"
         p.write_text(nk, encoding="utf-8")
@@ -117,39 +110,21 @@ class TestParseNkFile:
         assert result["write_transform_type"] == "colorspace"
 
     def test_write_exr_32bit(self, tmp_path: Path):
-        nk = (
-            'Write {\n'
-            ' file_type exr\n'
-            ' datatype "32 bit float"\n'
-            ' name Write2\n'
-            '}\n'
-        )
+        nk = 'Write {\n file_type exr\n datatype "32 bit float"\n name Write2\n}\n'
         p = tmp_path / "test.nk"
         p.write_text(nk, encoding="utf-8")
         result = parse_nk_file(str(p))
         assert result["delivery_format"] == "EXR 32bit"
 
     def test_write_mov(self, tmp_path: Path):
-        nk = (
-            'Write {\n'
-            ' file_type mov\n'
-            ' name Write2\n'
-            '}\n'
-        )
+        nk = "Write {\n file_type mov\n name Write2\n}\n"
         p = tmp_path / "test.nk"
         p.write_text(nk, encoding="utf-8")
         result = parse_nk_file(str(p))
         assert result["delivery_format"] == "ProRes 422 HQ"
 
     def test_write_display_view(self, tmp_path: Path):
-        nk = (
-            'Write {\n'
-            ' file_type exr\n'
-            ' display ACES\n'
-            ' view "Rec.709"\n'
-            ' name Write2\n'
-            '}\n'
-        )
+        nk = 'Write {\n file_type exr\n display ACES\n view "Rec.709"\n name Write2\n}\n'
         p = tmp_path / "test.nk"
         p.write_text(nk, encoding="utf-8")
         result = parse_nk_file(str(p))
@@ -158,12 +133,7 @@ class TestParseNkFile:
         assert result["write_transform_type"] == "display/view"
 
     def test_read_colorspace(self, tmp_path: Path):
-        nk = (
-            'Read {\n'
-            ' colorspace "ACES - ACES2065-1"\n'
-            ' name Read4\n'
-            '}\n'
-        )
+        nk = 'Read {\n colorspace "ACES - ACES2065-1"\n name Read4\n}\n'
         p = tmp_path / "test.nk"
         p.write_text(nk, encoding="utf-8")
         result = parse_nk_file(str(p))
@@ -171,12 +141,7 @@ class TestParseNkFile:
 
     def test_read_fallback_to_first(self, tmp_path: Path):
         """When no named Read is found, falls back to first Read block."""
-        nk = (
-            'Read {\n'
-            ' colorspace "sRGB"\n'
-            ' name SomeOtherRead\n'
-            '}\n'
-        )
+        nk = 'Read {\n colorspace "sRGB"\n name SomeOtherRead\n}\n'
         p = tmp_path / "test.nk"
         p.write_text(nk, encoding="utf-8")
         result = parse_nk_file(str(p))
@@ -185,31 +150,31 @@ class TestParseNkFile:
     def test_full_nk(self, tmp_path: Path):
         """Parse a realistic NK with Root + Read + Write."""
         nk = (
-            'set cut_paste_input [stack 0]\n'
-            'version 14.1 v4\n'
-            'Root {\n'
-            ' inputs 0\n'
-            ' fps 23.976\n'
+            "set cut_paste_input [stack 0]\n"
+            "version 14.1 v4\n"
+            "Root {\n"
+            " inputs 0\n"
+            " fps 23.976\n"
             ' format "3840 2076 0 0 3840 2076 1 plate"\n'
-            ' colorManagement OCIO\n'
-            ' OCIO_config custom\n'
+            " colorManagement OCIO\n"
+            " OCIO_config custom\n"
             ' customOCIOConfigPath "/mnt/ocio/config.ocio"\n'
-            '}\n'
-            'Read {\n'
-            ' inputs 0\n'
-            ' file_type exr\n'
+            "}\n"
+            "Read {\n"
+            " inputs 0\n"
+            " file_type exr\n"
             ' colorspace "ACES - ACES2065-1"\n'
-            ' name Read4\n'
-            '}\n'
-            'Write {\n'
-            ' file_type exr\n'
-            ' channels rgba\n'
+            " name Read4\n"
+            "}\n"
+            "Write {\n"
+            " file_type exr\n"
+            " channels rgba\n"
             ' datatype "16 bit half"\n'
             ' compression "PIZ Wavelet (32 scanlines)"\n'
             ' metadata "all metadata"\n'
             ' colorspace "ACES - ACEScg"\n'
-            ' name Write2\n'
-            '}\n'
+            " name Write2\n"
+            "}\n"
         )
         p = tmp_path / "test.nk"
         p.write_text(nk, encoding="utf-8")
@@ -233,7 +198,7 @@ class TestParseNkFile:
 
     def test_braced_format(self, tmp_path: Path):
         """Root format in {value} notation."""
-        nk = 'Root {\n format {1920 1080 0 0 1920 1080 1 HD}\n}\n'
+        nk = "Root {\n format {1920 1080 0 0 1920 1080 1 HD}\n}\n"
         p = tmp_path / "test.nk"
         p.write_text(nk, encoding="utf-8")
         result = parse_nk_file(str(p))

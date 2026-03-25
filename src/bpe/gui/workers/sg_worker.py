@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QThread, Signal
 
@@ -10,9 +10,9 @@ from PySide6.QtCore import QThread, Signal
 class ShotGridWorker(QThread):
     """Run any callable in a background thread, emitting signals on completion."""
 
-    finished = Signal(object)   # result value
-    error = Signal(str)         # error message
-    progress = Signal(float)    # 0.0 ~ 1.0
+    finished = Signal(object)  # result value
+    error = Signal(str)  # error message
+    progress = Signal(float)  # 0.0 ~ 1.0
 
     def __init__(
         self,

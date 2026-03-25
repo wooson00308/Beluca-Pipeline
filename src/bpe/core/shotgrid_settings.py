@@ -129,9 +129,7 @@ def get_shotgrid_settings(settings_file: Optional[Path] = None) -> Dict[str, Any
     return merged
 
 
-def save_shotgrid_settings(
-    partial: Dict[str, Any], settings_file: Optional[Path] = None
-) -> None:
+def save_shotgrid_settings(partial: Dict[str, Any], settings_file: Optional[Path] = None) -> None:
     """Merge-save only the given keys into settings.json 'shotgrid' section."""
     settings = load_settings(settings_file)
     cur = settings.get("shotgrid")

@@ -20,13 +20,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from bpe.core.nk_finder import find_latest_nk_and_open
 from bpe.gui.theme import ACCENT, BORDER
 from bpe.gui.workers.sg_worker import ShotGridWorker
 from bpe.shotgrid.client import get_default_sg
 from bpe.shotgrid.projects import list_active_projects
 from bpe.shotgrid.tasks import list_comp_tasks_for_project_user
 from bpe.shotgrid.users import guess_human_user_for_me, search_human_users
-from bpe.core.nk_finder import find_latest_nk_and_open
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +102,7 @@ class _ShotCard(QFrame):
         if not shot_code or not project_code:
             return
         import os
+
         server_root = os.environ.get("BPE_SERVER_ROOT", "")
         try:
             find_latest_nk_and_open(shot_code, project_code, server_root)
@@ -110,7 +111,8 @@ class _ShotCard(QFrame):
 
     def set_thumbnail(self, pixmap: QPixmap) -> None:
         scaled = pixmap.scaled(
-            _THUMB_W, _THUMB_H,
+            _THUMB_W,
+            _THUMB_H,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
@@ -177,9 +179,7 @@ class MyTasksTab(QWidget):
         self._user_edit = QLineEdit()
         self._user_edit.setPlaceholderText("이름 입력 후 선택")
         self._user_edit.setMaximumWidth(170)
-        self._user_edit.textChanged.connect(
-            lambda: self._user_timer.start(_AUTOCOMPLETE_DELAY)
-        )
+        self._user_edit.textChanged.connect(lambda: self._user_timer.start(_AUTOCOMPLETE_DELAY))
         filter_row.addWidget(self._user_edit)
 
         self._user_combo = QComboBox()
@@ -393,6 +393,7 @@ class MyTasksTab(QWidget):
 
         def _download() -> Optional[bytes]:
             import urllib.request
+
             try:
                 with urllib.request.urlopen(img_url, timeout=10) as resp:
                     return resp.read()

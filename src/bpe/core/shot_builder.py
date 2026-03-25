@@ -36,9 +36,7 @@ def build_shot_paths(
     parsed = parse_shot_name(shot_name)
     if not parsed:
         return None
-    shot_root = (
-        Path(server_root) / project_code / "04_sq" / parsed["ep"] / parsed["full"]
-    )
+    shot_root = Path(server_root) / project_code / "04_sq" / parsed["ep"] / parsed["full"]
     nuke_dir = shot_root / "comp" / "devl" / "nuke"
     return {
         "shot_root": shot_root,

@@ -7,18 +7,18 @@ import os
 import nuke
 import nukescripts
 
-from bpe.core.presets import load_presets
 from bpe.core.cache import (
-    load_nuke_formats_cache,
     load_colorspaces_cache,
     load_datatypes_cache,
+    load_nuke_formats_cache,
 )
+from bpe.core.presets import load_presets
 from bpe.nuke_plugin.cache_writer import refresh_setup_pro_caches
-
 
 # ──────────────────────────────────────────────────────────────────────
 # 유틸리티
 # ──────────────────────────────────────────────────────────────────────
+
 
 def _set_knob_if_exists(node, knob_name: str, value) -> bool:
     """존재하는 knob에만 안전하게 setValue. 불일치 시 경고 로그."""
@@ -29,7 +29,9 @@ def _set_knob_if_exists(node, knob_name: str, value) -> bool:
         knob.setValue(value)
         applied = knob.value()
         if applied != value:
-            nuke.tprint(f"[setup_pro] 경고: {knob_name} 값 불일치 — 기대={value!r}, 실제={applied!r}")
+            nuke.tprint(
+                f"[setup_pro] 경고: {knob_name} 값 불일치 — 기대={value!r}, 실제={applied!r}"
+            )
     except Exception as e:
         nuke.tprint(f"[setup_pro] {knob_name} setValue 실패: {e}")
         return False
@@ -133,6 +135,7 @@ def _set_enum_with_aliases(node, knob_candidates, selected_value: str, alias_map
 # Root 설정
 # ──────────────────────────────────────────────────────────────────────
 
+
 def _apply_root_settings(preset_name: str, data: dict) -> None:
     """Root 노드에 fps, format, OCIO 설정을 적용한다."""
     root = nuke.root()
@@ -175,6 +178,7 @@ def _apply_root_settings(preset_name: str, data: dict) -> None:
 # Write 노드 — 납품 포맷 적용
 # ──────────────────────────────────────────────────────────────────────
 
+
 def _apply_delivery_format_to_write(write, delivery_format: str) -> str:
     """Write 노드에 납품 포맷(EXR/ProRes/DNx/H264)을 반영한다."""
     delivery_format = (delivery_format or "").strip()
@@ -190,9 +194,18 @@ def _apply_delivery_format_to_write(write, delivery_format: str) -> str:
 
     file_type_candidates = ["file_type", "fileType", "file_format", "fileFormat"]
     codec_candidates = [
-        "mov64_codec", "mov_codec", "mov64Codec", "codec",
-        "h264_codec", "h264Codec", "avc_codec", "avcCodec",
-        "mp4_codec", "mp4Codec", "video_codec", "videoCodec",
+        "mov64_codec",
+        "mov_codec",
+        "mov64Codec",
+        "codec",
+        "h264_codec",
+        "h264Codec",
+        "avc_codec",
+        "avcCodec",
+        "mp4_codec",
+        "mp4Codec",
+        "video_codec",
+        "videoCodec",
     ]
     applied_any = False
 
@@ -300,6 +313,7 @@ def _apply_delivery_format_to_write(write, delivery_format: str) -> str:
 # Write 노드 생성/재사용 + 세부 설정
 # ──────────────────────────────────────────────────────────────────────
 
+
 def _find_or_create_setup_pro_write() -> tuple:
     """setup_pro 전용 Write 노드를 재사용하고, 없으면 새로 만든다."""
     for n in nuke.allNodes("Write"):
@@ -364,7 +378,10 @@ def _create_write_node_with_settings(data: dict) -> str:
     metadata_value = str(data.get("write_metadata", "") or "").strip()
 
     ok, kname, applied = _set_enum_with_aliases(
-        write, ["channels", "channel"], channels_value, {},
+        write,
+        ["channels", "channel"],
+        channels_value,
+        {},
     )
     lines.append(
         f"- channels: {kname} = {applied}" if ok else f"- channels 적용 실패: {channels_value}"
@@ -398,10 +415,14 @@ def _create_write_node_with_settings(data: dict) -> str:
         "DWAB (lossy)": ["dwab"],
     }
     ok, kname, applied = _set_enum_with_aliases(
-        write, ["compression", "compress"], compression_value, compression_alias,
+        write,
+        ["compression", "compress"],
+        compression_value,
+        compression_alias,
     )
     lines.append(
-        f"- compression: {kname} = {applied}" if ok
+        f"- compression: {kname} = {applied}"
+        if ok
         else f"- compression 적용 실패: {compression_value}"
     )
 
@@ -412,7 +433,10 @@ def _create_write_node_with_settings(data: dict) -> str:
         "no metadata except input/time": ["no metadata except input/time"],
     }
     ok, kname, applied = _set_enum_with_aliases(
-        write, ["metadata"], metadata_value, metadata_alias,
+        write,
+        ["metadata"],
+        metadata_value,
+        metadata_alias,
     )
     lines.append(
         f"- metadata: {kname} = {applied}" if ok else f"- metadata 적용 실패: {metadata_value}"
@@ -432,9 +456,7 @@ def _create_write_node_with_settings(data: dict) -> str:
     output_display = str(
         data.get("write_output_display", data.get("output_display", "")) or ""
     ).strip()
-    output_view = str(
-        data.get("write_output_view", data.get("output_view", "")) or ""
-    ).strip()
+    output_view = str(data.get("write_output_view", data.get("output_view", "")) or "").strip()
 
     transform_alias = {
         "off": ["off", "none", "disabled"],
@@ -450,7 +472,8 @@ def _create_write_node_with_settings(data: dict) -> str:
     )
     if transform_type:
         lines.append(
-            f"- transform type: {k_t} = {v_t}" if ok_t
+            f"- transform type: {k_t} = {v_t}"
+            if ok_t
             else f"- transform type 적용 실패: {transform_type}"
         )
 
@@ -459,29 +482,38 @@ def _create_write_node_with_settings(data: dict) -> str:
         ok_c, k_c, v_c = _set_enum_with_aliases(
             write,
             [
-                "out_colorspace", "output_transform", "output_colorspace",
-                "colorspace", "OCIO_colorspace", "ocio_colorspace",
+                "out_colorspace",
+                "output_transform",
+                "output_colorspace",
+                "colorspace",
+                "OCIO_colorspace",
+                "ocio_colorspace",
             ],
             out_colorspace,
             {},
         )
         lines.append(
-            f"- output transform: {k_c} = {v_c}" if ok_c
+            f"- output transform: {k_c} = {v_c}"
+            if ok_c
             else f"- output transform 적용 실패: {out_colorspace}"
         )
     elif t_norm == "display/view":
         ok_d, k_d, v_d = _set_enum_with_aliases(
-            write, ["output_display", "display"], output_display, {},
+            write,
+            ["output_display", "display"],
+            output_display,
+            {},
         )
         ok_v, k_v, v_v = _set_enum_with_aliases(
-            write, ["output_view", "view"], output_view, {},
+            write,
+            ["output_view", "view"],
+            output_view,
+            {},
         )
         lines.append(
             f"- display: {k_d} = {v_d}" if ok_d else f"- display 적용 실패: {output_display}"
         )
-        lines.append(
-            f"- view: {k_v} = {v_v}" if ok_v else f"- view 적용 실패: {output_view}"
-        )
+        lines.append(f"- view: {k_v} = {v_v}" if ok_v else f"- view 적용 실패: {output_view}")
 
     return "\n".join(lines)
 
@@ -489,6 +521,7 @@ def _create_write_node_with_settings(data: dict) -> str:
 # ──────────────────────────────────────────────────────────────────────
 # 메인 API
 # ──────────────────────────────────────────────────────────────────────
+
 
 def apply_preset(preset_name: str) -> None:
     """프리셋을 Root + Write에 한번에 적용한다."""
@@ -539,7 +572,8 @@ def open_setup_pro_panel() -> None:
 
     panel = nukescripts.PythonPanel("BPE — 프리셋 적용")
     hint_top = nuke.Text_Knob(
-        "_hint_top", "",
+        "_hint_top",
+        "",
         "적용할 프로젝트 프리셋을 선택하고 OK를 누르세요.\n"
         "선택하면 Nuke Root 설정(FPS·해상도·OCIO)과 Write 노드가 자동으로 세팅됩니다.",
     )

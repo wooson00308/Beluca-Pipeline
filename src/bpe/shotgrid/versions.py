@@ -32,6 +32,7 @@ def _path_is_likely_network(path: str) -> bool:
         return p.startswith("//")
     try:
         import ctypes
+
         drive = Path(p).drive
         if not drive:
             return False
@@ -97,9 +98,9 @@ def create_version(
         raise ShotGridError("Version Name이 비어 있습니다.")
 
     data: Dict[str, Any] = {
-        "project":     {"type": "Project", "id": int(project_id)},
-        "entity":      {"type": "Shot",    "id": int(shot_id)},
-        "code":        version_name,
+        "project": {"type": "Project", "id": int(project_id)},
+        "entity": {"type": "Shot", "id": int(shot_id)},
+        "code": version_name,
         "description": (description or "").strip(),
     }
     if task_id is not None:
@@ -144,7 +145,9 @@ def upload_movie_to_version(
 
     logger.debug(
         "upload_movie_to_version: version_id=%d size=%d stage_local=%s",
-        version_id, file_size, stage_local,
+        version_id,
+        file_size,
+        stage_local,
     )
 
     _overall(0.02)
@@ -190,9 +193,7 @@ def upload_movie_to_version(
         for attempt_idx in range(1, upload_rounds + 1):
             try:
                 logger.debug("sg.upload attempt %d/%d", attempt_idx, upload_rounds)
-                _up_ret = sg.upload(
-                    "Version", int(version_id), upload_src, "sg_uploaded_movie"
-                )
+                _up_ret = sg.upload("Version", int(version_id), upload_src, "sg_uploaded_movie")
                 try:
                     attach_id = int(_up_ret) if _up_ret is not None else None
                 except (TypeError, ValueError):
@@ -211,7 +212,10 @@ def upload_movie_to_version(
                 )
                 logger.warning(
                     "upload round %d/%d failed: %s (retryable=%s)",
-                    attempt_idx, upload_rounds, type(round_e).__name__, retryable,
+                    attempt_idx,
+                    upload_rounds,
+                    type(round_e).__name__,
+                    retryable,
                 )
                 if not retryable or attempt_idx >= upload_rounds:
                     raise
@@ -246,11 +250,7 @@ def upload_movie_to_version(
             raise
         err_lower = str(e).lower()
         err_s = str(e)
-        if (
-            "timed out" in err_lower
-            or "timeout" in err_lower
-            or "max attempts" in err_lower
-        ):
+        if "timed out" in err_lower or "timeout" in err_lower or "max attempts" in err_lower:
             raise ShotGridError(
                 "S3 클라우드 스토리지 업로드 타임아웃(또는 재시도 한도 초과)입니다.\n"
                 "• 회사 방화벽이 ShotGrid S3 엔드포인트를 차단할 수 있습니다. IT에 확인해 보세요.\n"
@@ -294,9 +294,12 @@ def _extract_first_frame(
             [
                 ffmpeg_bin,
                 "-y",
-                "-i", movie_path,
-                "-vframes", "1",
-                "-q:v", "2",
+                "-i",
+                movie_path,
+                "-vframes",
+                "1",
+                "-q:v",
+                "2",
                 dest_path,
             ],
             stdout=_sp.DEVNULL,

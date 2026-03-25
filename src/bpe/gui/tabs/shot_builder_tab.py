@@ -22,10 +22,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from bpe.core.shot_builder import build_shot_paths, parse_shot_name
 from bpe.core.nk_generator import generate_nk_content
 from bpe.core.presets import load_presets
 from bpe.core.settings import get_shot_builder_settings, save_shot_builder_settings
+from bpe.core.shot_builder import build_shot_paths, parse_shot_name
 
 
 def _form_row(label_text: str, widget: QWidget) -> QHBoxLayout:
@@ -94,9 +94,7 @@ class ShotBuilderTab(QWidget):
         form.addLayout(_form_row("서버 루트 경로", srv_input))
 
         # Server root hint (dim, indented past label)
-        hint = QLabel(
-            "프로젝트 폴더들이 모여 있는 바로 위 폴더까지만 입력합니다."
-        )
+        hint = QLabel("프로젝트 폴더들이 모여 있는 바로 위 폴더까지만 입력합니다.")
         hint.setProperty("dim", True)
         hint.setWordWrap(True)
         hint.setContentsMargins(132, 0, 0, 0)
@@ -130,9 +128,7 @@ class ShotBuilderTab(QWidget):
         preview_title_lbl = QLabel("경로 미리보기")
         preview_title_lbl.setObjectName("form_label")
         preview_title_lbl.setFixedWidth(120)
-        preview_title_lbl.setAlignment(
-            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
-        )
+        preview_title_lbl.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
 
         self._path_preview_container = QVBoxLayout()
         self._path_preview_container.setSpacing(4)
@@ -203,10 +199,12 @@ class ShotBuilderTab(QWidget):
                 self._preset_combo.setCurrentIndex(idx)
 
     def _save_settings(self) -> None:
-        save_shot_builder_settings({
-            "server_root": self._server_root_edit.text().strip(),
-            "preset": self._preset_combo.currentText(),
-        })
+        save_shot_builder_settings(
+            {
+                "server_root": self._server_root_edit.text().strip(),
+                "preset": self._preset_combo.currentText(),
+            }
+        )
 
     def _clear_path_preview(self) -> None:
         while self._path_preview_container.count():
@@ -222,9 +220,7 @@ class ShotBuilderTab(QWidget):
             lbl = QLabel(line)
             lbl.setProperty("dim", True)
             lbl.setWordWrap(True)
-            lbl.setTextInteractionFlags(
-                Qt.TextInteractionFlag.TextSelectableByMouse
-            )
+            lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             self._path_preview_container.addWidget(lbl)
 
     # ── Slots ─────────────────────────────────────────────────────
@@ -259,9 +255,7 @@ class ShotBuilderTab(QWidget):
             return
 
         self._last_paths = paths
-        self._set_path_preview_lines(
-            [f"{key}: {val}" for key, val in paths.items()]
-        )
+        self._set_path_preview_lines([f"{key}: {val}" for key, val in paths.items()])
 
     def _create_nk(self) -> None:
         self._log.clear()
@@ -297,9 +291,7 @@ class ShotBuilderTab(QWidget):
             return
 
         nk_version = f"v{self._nk_version_spin.value():03d}"
-        nk_content, warnings = generate_nk_content(
-            preset_data, shot_name, paths, nk_version
-        )
+        nk_content, warnings = generate_nk_content(preset_data, shot_name, paths, nk_version)
 
         # Ensure directories exist
         nuke_dir = paths["nuke_dir"]

@@ -15,7 +15,7 @@ def _get_knob(text: str, knob: str) -> Optional[str]:
     m = re.search(rf'(?:^|\s){re.escape(knob)} "([^"]*)"', text, re.MULTILINE)
     if m:
         return m.group(1)
-    m = re.search(rf'(?:^|\s){re.escape(knob)} \{{([^}}]*)\}}', text, re.MULTILINE)
+    m = re.search(rf"(?:^|\s){re.escape(knob)} \{{([^}}]*)\}}", text, re.MULTILINE)
     if m:
         return m.group(1)
     m = re.search(rf'(?:^|\s){re.escape(knob)} ([^\s"{{][^\s]*)', text, re.MULTILINE)
@@ -27,7 +27,7 @@ def _get_knob(text: str, knob: str) -> Optional[str]:
 def _extract_all_blocks(content: str, node_type: str) -> List[str]:
     """Extract inner text of all blocks of *node_type* tracking nested ``{}``."""
     blocks: List[str] = []
-    pattern = re.compile(rf'(?:^|\n){re.escape(node_type)} \{{', re.MULTILINE)
+    pattern = re.compile(rf"(?:^|\n){re.escape(node_type)} \{{", re.MULTILINE)
     for m in pattern.finditer(content):
         start = m.end()
         depth = 1
@@ -44,13 +44,9 @@ def _extract_all_blocks(content: str, node_type: str) -> List[str]:
     return blocks
 
 
-def _find_named_block(
-    content: str, node_type: str, node_name: str
-) -> Optional[str]:
+def _find_named_block(content: str, node_type: str, node_name: str) -> Optional[str]:
     """Return the inner text of the first block whose ``name`` knob matches."""
-    name_re = re.compile(
-        rf'(?:^|\s)name {re.escape(node_name)}\s*(?:\n|$)', re.MULTILINE
-    )
+    name_re = re.compile(rf"(?:^|\s)name {re.escape(node_name)}\s*(?:\n|$)", re.MULTILINE)
     for block in _extract_all_blocks(content, node_type):
         if name_re.search(block):
             return block
@@ -83,7 +79,7 @@ def parse_nk_file(nk_path: str) -> Dict[str, Any]:
         fps = _get_knob(rb, "fps")
         if fps:
             result["fps"] = fps
-        for pat in (r'format "(\d+) (\d+)', r'format \{(\d+) (\d+)'):
+        for pat in (r'format "(\d+) (\d+)', r"format \{(\d+) (\d+)"):
             fmt_m = re.search(pat, rb)
             if fmt_m:
                 result["plate_width"] = fmt_m.group(1)
@@ -94,9 +90,8 @@ def parse_nk_file(nk_path: str) -> Dict[str, Any]:
             result["ocio_path"] = ocio.replace("\\\\", "\\").strip()
 
     # --- Write block ---
-    wb = (
-        _find_named_block(content, "Write", "Write2")
-        or _find_named_block(content, "Write", "setup_pro_write")
+    wb = _find_named_block(content, "Write", "Write2") or _find_named_block(
+        content, "Write", "setup_pro_write"
     )
     if not wb:
         all_writes = _extract_all_blocks(content, "Write")

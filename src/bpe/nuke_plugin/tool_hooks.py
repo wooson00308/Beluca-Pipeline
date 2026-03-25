@@ -8,14 +8,14 @@ import re
 import nuke
 import nukescripts
 
+import bpe.core.config as cfg
 from bpe.core.presets import load_presets
 from bpe.core.settings import get_tools_settings
-import bpe.core.config as cfg
-
 
 # ══════════════════════════════════════════════════════════════════════
 # 공용 유틸리티
 # ══════════════════════════════════════════════════════════════════════
+
 
 def _knob_value_safe(node, *knob_candidates) -> str:
     """여러 후보 knob 이름 중 첫 번째로 값을 가진 것을 반환한다."""
@@ -102,17 +102,26 @@ def collect_qc_data(write_node) -> dict:
         data["format_name"] = "?"
 
     data["ocio_path"] = _knob_value_safe(
-        root, "customOCIOConfigPath", "OCIO_config", "ocioConfigPath",
+        root,
+        "customOCIOConfigPath",
+        "OCIO_config",
+        "ocioConfigPath",
     )
 
     # Write 정보
     data["write_name"] = write_node.name()
     data["write_file"] = _knob_value_safe(write_node, "file")
     data["write_colorspace"] = _knob_value_safe(
-        write_node, "ocioColorspace", "colorspace", "colorSpace",
+        write_node,
+        "ocioColorspace",
+        "colorspace",
+        "colorSpace",
     )
     data["write_file_type"] = _knob_value_safe(
-        write_node, "file_type", "fileType", "file_format",
+        write_node,
+        "file_type",
+        "fileType",
+        "file_format",
     )
 
     try:
@@ -126,11 +135,13 @@ def collect_qc_data(write_node) -> dict:
     all_reads = _find_upstream_reads(write_node)
 
     plate_reads = [
-        r for r in all_reads
+        r
+        for r in all_reads
         if any(k in _knob_value_safe(r, "file").lower() for k in ("plate", "/org/", "\\org\\"))
     ]
     edit_reads = [
-        r for r in all_reads
+        r
+        for r in all_reads
         if any(k in _knob_value_safe(r, "file").lower() for k in ("edit", "/edit/", "\\edit\\"))
     ]
 
@@ -209,7 +220,8 @@ def _show_qc_dialog(qc_data: dict) -> bool:
 
     # FPS
     _add(
-        "FPS", qc_data.get("fps"),
+        "FPS",
+        qc_data.get("fps"),
         expected=preset_data.get("fps") if preset_data else None,
     )
 
@@ -239,7 +251,8 @@ def _show_qc_dialog(qc_data: dict) -> bool:
 
     # Write colorspace
     _add(
-        "Write 컬러스페이스", qc_data.get("write_colorspace"),
+        "Write 컬러스페이스",
+        qc_data.get("write_colorspace"),
         expected=preset_data.get("write_out_colorspace") if preset_data else None,
     )
 
@@ -249,7 +262,8 @@ def _show_qc_dialog(qc_data: dict) -> bool:
     # 플레이트 colorspace
     if qc_data.get("plate_colorspace") is not None:
         _add(
-            "플레이트 컬러스페이스", qc_data.get("plate_colorspace"),
+            "플레이트 컬러스페이스",
+            qc_data.get("plate_colorspace"),
             expected=preset_data.get("read_input_transform") if preset_data else None,
         )
     else:
@@ -263,8 +277,7 @@ def _show_qc_dialog(qc_data: dict) -> bool:
         icon = "OK" if match else "!!"
         note = "일치" if match else f"  <- 불일치! (편집본 {edit_f}f)"
         lines.append(
-            ("ok" if match else "warn",
-             f"[{icon}]  {'플레이트 길이':<22} {plate_f}f{note}")
+            ("ok" if match else "warn", f"[{icon}]  {'플레이트 길이':<22} {plate_f}f{note}")
         )
     elif plate_f is not None:
         lines.append(("ok", f"[OK]  {'플레이트 길이':<22} {plate_f}f"))
@@ -281,12 +294,10 @@ def _show_qc_dialog(qc_data: dict) -> bool:
     title_shot = f"  {shot_name}" if shot_name else ""
     header = f"BPE QC Checker{title_shot}\n{separator}\n"
     body_text = "\n".join(txt for _, txt in lines)
-    footer = (
-        f"\n{separator}\n"
-        + (
-            "!!  불일치 항목이 있습니다. 그대로 렌더하시겠습니까?" if has_warn
-            else "OK  모든 항목이 프리셋과 일치합니다."
-        )
+    footer = f"\n{separator}\n" + (
+        "!!  불일치 항목이 있습니다. 그대로 렌더하시겠습니까?"
+        if has_warn
+        else "OK  모든 항목이 프리셋과 일치합니다."
     )
 
     full_text = header + body_text + footer
@@ -317,7 +328,9 @@ def _show_qc_panel_modal(full_text: str) -> bool:
     panel.addKnob(text_knob)
 
     hint_knob = nuke.Text_Knob(
-        "_hint", "", "<b>OK</b> -> 렌더 진행   /   <b>Cancel</b> -> 취소",
+        "_hint",
+        "",
+        "<b>OK</b> -> 렌더 진행   /   <b>Cancel</b> -> 취소",
     )
     panel.addKnob(hint_knob)
 
@@ -379,14 +392,13 @@ def bpe_qc_before_render():
             nuke.tprint(f"[BPE QC Checker] 렌더 실행 오류: {e}")
 
     nuke.executeDeferred(_deferred_qc_and_render)
-    raise RuntimeError(
-        "[BPE] QC Checker 다이얼로그를 표시합니다. 확인 후 렌더가 재시작됩니다."
-    )
+    raise RuntimeError("[BPE] QC Checker 다이얼로그를 표시합니다. 확인 후 렌더가 재시작됩니다.")
 
 
 # ══════════════════════════════════════════════════════════════════════
 # POST-RENDER VIEWER
 # ══════════════════════════════════════════════════════════════════════
+
 
 def _bpe_output_media_kind(out_path: str, write) -> str:
     """렌더 출력이 EXR 시퀀스 / 무비 / 기타인지 추정한다."""
@@ -462,18 +474,26 @@ def _bpe_plate_colorspace_from_write(write) -> str:
     except Exception:
         return ""
     plate_reads = [
-        r for r in all_reads
+        r
+        for r in all_reads
         if any(k in _knob_value_safe(r, "file").lower() for k in ("plate", "/org/", "\\org\\"))
     ]
     if not plate_reads:
         return ""
     return _knob_value_safe(
-        plate_reads[0], "colorspace", "colorSpace", "OCIO_colorspace", "ocio_colorspace",
+        plate_reads[0],
+        "colorspace",
+        "colorSpace",
+        "OCIO_colorspace",
+        "ocio_colorspace",
     )
 
 
 def _bpe_configure_read_from_write(
-    read, write, out_file: str, plate_colorspace: str = "",
+    read,
+    write,
+    out_file: str,
+    plate_colorspace: str = "",
 ) -> None:
     """Write 출력 형식에 맞춰 Read의 file_type/colorspace를 설정한다."""
     kind = _bpe_output_media_kind(out_file, write)
@@ -481,13 +501,17 @@ def _bpe_configure_read_from_write(
 
     # file_type
     if kind == "exr":
-        _bpe_safe_set_read_enum(read, ("file_type", "fileType"), ["exr", "openexr", "EXR", "OpenEXR"])
+        _bpe_safe_set_read_enum(
+            read, ("file_type", "fileType"), ["exr", "openexr", "EXR", "OpenEXR"]
+        )
     elif kind == "movie":
         if ".mp4" in p:
             _bpe_safe_set_read_enum(read, ("file_type", "fileType"), ["mp4", "mpeg4", "MP4"])
         else:
             _bpe_safe_set_read_enum(
-                read, ("file_type", "fileType"), ["mov", "quicktime", "MOV", "mp4"],
+                read,
+                ("file_type", "fileType"),
+                ["mov", "quicktime", "MOV", "mp4"],
             )
 
     # colorspace
@@ -495,7 +519,10 @@ def _bpe_configure_read_from_write(
     w_ocio = _knob_value_safe(write, "ocioColorspace", "OCIO_colorspace", "ocio_colorspace")
     w_cs = _knob_value_safe(write, "colorspace", "colorSpace")
     tt = _knob_value_safe(
-        write, "colorspace_transform", "transform_type", "transformType",
+        write,
+        "colorspace_transform",
+        "transform_type",
+        "transformType",
     ).lower()
 
     candidates = []
@@ -517,9 +544,15 @@ def _bpe_configure_read_from_write(
 
     if "display" in tt or "view" in tt:
         extra = [
-            plate_cs, w_ocio, w_cs,
-            "default", "Output - Rec.709", "sRGB", "rec709",
-            "scene_linear", "compositing_linear",
+            plate_cs,
+            w_ocio,
+            w_cs,
+            "default",
+            "Output - Rec.709",
+            "sRGB",
+            "rec709",
+            "scene_linear",
+            "compositing_linear",
         ]
         seen_cs: set = set()
         candidates = [c for c in extra if c and (c not in seen_cs and not seen_cs.add(c))]  # type: ignore[func-returns-value]
@@ -624,8 +657,13 @@ def bpe_post_render_load():
             write_last = None
 
         def _deferred(
-            _wname=write_name, _out=out_file, _pcs=plate_cs,
-            _wx=wx, _wy=wy, _wf=write_first, _wl=write_last,
+            _wname=write_name,
+            _out=out_file,
+            _pcs=plate_cs,
+            _wx=wx,
+            _wy=wy,
+            _wf=write_first,
+            _wl=write_last,
         ):
             try:
                 w = nuke.toNode(_wname)
@@ -681,6 +719,7 @@ def bpe_post_render_load():
 # ══════════════════════════════════════════════════════════════════════
 # TOOL HOOKS 관리
 # ══════════════════════════════════════════════════════════════════════
+
 
 def reload_tool_hooks() -> None:
     """settings.json의 tools 섹션을 읽어 BeforeRender/AfterRender 훅을 등록/해제한다."""

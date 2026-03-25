@@ -13,30 +13,37 @@ from bpe.core.nk_finder import (
     find_latest_nk_path,
 )
 
-
 # ── _nk_is_junk_file ────────────────────────────────────────────
 
+
 class TestNkIsJunkFile:
-    @pytest.mark.parametrize("name", [
-        "shot_v001.nk~",
-        "shot.nk.autosave",
-        "shot_autosave.nk",
-        "shot.AUTOSAVE.nk",
-        "~shot_v001.nk",
-    ])
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "shot_v001.nk~",
+            "shot.nk.autosave",
+            "shot_autosave.nk",
+            "shot.AUTOSAVE.nk",
+            "~shot_v001.nk",
+        ],
+    )
     def test_junk_detected(self, name):
         assert _nk_is_junk_file(Path(name)) is True
 
-    @pytest.mark.parametrize("name", [
-        "shot_v001.nk",
-        "E107_S022_0080_comp_v003.nk",
-        "test.nk",
-    ])
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "shot_v001.nk",
+            "E107_S022_0080_comp_v003.nk",
+            "test.nk",
+        ],
+    )
     def test_normal_not_junk(self, name):
         assert _nk_is_junk_file(Path(name)) is False
 
 
 # ── _NK_VERSION_RE ───────────────────────────────────────────────
+
 
 class TestVersionRegex:
     def test_extracts_version(self):
@@ -58,6 +65,7 @@ class TestVersionRegex:
 
 
 # ── find_latest_nk_path ─────────────────────────────────────────
+
 
 class TestFindLatestNkPath:
     def _make_shot_tree(self, tmp_path: Path, shot_name: str) -> Path:

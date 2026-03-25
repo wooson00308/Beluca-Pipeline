@@ -19,7 +19,6 @@ from PySide6.QtWidgets import (
 from bpe.core.settings import get_tools_settings, save_tools_settings
 from bpe.gui import theme
 
-
 _TOOL_DEFS = [
     {
         "key": "qc_checker",
@@ -28,21 +27,14 @@ _TOOL_DEFS = [
             "Write 렌더 시작 직전에 FPS/해상도/OCIO/컬러스페이스/"
             "플레이트-편집본 길이 불일치를 팝업으로 알려줍니다."
         ),
-        "detail": (
-            "활성화 시: Nuke의 모든 Write 노드 렌더 직전에 "
-            "체크리스트 팝업이 표시됩니다."
-        ),
+        "detail": ("활성화 시: Nuke의 모든 Write 노드 렌더 직전에 체크리스트 팝업이 표시됩니다."),
     },
     {
         "key": "post_render_viewer",
         "title": "Post-Render Viewer — 렌더 후 NK 자동 로드",
-        "subtitle": (
-            "렌더 완료 후 Write 노드 출력 경로의 시퀀스를 "
-            "Read 노드로 자동 생성합니다."
-        ),
+        "subtitle": ("렌더 완료 후 Write 노드 출력 경로의 시퀀스를 Read 노드로 자동 생성합니다."),
         "detail": (
-            "활성화 시: 렌더가 끝나면 'bpe_render_preview' "
-            "Read 노드가 자동으로 생성됩니다."
+            "활성화 시: 렌더가 끝나면 'bpe_render_preview' Read 노드가 자동으로 생성됩니다."
         ),
     },
 ]
@@ -96,7 +88,9 @@ class ToolsTab(QWidget):
 
         card_container = QWidget()
         card_layout = QVBoxLayout(card_container)
-        card_layout.setContentsMargins(theme.CONTENT_MARGIN, 16, theme.CONTENT_MARGIN, theme.CONTENT_MARGIN)
+        card_layout.setContentsMargins(
+            theme.CONTENT_MARGIN, 16, theme.CONTENT_MARGIN, theme.CONTENT_MARGIN
+        )
         card_layout.setSpacing(theme.FORM_SPACING)
 
         tools_cfg = get_tools_settings()
@@ -111,9 +105,7 @@ class ToolsTab(QWidget):
         scroll.setWidget(card_container)
         root.addWidget(scroll, 1)
 
-    def _build_tool_card(
-        self, defn: Dict[str, str], tools_cfg: Dict[str, Any]
-    ) -> QFrame:
+    def _build_tool_card(self, defn: Dict[str, str], tools_cfg: Dict[str, Any]) -> QFrame:
         card = QFrame()
         card.setObjectName("card")
         layout = QHBoxLayout(card)

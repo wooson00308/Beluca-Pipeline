@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from bpe.core.atomic_io import read_json_file, write_json_file
 import bpe.core.config as cfg
+from bpe.core.atomic_io import read_json_file, write_json_file
 
 
 def load_nuke_formats_cache() -> Dict[str, Any]:

@@ -53,7 +53,8 @@ def add_setup_pro_menu() -> None:
     )
     setup_menu.addCommand(
         "캐시 새로 고침  (Write / 포맷 목록 갱신)",
-        "from bpe.nuke_plugin.cache_writer import refresh_setup_pro_caches; refresh_setup_pro_caches()",
+        "from bpe.nuke_plugin.cache_writer import refresh_setup_pro_caches;"
+        " refresh_setup_pro_caches()",
     )
 
     tools_menu = setup_menu.addMenu("BPE Tools")

@@ -6,7 +6,6 @@ from typing import Dict, List
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -17,7 +16,6 @@ from PySide6.QtWidgets import (
 )
 
 from bpe.gui import theme
-
 
 TAB_DEFS: List[Dict[str, str]] = [
     {"key": "presets", "label": "Preset Manager"},
@@ -73,9 +71,7 @@ class MainWindow(QMainWindow):
             btn = QPushButton(tab_def["label"])
             btn.setProperty("selected", False)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn.clicked.connect(
-                lambda checked=False, k=tab_def["key"]: self._switch_tab(k)
-            )
+            btn.clicked.connect(lambda checked=False, k=tab_def["key"]: self._switch_tab(k))
             sb.addWidget(btn)
             self._tab_buttons[tab_def["key"]] = btn
 
@@ -98,10 +94,10 @@ class MainWindow(QMainWindow):
         self._switch_tab("presets")
 
     def _build_tabs(self) -> None:
-        from bpe.gui.tabs.preset_tab import PresetTab
-        from bpe.gui.tabs.shot_builder_tab import ShotBuilderTab
         from bpe.gui.tabs.my_tasks_tab import MyTasksTab
+        from bpe.gui.tabs.preset_tab import PresetTab
         from bpe.gui.tabs.publish_tab import PublishTab
+        from bpe.gui.tabs.shot_builder_tab import ShotBuilderTab
         from bpe.gui.tabs.tools_tab import ToolsTab
 
         for key, cls in {

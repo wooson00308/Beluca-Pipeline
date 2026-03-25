@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from PySide6.QtCore import Qt, Signal, QStringListModel
+from PySide6.QtCore import QStringListModel, Qt, Signal
 from PySide6.QtWidgets import QComboBox, QCompleter, QWidget
 
 

@@ -10,7 +10,6 @@ import pytest
 from bpe.core.settings import save_settings
 from bpe.core.shotgrid_settings import (
     get_shotgrid_settings,
-    load_studio_dict,
     save_shotgrid_settings,
 )
 
@@ -24,31 +23,35 @@ def test_defaults(tmp_app_dir: Path) -> None:
 
 def test_studio_json_override(tmp_app_dir: Path) -> None:
     studio_path = tmp_app_dir / "shotgrid_studio.json"
-    studio_path.write_text(json.dumps({
-        "base_url": "https://custom.shotgrid.autodesk.com",
-        "script_name": "customAPI",
-        "script_key": "customkey123",
-    }))
+    studio_path.write_text(
+        json.dumps(
+            {
+                "base_url": "https://custom.shotgrid.autodesk.com",
+                "script_name": "customAPI",
+                "script_key": "customkey123",
+            }
+        )
+    )
     sg = get_shotgrid_settings()
     assert sg["base_url"] == "https://custom.shotgrid.autodesk.com"
     assert sg["script_name"] == "customAPI"
 
 
 def test_settings_json_override(tmp_app_dir: Path) -> None:
-    save_settings({
-        "shotgrid": {
-            "base_url": "https://from-settings.shotgrid.autodesk.com",
+    save_settings(
+        {
+            "shotgrid": {
+                "base_url": "https://from-settings.shotgrid.autodesk.com",
+            }
         }
-    })
+    )
     sg = get_shotgrid_settings()
     assert sg["base_url"] == "https://from-settings.shotgrid.autodesk.com"
     # Other defaults preserved
     assert sg["task_content"] == "comp"
 
 
-def test_env_var_override(
-    tmp_app_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_env_var_override(tmp_app_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BPE_SHOTGRID_BASE_URL", "https://env.shotgrid.autodesk.com")
     sg = get_shotgrid_settings()
     assert sg["base_url"] == "https://env.shotgrid.autodesk.com"
@@ -67,9 +70,7 @@ def test_save_shotgrid_settings(tmp_app_dir: Path) -> None:
     assert sg["base_url"] == "https://saved.shotgrid.autodesk.com"
 
 
-def test_merge_priority(
-    tmp_app_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_merge_priority(tmp_app_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """env > settings.json > studio.json > defaults."""
     # Studio
     studio_path = tmp_app_dir / "shotgrid_studio.json"

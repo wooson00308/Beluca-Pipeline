@@ -11,25 +11,25 @@ logger = get_logger("shotgrid.tasks")
 # ── company task status presets (19) ─────────────────────────────────
 
 BELUCA_TASK_STATUS_PRESETS: List[Tuple[str, str]] = [
-    ("wtg",    "Waiting to Start"),
+    ("wtg", "Waiting to Start"),
     ("assign", "Assign"),
-    ("wip",    "work in process"),
+    ("wip", "work in process"),
     ("retake", "retake"),
-    ("cfrm",   "SV Confirmed"),
-    ("tm",     "team confirm"),
-    ("sv",     "supervisor confirm"),
-    ("pub-s",  "pulish sent"),
-    ("pubok",  "publish ok"),
-    ("ct",     "client confirm"),
-    ("cts",    "client confirm sent"),
-    ("ctr",    "client retake"),
-    ("cto",    "Client confirm ok"),
+    ("cfrm", "SV Confirmed"),
+    ("tm", "team confirm"),
+    ("sv", "supervisor confirm"),
+    ("pub-s", "pulish sent"),
+    ("pubok", "publish ok"),
+    ("ct", "client confirm"),
+    ("cts", "client confirm sent"),
+    ("ctr", "client retake"),
+    ("cto", "Client confirm ok"),
     ("disent", "DI sent"),
-    ("fin",    "Final"),
-    ("hld",    "Hold"),
-    ("nocg",   "nocg"),
-    ("omt",    "Omit"),
-    ("error",  "Error"),
+    ("fin", "Final"),
+    ("hld", "Hold"),
+    ("nocg", "nocg"),
+    ("omt", "Omit"),
+    ("error", "Error"),
 ]
 
 
@@ -131,9 +131,7 @@ def detect_task_status_field(sg: Any) -> Optional[str]:
     return None
 
 
-def list_task_status_values(
-    sg: Any, field_name: Optional[str] = None
-) -> Tuple[str, List[str]]:
+def list_task_status_values(sg: Any, field_name: Optional[str] = None) -> Tuple[str, List[str]]:
     fn = (field_name or "").strip() or detect_task_status_field(sg) or "sg_status_list"
     sch = sg.schema_field_read("Task", fn)
     if not sch or not isinstance(sch, dict):
@@ -193,7 +191,9 @@ def list_comp_tasks_for_assignee(
     """Comp tasks assigned to *human_user_id* where entity is Shot."""
     uid = int(human_user_id)
     tc_raw = (task_content or "comp").strip()
-    status_fn = (status_field_name or "").strip() or detect_task_status_field(sg) or "sg_status_list"
+    status_fn = (
+        (status_field_name or "").strip() or detect_task_status_field(sg) or "sg_status_list"
+    )
     due_fn_effective = (due_date_field or "").strip() or "due_date"
     st = (status_filter or "").strip()
     st_use = st and st not in ("(전체)", "(비움)", "(all)", "전체")
@@ -202,9 +202,17 @@ def list_comp_tasks_for_assignee(
 
     def _task_fields_for_due(due_col: str) -> List[str]:
         return [
-            "id", "content", due_col, "entity", "project", status_fn,
-            "entity.Shot.code", "entity.Shot.description", "entity.Shot.image",
-            "project.Project.code", "project.Project.name",
+            "id",
+            "content",
+            due_col,
+            "entity",
+            "project",
+            status_fn,
+            "entity.Shot.code",
+            "entity.Shot.description",
+            "entity.Shot.image",
+            "project.Project.code",
+            "project.Project.name",
         ]
 
     fields: List[str] = _task_fields_for_due(due_fn_effective)
@@ -217,7 +225,9 @@ def list_comp_tasks_for_assignee(
             fl.append([status_fn, "is", st])
         return fl
 
-    def _find(assignee: list, content: Optional[list], field_list: List[str]) -> List[Dict[str, Any]]:
+    def _find(
+        assignee: list, content: Optional[list], field_list: List[str]
+    ) -> List[Dict[str, Any]]:
         return sg.find("Task", _filters(assignee, content), field_list, order=order, limit=lim)
 
     assignee_is: list = ["task_assignees", "is", {"type": "HumanUser", "id": uid}]
@@ -277,7 +287,8 @@ def list_comp_tasks_for_assignee(
             except Exception as e2:
                 logger.warning(
                     "list_comp_tasks_for_assignee content_has fallback failed user=%s: %s",
-                    uid, e2,
+                    uid,
+                    e2,
                 )
                 rows = []
 
@@ -294,22 +305,24 @@ def list_comp_tasks_for_assignee(
         proj_name = (proj.get("name") or "").strip()
         due_val = t.get(due_read_col)
         folder = (proj_code or proj_name).strip()
-        out.append({
-            "task_id": t.get("id"),
-            "task_content": (t.get("content") or "").strip(),
-            "task_status": (t.get(status_fn) or "").strip(),
-            "status_field": status_fn,
-            "due_date": due_val,
-            "shot_id": ent.get("id"),
-            "shot_code": shot_code,
-            "shot_description": desc,
-            "shot_image": img,
-            "project_id": proj.get("id"),
-            "project_code": proj_code,
-            "project_name": proj_name,
-            "project_folder": folder,
-            "latest_version_code": "",
-        })
+        out.append(
+            {
+                "task_id": t.get("id"),
+                "task_content": (t.get("content") or "").strip(),
+                "task_status": (t.get(status_fn) or "").strip(),
+                "status_field": status_fn,
+                "due_date": due_val,
+                "shot_id": ent.get("id"),
+                "shot_code": shot_code,
+                "shot_description": desc,
+                "shot_image": img,
+                "project_id": proj.get("id"),
+                "project_code": proj_code,
+                "project_name": proj_name,
+                "project_folder": folder,
+                "latest_version_code": "",
+            }
+        )
     return out
 
 
@@ -330,7 +343,8 @@ def list_comp_tasks_for_project_user(
     """
     if project_id is None:
         return list_comp_tasks_for_assignee(
-            sg, human_user_id,
+            sg,
+            human_user_id,
             task_content=task_content,
             status_filter=status_filter,
             status_field_name=status_field_name,
@@ -350,9 +364,17 @@ def list_comp_tasks_for_project_user(
 
     def _fields() -> List[str]:
         base = [
-            "id", "content", status_fn, due_fn_effective, "project",
-            "entity", "entity.Shot.code", "entity.Shot.description",
-            "entity.Shot.image", "project.Project.code", "project.Project.name",
+            "id",
+            "content",
+            status_fn,
+            due_fn_effective,
+            "project",
+            "entity",
+            "entity.Shot.code",
+            "entity.Shot.description",
+            "entity.Shot.image",
+            "project.Project.code",
+            "project.Project.name",
         ]
         if due_fn_effective != "due_date":
             base.append("due_date")
@@ -384,14 +406,24 @@ def list_comp_tasks_for_project_user(
             if due_fn_effective != "due_date" and due_fn_effective.lower() in el:
                 due_read_col = "due_date"
                 fb_fields = [
-                    "id", "content", status_fn, "due_date", "project",
-                    "entity", "entity.Shot.code", "entity.Shot.description",
-                    "entity.Shot.image", "project.Project.code", "project.Project.name",
+                    "id",
+                    "content",
+                    status_fn,
+                    "due_date",
+                    "project",
+                    "entity",
+                    "entity.Shot.code",
+                    "entity.Shot.description",
+                    "entity.Shot.image",
+                    "project.Project.code",
+                    "project.Project.name",
                 ]
                 try:
                     rows = sg.find("Task", list(base_filters), fb_fields, limit=limit)
                 except Exception as e3:
-                    logger.warning("list_comp_tasks_for_project_user due_date fallback failed: %s", e3)
+                    logger.warning(
+                        "list_comp_tasks_for_project_user due_date fallback failed: %s", e3
+                    )
                     rows = []
             else:
                 rows = []
@@ -409,20 +441,22 @@ def list_comp_tasks_for_project_user(
         latest_ver = ""
         if isinstance(ver, dict):
             latest_ver = (ver.get("code") or ver.get("name") or "").strip()
-        out.append({
-            "task_id": t.get("id"),
-            "task_content": (t.get("content") or "").strip(),
-            "task_status": (t.get(status_fn) or "").strip(),
-            "status_field": status_fn,
-            "due_date": due_val,
-            "shot_id": ent.get("id"),
-            "shot_code": (ent.get("code") or ent.get("name") or "").strip(),
-            "shot_description": (ent.get("description") or "").strip(),
-            "shot_image": t.get("entity.Shot.image") or ent.get("image"),
-            "project_id": proj.get("id"),
-            "project_code": proj_code,
-            "project_name": proj_name,
-            "project_folder": (proj_code or proj_name).strip(),
-            "latest_version_code": latest_ver,
-        })
+        out.append(
+            {
+                "task_id": t.get("id"),
+                "task_content": (t.get("content") or "").strip(),
+                "task_status": (t.get(status_fn) or "").strip(),
+                "status_field": status_fn,
+                "due_date": due_val,
+                "shot_id": ent.get("id"),
+                "shot_code": (ent.get("code") or ent.get("name") or "").strip(),
+                "shot_description": (ent.get("description") or "").strip(),
+                "shot_image": t.get("entity.Shot.image") or ent.get("image"),
+                "project_id": proj.get("id"),
+                "project_code": proj_code,
+                "project_name": proj_name,
+                "project_folder": (proj_code or proj_name).strip(),
+                "latest_version_code": latest_ver,
+            }
+        )
     return out

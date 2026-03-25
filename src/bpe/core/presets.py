@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-import json
-
-from bpe.core.atomic_io import atomic_write_text, write_json_file
 import bpe.core.config as cfg
+from bpe.core.atomic_io import atomic_write_text, write_json_file
 from bpe.core.settings import get_presets_dir
 
 
@@ -78,6 +77,7 @@ def delete_preset(name: str) -> bool:
 
 
 # Per-preset custom NK templates
+
 
 def get_preset_template_path(preset_name: str) -> Path:
     return get_presets_dir() / f"{preset_name}_template.nk"
