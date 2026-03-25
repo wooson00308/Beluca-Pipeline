@@ -21,6 +21,7 @@ venv/
 .vscode/
 .cursor/
 !.cursor/rules/
+!.cursor/skills/
 *.swp
 
 # OS
