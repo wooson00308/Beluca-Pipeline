@@ -2,6 +2,7 @@
 build/
 dist/
 *.spec
+!installer/bpe.spec
 
 # Python
 __pycache__/
