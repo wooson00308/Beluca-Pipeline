@@ -8,8 +8,6 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
-    QFormLayout,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -17,6 +15,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -25,6 +24,28 @@ from PySide6.QtWidgets import (
 from bpe.core.presets import delete_preset, load_presets, upsert_preset
 from bpe.core.cache import load_colorspaces_cache, load_datatypes_cache, load_nuke_formats_cache
 from bpe.gui.widgets.search_combo import SearchComboBox
+from bpe.gui import theme
+
+
+def _form_row(label_text: str, widget: QWidget) -> QHBoxLayout:
+    row = QHBoxLayout()
+    row.setSpacing(12)
+    lbl = QLabel(label_text)
+    lbl.setObjectName("form_label")
+    lbl.setFixedWidth(theme.FORM_LABEL_WIDTH)
+    lbl.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+    row.addWidget(lbl)
+    row.addWidget(widget, 1)
+    return row
+
+
+def _section_label(text: str) -> QLabel:
+    lbl = QLabel(text)
+    lbl.setStyleSheet(
+        f"color: {theme.TEXT}; font-size: 14px; font-weight: 600; "
+        f"padding-top: 8px; padding-bottom: 2px;"
+    )
+    return lbl
 
 
 class PresetTab(QWidget):
@@ -43,14 +64,17 @@ class PresetTab(QWidget):
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        # Header
+        # Page header
         hdr = QHBoxLayout()
-        hdr.setContentsMargins(28, 24, 28, 0)
+        hdr.setContentsMargins(theme.CONTENT_MARGIN, 24, theme.CONTENT_MARGIN, 0)
+        hdr.setSpacing(12)
         title = QLabel("Preset Manager")
-        title.setProperty("class", "title")
-        subtitle = QLabel("프로젝트별 Nuke 세팅을 저장하고 팀과 공유하세요")
-        subtitle.setProperty("dim", True)
+        title.setObjectName("page_title")
+        subtitle = QLabel("프리셋 저장 · 로드 · NK 설정 관리")
+        subtitle.setObjectName("page_subtitle")
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignBottom)
         hdr.addWidget(title)
         hdr.addWidget(subtitle)
         hdr.addStretch()
@@ -58,7 +82,7 @@ class PresetTab(QWidget):
 
         # Splitter: form | preset list
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setContentsMargins(20, 12, 20, 16)
+        splitter.setContentsMargins(theme.CONTENT_MARGIN, 16, theme.CONTENT_MARGIN, theme.CONTENT_MARGIN)
 
         splitter.addWidget(self._build_form_column())
         splitter.addWidget(self._build_list_column())
@@ -76,73 +100,69 @@ class PresetTab(QWidget):
 
         container = QWidget()
         layout = QVBoxLayout(container)
-        layout.setContentsMargins(8, 0, 8, 8)
+        layout.setContentsMargins(0, 0, 12, 8)
+        layout.setSpacing(theme.FORM_SPACING)
 
-        layout.addWidget(self._build_project_group())
-        layout.addWidget(self._build_ocio_group())
-        layout.addWidget(self._build_read_group())
-        layout.addWidget(self._build_write_group())
-        layout.addStretch()
-
-        scroll.setWidget(container)
-        return scroll
-
-    def _build_project_group(self) -> QGroupBox:
-        grp = QGroupBox("프로젝트 정보")
-        form = QFormLayout(grp)
+        # -- 프로젝트 정보 --
+        layout.addWidget(_section_label("프로젝트 정보"))
 
         self._inputs["project_type"] = QComboBox()
         self._inputs["project_type"].addItems(["드라마(OTT)", "영화", "광고", "기타"])
-        form.addRow("프로젝트 타입", self._inputs["project_type"])
+        layout.addLayout(_form_row("프로젝트 타입", self._inputs["project_type"]))
 
         self._inputs["project_code"] = QLineEdit()
         self._inputs["project_code"].setPlaceholderText("예: BLC_2026")
-        form.addRow("프로젝트 코드", self._inputs["project_code"])
+        layout.addLayout(_form_row("프로젝트 코드", self._inputs["project_code"]))
 
         self._inputs["fps"] = QComboBox()
         self._inputs["fps"].addItems(["23.976", "24", "25", "29.97", "30"])
-        form.addRow("FPS", self._inputs["fps"])
+        layout.addLayout(_form_row("FPS", self._inputs["fps"]))
 
         self._inputs["plate_width"] = QLineEdit()
         self._inputs["plate_width"].setPlaceholderText("예: 4096")
         self._inputs["plate_height"] = QLineEdit()
         self._inputs["plate_height"].setPlaceholderText("예: 2160")
         res_row = QHBoxLayout()
-        res_row.addWidget(self._inputs["plate_width"])
-        res_row.addWidget(QLabel("x"))
-        res_row.addWidget(self._inputs["plate_height"])
-        form.addRow("플레이트 해상도", res_row)
+        res_row.setSpacing(8)
+        res_row.addWidget(self._inputs["plate_width"], 1)
+        x_lbl = QLabel("x")
+        x_lbl.setFixedWidth(12)
+        x_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        res_row.addWidget(x_lbl)
+        res_row.addWidget(self._inputs["plate_height"], 1)
+        res_container = QWidget()
+        res_container.setLayout(res_row)
+        res_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        layout.addLayout(_form_row("플레이트 해상도", res_container))
 
-        return grp
+        # -- OCIO --
+        layout.addWidget(_section_label("OCIO"))
 
-    def _build_ocio_group(self) -> QGroupBox:
-        grp = QGroupBox("OCIO")
-        form = QFormLayout(grp)
-
-        row = QHBoxLayout()
+        ocio_row = QHBoxLayout()
+        ocio_row.setSpacing(8)
         self._inputs["ocio_path"] = QLineEdit()
         self._inputs["ocio_path"].setPlaceholderText("OCIO config 경로")
         browse_btn = QPushButton("찾아보기")
+        browse_btn.setFixedWidth(80)
         browse_btn.clicked.connect(self._browse_ocio)
-        row.addWidget(self._inputs["ocio_path"], 1)
-        row.addWidget(browse_btn)
-        form.addRow("Config 경로", row)
-        return grp
+        ocio_row.addWidget(self._inputs["ocio_path"], 1)
+        ocio_row.addWidget(browse_btn)
+        ocio_container = QWidget()
+        ocio_container.setLayout(ocio_row)
+        ocio_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        layout.addLayout(_form_row("Config 경로", ocio_container))
 
-    def _build_read_group(self) -> QGroupBox:
-        grp = QGroupBox("Read")
-        form = QFormLayout(grp)
+        # -- Read --
+        layout.addWidget(_section_label("Read"))
 
         self._inputs["read_input_transform"] = SearchComboBox()
         colorspaces = load_colorspaces_cache()
         if colorspaces:
             self._inputs["read_input_transform"].set_items(colorspaces)
-        form.addRow("Input Transform", self._inputs["read_input_transform"])
-        return grp
+        layout.addLayout(_form_row("Input Transform", self._inputs["read_input_transform"]))
 
-    def _build_write_group(self) -> QGroupBox:
-        grp = QGroupBox("Write")
-        form = QFormLayout(grp)
+        # -- Write --
+        layout.addWidget(_section_label("Write"))
 
         formats = load_nuke_formats_cache()
         datatypes = load_datatypes_cache()
@@ -150,65 +170,77 @@ class PresetTab(QWidget):
         self._inputs["delivery_format"] = QComboBox()
         if isinstance(formats, dict):
             self._inputs["delivery_format"].addItems(list(formats.keys()))
-        form.addRow("납품 포맷", self._inputs["delivery_format"])
+        layout.addLayout(_form_row("납품 포맷", self._inputs["delivery_format"]))
 
         self._inputs["write_channels"] = QComboBox()
         self._inputs["write_channels"].addItems(["rgb", "rgba", "all"])
-        form.addRow("Channels", self._inputs["write_channels"])
+        layout.addLayout(_form_row("Channels", self._inputs["write_channels"]))
 
         self._inputs["write_datatype"] = QComboBox()
         if datatypes:
             self._inputs["write_datatype"].addItems(datatypes)
-        form.addRow("Datatype", self._inputs["write_datatype"])
+        layout.addLayout(_form_row("Datatype", self._inputs["write_datatype"]))
 
         self._inputs["write_compression"] = QComboBox()
         self._inputs["write_compression"].addItems(
             ["none", "Zip (1 scanline)", "Zip (16 scanlines)", "PIZ", "DWAA", "DWAB"]
         )
-        form.addRow("Compression", self._inputs["write_compression"])
+        layout.addLayout(_form_row("Compression", self._inputs["write_compression"]))
 
         self._inputs["write_metadata"] = QComboBox()
         self._inputs["write_metadata"].addItems(
             ["no metadata", "default metadata", "all metadata"]
         )
-        form.addRow("Metadata", self._inputs["write_metadata"])
+        layout.addLayout(_form_row("Metadata", self._inputs["write_metadata"]))
 
         self._inputs["write_transform_type"] = QComboBox()
         self._inputs["write_transform_type"].addItems(
             ["Colorspace", "Display/View"]
         )
-        form.addRow("Transform Type", self._inputs["write_transform_type"])
+        layout.addLayout(_form_row("Transform Type", self._inputs["write_transform_type"]))
 
-        colorspaces = load_colorspaces_cache()
+        colorspaces_w = load_colorspaces_cache()
 
         self._inputs["write_out_colorspace"] = SearchComboBox()
-        if colorspaces:
-            self._inputs["write_out_colorspace"].set_items(colorspaces)
-        form.addRow("Output Colorspace", self._inputs["write_out_colorspace"])
+        if colorspaces_w:
+            self._inputs["write_out_colorspace"].set_items(colorspaces_w)
+        layout.addLayout(_form_row("Output Colorspace", self._inputs["write_out_colorspace"]))
 
         self._inputs["write_output_display"] = QComboBox()
-        form.addRow("Output Display", self._inputs["write_output_display"])
+        layout.addLayout(_form_row("Output Display", self._inputs["write_output_display"]))
 
         self._inputs["write_output_view"] = QComboBox()
-        form.addRow("Output View", self._inputs["write_output_view"])
+        layout.addLayout(_form_row("Output View", self._inputs["write_output_view"]))
 
-        return grp
+        layout.addStretch()
+
+        scroll.setWidget(container)
+        return scroll
 
     # --- right column: preset list ---
 
     def _build_list_column(self) -> QWidget:
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(scroll.Shape.NoFrame)
+
         col = QWidget()
         layout = QVBoxLayout(col)
-        layout.setContentsMargins(8, 0, 8, 8)
+        layout.setContentsMargins(12, 0, 0, 8)
+        layout.setSpacing(12)
 
         lbl = QLabel("저장된 프리셋")
-        lbl.setProperty("class", "title")
+        lbl.setStyleSheet(
+            f"color: {theme.TEXT}; font-size: 14px; font-weight: 600;"
+        )
         layout.addWidget(lbl)
 
         self._preset_list = QListWidget()
+        self._preset_list.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout.addWidget(self._preset_list, 1)
 
         btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
         load_btn = QPushButton("불러오기")
         load_btn.clicked.connect(self._load_selected)
         del_btn = QPushButton("삭제")
@@ -222,7 +254,8 @@ class PresetTab(QWidget):
         btn_row.addWidget(save_btn)
         layout.addLayout(btn_row)
 
-        return col
+        scroll.setWidget(col)
+        return scroll
 
     # ------------------------------------------------------------------
     # Actions

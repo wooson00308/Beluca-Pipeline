@@ -20,7 +20,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from bpe.gui.theme import TEXT_DIM
 from bpe.gui.workers.sg_worker import ShotGridWorker
 from bpe.gui.workers.upload_worker import UploadWorker
 from bpe.shotgrid.client import get_default_sg
@@ -44,6 +43,19 @@ logger = logging.getLogger(__name__)
 
 # Autocomplete debounce (ms)
 _AUTOCOMPLETE_DELAY = 350
+
+
+def _form_row(label_text: str, widget: QWidget) -> QHBoxLayout:
+    """Create a horizontal form row: [label 120px] [widget stretch]."""
+    row = QHBoxLayout()
+    row.setSpacing(12)
+    lbl = QLabel(label_text)
+    lbl.setObjectName("form_label")
+    lbl.setFixedWidth(120)
+    lbl.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+    row.addWidget(lbl)
+    row.addWidget(widget, 1)
+    return row
 
 
 class PublishTab(QWidget):
@@ -72,72 +84,71 @@ class PublishTab(QWidget):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(24, 20, 24, 12)
+        root.setContentsMargins(32, 32, 32, 32)
 
-        # Header
+        # ── Page header ────────────────────────────────────────────
         hdr = QHBoxLayout()
         title = QLabel("Publish")
-        title.setProperty("class", "title")
+        title.setObjectName("page_title")
         hdr.addWidget(title)
         sub = QLabel("Version 업로드  ·  MOV 드래그 앤 드롭")
-        sub.setProperty("dim", True)
+        sub.setObjectName("page_subtitle")
         hdr.addWidget(sub)
         hdr.addStretch()
         root.addLayout(hdr)
+        root.addSpacing(16)
 
-        # Scroll area
+        # ── Scroll area ────────────────────────────────────────────
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(scroll.Shape.NoFrame)
         content = QWidget()
         self._form_layout = QVBoxLayout(content)
-        self._form_layout.setContentsMargins(4, 8, 4, 8)
+        self._form_layout.setContentsMargins(0, 0, 0, 0)
+        self._form_layout.setSpacing(16)
         scroll.setWidget(content)
         root.addWidget(scroll, 1)
 
         lay = self._form_layout
 
-        # ── Drop zone ───────────────────────────────────────────────
+        # ── Drop zone ─────────────────────────────────────────────
         if DropZone is not None:
             self._drop_zone = DropZone()
+            self._drop_zone.setObjectName("drop_zone")
             self._drop_zone.file_dropped.connect(self._on_file_dropped)
             lay.addWidget(self._drop_zone)
         else:
             self._drop_zone = QLabel(
                 "MOV 파일을 여기에 드래그하거나 파일 경로를 직접 입력하세요\n(.mov / .mp4)"
             )
+            self._drop_zone.setObjectName("drop_zone")
             self._drop_zone.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self._drop_zone.setMinimumHeight(80)
-            self._drop_zone.setStyleSheet(
-                f"border: 2px dashed {TEXT_DIM}; border-radius: 8px; padding: 16px;"
-            )
             lay.addWidget(self._drop_zone)
 
         # File path display
-        path_row = QHBoxLayout()
         self._path_label = QLineEdit()
         self._path_label.setPlaceholderText("파일 경로")
         self._path_label.setReadOnly(True)
-        path_row.addWidget(self._path_label)
-        lay.addLayout(path_row)
+        lay.addLayout(_form_row("File", self._path_label))
 
-        # ── Form fields ─────────────────────────────────────────────
+        # ── Form fields ───────────────────────────────────────────
 
         # Shot link
         self._shot_edit = QLineEdit()
         self._shot_edit.setPlaceholderText("MOV 드롭 시 자동 채움 또는 샷 코드 입력")
         self._shot_edit.editingFinished.connect(self._on_shot_manual)
+        lay.addLayout(_form_row("Shot Link", self._shot_edit))
+
         self._shot_info = QLabel("")
-        self._shot_info.setProperty("dim", True)
-        lay.addWidget(QLabel("Shot Link"))
-        lay.addWidget(self._shot_edit)
+        self._shot_info.setObjectName("validation_label")
+        self._shot_info.setVisible(False)
         lay.addWidget(self._shot_info)
 
         # Version Name
         self._version_edit = QLineEdit()
         self._version_edit.setPlaceholderText("MOV 드롭 시 자동 생성")
-        lay.addWidget(QLabel("Version Name"))
-        lay.addWidget(self._version_edit)
+        lay.addLayout(_form_row("Version Name", self._version_edit))
 
         # Artist
         self._artist_edit = QLineEdit()
@@ -145,14 +156,16 @@ class PublishTab(QWidget):
         self._artist_edit.textChanged.connect(
             lambda: self._artist_timer.start(_AUTOCOMPLETE_DELAY)
         )
+        lay.addLayout(_form_row("Artist", self._artist_edit))
+
         self._artist_combo = QComboBox()
         self._artist_combo.setVisible(False)
         self._artist_combo.currentIndexChanged.connect(self._on_artist_selected)
-        self._artist_info = QLabel("")
-        self._artist_info.setProperty("dim", True)
-        lay.addWidget(QLabel("Artist"))
-        lay.addWidget(self._artist_edit)
         lay.addWidget(self._artist_combo)
+
+        self._artist_info = QLabel("")
+        self._artist_info.setObjectName("validation_label")
+        self._artist_info.setVisible(False)
         lay.addWidget(self._artist_info)
 
         # Task
@@ -161,52 +174,72 @@ class PublishTab(QWidget):
         self._task_edit.textChanged.connect(
             lambda: self._task_timer.start(_AUTOCOMPLETE_DELAY)
         )
+        lay.addLayout(_form_row("Task", self._task_edit))
+
         self._task_combo = QComboBox()
         self._task_combo.setVisible(False)
         self._task_combo.currentIndexChanged.connect(self._on_task_selected)
-        self._task_info = QLabel("")
-        self._task_info.setProperty("dim", True)
-        lay.addWidget(QLabel("Task"))
-        lay.addWidget(self._task_edit)
         lay.addWidget(self._task_combo)
+
+        self._task_info = QLabel("")
+        self._task_info.setObjectName("validation_label")
+        self._task_info.setVisible(False)
         lay.addWidget(self._task_info)
 
         # Description
         self._desc_edit = QTextEdit()
         self._desc_edit.setPlaceholderText("수정 사항 또는 메모")
         self._desc_edit.setMaximumHeight(80)
-        lay.addWidget(QLabel("Description"))
-        lay.addWidget(self._desc_edit)
+        lay.addLayout(_form_row("Description", self._desc_edit))
 
         # Task Status
         self._status_combo = QComboBox()
         self._status_combo.addItems(merge_task_status_combo_options([]))
         self._status_combo.setCurrentText("(비움)")
-        lay.addWidget(QLabel("Task Status 변경"))
-        lay.addWidget(self._status_combo)
+        lay.addLayout(_form_row("Task Status", self._status_combo))
 
-        # ── Action row ──────────────────────────────────────────────
+        # ── Action row ────────────────────────────────────────────
         btn_row = QHBoxLayout()
-        self._create_btn = QPushButton("  Version 생성 + 업로드  ")
+        self._create_btn = QPushButton("  Create Version  ")
         self._create_btn.setProperty("primary", True)
         self._create_btn.setMinimumHeight(44)
         self._create_btn.clicked.connect(self._on_create_version)
         btn_row.addWidget(self._create_btn)
+
+        self._test_btn = QPushButton("  연결 테스트  ")
+        self._test_btn.setMinimumHeight(44)
+        btn_row.addWidget(self._test_btn)
+
         btn_row.addStretch()
         lay.addLayout(btn_row)
 
-        # Progress bar
+        # ── Progress ──────────────────────────────────────────────
+        self._status_msg = QLabel("")
+        self._status_msg.setObjectName("status_msg")
+        lay.addWidget(self._status_msg)
+
+        prog_row = QHBoxLayout()
         self._progress = QProgressBar()
         self._progress.setRange(0, 100)
         self._progress.setValue(0)
-        lay.addWidget(self._progress)
+        prog_row.addWidget(self._progress, 1)
 
-        # Log area
-        lay.addWidget(QLabel("로그"))
+        self._percent_label = QLabel("0%")
+        self._percent_label.setObjectName("status_msg")
+        self._percent_label.setFixedWidth(40)
+        self._percent_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        prog_row.addWidget(self._percent_label)
+        lay.addLayout(prog_row)
+
+        # ── Log area ─────────────────────────────────────────────
+        log_title = QLabel("로그")
+        log_title.setObjectName("log_title")
+        lay.addWidget(log_title)
+
         self._log = QTextEdit()
+        self._log.setObjectName("log_area")
         self._log.setReadOnly(True)
         self._log.setMaximumHeight(140)
-        self._log.setStyleSheet(f"color: {TEXT_DIM};")
         lay.addWidget(self._log)
 
         lay.addStretch()
@@ -215,6 +248,14 @@ class PublishTab(QWidget):
 
     def _log_msg(self, msg: str) -> None:
         self._log.append(msg)
+
+    # ── Progress helpers ────────────────────────────────────────────
+
+    def _set_progress(self, value: int, status: str = "") -> None:
+        self._progress.setValue(value)
+        self._percent_label.setText(f"{value}%")
+        if status:
+            self._status_msg.setText(status)
 
     # ── File drop handling ──────────────────────────────────────────
 
@@ -240,6 +281,7 @@ class PublishTab(QWidget):
 
     def _lookup_shot(self, shot_code: str) -> None:
         self._shot_info.setText("검색 중...")
+        self._shot_info.setVisible(True)
         self._shot_data = None
         self._task_id = None
 
@@ -257,19 +299,22 @@ class PublishTab(QWidget):
         shot = result  # type: ignore[assignment]
         if not shot or not isinstance(shot, dict):
             self._shot_info.setText("샷을 찾을 수 없습니다.")
+            self._shot_info.setVisible(True)
             self._log_msg("샷 검색 결과 없음")
             return
         self._shot_data = shot
         proj = shot.get("project") or {}
         proj_name = proj.get("name") or proj.get("code") or ""
         self._shot_info.setText(
-            f"Shot #{shot.get('id')} — {shot.get('code', '')} ({proj_name})"
+            f"✓ Shot #{shot.get('id')} — {shot.get('code', '')} ({proj_name})"
         )
+        self._shot_info.setVisible(True)
         self._log_msg(f"샷 확인: {shot.get('code')} (project: {proj_name})")
         self._load_tasks_for_shot(shot["id"])
 
     def _on_shot_error(self, err: str) -> None:
         self._shot_info.setText(f"오류: {err}")
+        self._shot_info.setVisible(True)
         self._log_msg(f"샷 검색 오류: {err}")
 
     # ── Task autocomplete ───────────────────────────────────────────
@@ -299,6 +344,7 @@ class PublishTab(QWidget):
         else:
             self._task_combo.setVisible(False)
             self._task_info.setText("Task 없음")
+            self._task_info.setVisible(True)
 
     def _do_task_search(self) -> None:
         query = self._task_edit.text().strip()
@@ -324,7 +370,8 @@ class PublishTab(QWidget):
         tid = self._task_combo.itemData(idx)
         if tid is not None:
             self._task_id = int(tid)
-            self._task_info.setText(f"Task #{self._task_id}")
+            self._task_info.setText(f"✓ Task #{self._task_id}")
+            self._task_info.setVisible(True)
 
     # ── Artist autocomplete ─────────────────────────────────────────
 
@@ -361,7 +408,9 @@ class PublishTab(QWidget):
         uid = self._artist_combo.itemData(idx)
         if uid is not None:
             self._artist_id = int(uid)
-            self._artist_info.setText(f"Artist #{self._artist_id}")
+            name = self._artist_combo.itemText(idx)
+            self._artist_info.setText(f"✓ {name}")
+            self._artist_info.setVisible(True)
 
     # ── Create Version + Upload ─────────────────────────────────────
 
@@ -395,7 +444,7 @@ class PublishTab(QWidget):
         artist_id = self._artist_id
 
         self._create_btn.setEnabled(False)
-        self._progress.setValue(0)
+        self._set_progress(0, "Version 생성 중...")
         self._log_msg("Version 생성 중...")
 
         def _create() -> Dict[str, Any]:
@@ -425,28 +474,30 @@ class PublishTab(QWidget):
 
         ver_id = ver["id"]
         self._log_msg(f"Version #{ver_id} 생성 완료. 업로드 시작...")
-        self._progress.setValue(10)
+        self._set_progress(10, "업로드 중...")
 
         sg = get_default_sg()
         uw = UploadWorker(sg, ver_id, mov_path)
-        uw.progress.connect(lambda v: self._progress.setValue(int(10 + v * 85)))
-        uw.status.connect(lambda s: self._log_msg(s))
+        uw.progress.connect(lambda v: self._set_progress(int(10 + v * 85)))
+        uw.status.connect(lambda s: self._status_msg.setText(s))
         uw.finished.connect(lambda: self._on_upload_done(ver_id))
         uw.error.connect(self._on_upload_error)
         uw.start()
         self._upload_worker = uw
 
     def _on_upload_done(self, version_id: int) -> None:
-        self._progress.setValue(100)
+        self._set_progress(100, "업로드 완료!")
         self._log_msg(f"업로드 완료! (Version #{version_id})")
         self._create_btn.setEnabled(True)
         self._update_task_status_if_needed()
 
     def _on_upload_error(self, err: str) -> None:
+        self._status_msg.setText("업로드 오류")
         self._log_msg(f"업로드 오류: {err}")
         self._create_btn.setEnabled(True)
 
     def _on_create_error(self, err: str) -> None:
+        self._status_msg.setText("Version 생성 오류")
         self._log_msg(f"Version 생성 오류: {err}")
         self._create_btn.setEnabled(True)
 

@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from bpe.gui.theme import ACCENT, BORDER, PANEL_BG
+from bpe.gui.theme import ACCENT, BORDER
 from bpe.gui.workers.sg_worker import ShotGridWorker
 from bpe.shotgrid.client import get_default_sg
 from bpe.shotgrid.projects import list_active_projects
@@ -31,7 +31,8 @@ from bpe.core.nk_finder import find_latest_nk_and_open
 logger = logging.getLogger(__name__)
 
 _AUTOCOMPLETE_DELAY = 350
-_THUMB_SIZE = 80
+_THUMB_W = 80
+_THUMB_H = 60
 
 
 class _ShotCard(QFrame):
@@ -44,18 +45,17 @@ class _ShotCard(QFrame):
     ) -> None:
         super().__init__(parent)
         self.task_data = task_data
-        self.setStyleSheet(
-            f"background-color: {PANEL_BG}; border: 1px solid {BORDER}; border-radius: 8px;"
-        )
+        self.setObjectName("card")
         self._build(task_data)
 
     def _build(self, d: Dict[str, Any]) -> None:
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(10, 8, 10, 8)
+        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setSpacing(12)
 
-        # Thumbnail placeholder
+        # Thumbnail placeholder (80x60)
         self.thumb_label = QLabel()
-        self.thumb_label.setFixedSize(_THUMB_SIZE, _THUMB_SIZE)
+        self.thumb_label.setFixedSize(_THUMB_W, _THUMB_H)
         self.thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.thumb_label.setStyleSheet(
             f"background-color: {BORDER}; border-radius: 4px; border: none;"
@@ -63,7 +63,7 @@ class _ShotCard(QFrame):
         self.thumb_label.setText("img")
         lay.addWidget(self.thumb_label)
 
-        # Info column
+        # Info column (shot code, status, due date)
         info = QVBoxLayout()
         info.setSpacing(2)
 
@@ -71,23 +71,20 @@ class _ShotCard(QFrame):
         task_content = d.get("task_content", "")
         status = d.get("task_status", "")
         due = d.get("due_date") or ""
-        project_folder = d.get("project_folder", "")
 
         title = QLabel(f"{shot_code}  —  {task_content}")
         title.setStyleSheet(f"font-weight: bold; border: none; color: {ACCENT};")
         info.addWidget(title)
 
-        meta = QLabel(f"상태: {status}  ·  납기: {due}  ·  프로젝트: {project_folder}")
-        meta.setProperty("dim", True)
-        meta.setStyleSheet("border: none;")
-        info.addWidget(meta)
+        status_label = QLabel(f"상태: {status}")
+        status_label.setObjectName("page_subtitle")
+        status_label.setStyleSheet("border: none;")
+        info.addWidget(status_label)
 
-        desc = d.get("shot_description", "")
-        if desc:
-            desc_label = QLabel(desc[:120])
-            desc_label.setProperty("dim", True)
-            desc_label.setStyleSheet("border: none;")
-            info.addWidget(desc_label)
+        due_label = QLabel(f"납기: {due}")
+        due_label.setObjectName("page_subtitle")
+        due_label.setStyleSheet("border: none;")
+        info.addWidget(due_label)
 
         info.addStretch()
         lay.addLayout(info, 1)
@@ -104,7 +101,6 @@ class _ShotCard(QFrame):
         project_code = d.get("project_code") or d.get("project_folder", "")
         if not shot_code or not project_code:
             return
-        # server_root — use env or reasonable default
         import os
         server_root = os.environ.get("BPE_SERVER_ROOT", "")
         try:
@@ -114,7 +110,7 @@ class _ShotCard(QFrame):
 
     def set_thumbnail(self, pixmap: QPixmap) -> None:
         scaled = pixmap.scaled(
-            _THUMB_SIZE, _THUMB_SIZE,
+            _THUMB_W, _THUMB_H,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
@@ -145,29 +141,39 @@ class MyTasksTab(QWidget):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(24, 20, 24, 12)
+        root.setContentsMargins(32, 32, 32, 32)
 
-        # Header
+        # ── Page header ────────────────────────────────────────────
         hdr = QHBoxLayout()
         title = QLabel("My Tasks")
-        title.setProperty("class", "title")
+        title.setObjectName("page_title")
         hdr.addWidget(title)
-        sub = QLabel("ShotGrid Comp 배정 · 썸네일 · 작업 폴더 · NukeX 열기")
-        sub.setProperty("dim", True)
+        sub = QLabel("ShotGrid 배정 샷 조회")
+        sub.setObjectName("page_subtitle")
         hdr.addWidget(sub)
         hdr.addStretch()
         root.addLayout(hdr)
+        root.addSpacing(16)
 
-        # ── Filter bar ──────────────────────────────────────────────
+        # ── Filter bar ─────────────────────────────────────────────
         filter_row = QHBoxLayout()
+        filter_row.setSpacing(12)
 
-        filter_row.addWidget(QLabel("프로젝트"))
+        proj_label = QLabel("프로젝트")
+        proj_label.setObjectName("form_label")
+        proj_label.setFixedWidth(60)
+        filter_row.addWidget(proj_label)
+
         self._project_combo = QComboBox()
         self._project_combo.setMinimumWidth(200)
         self._project_combo.addItem("-- 로딩 중 --")
         filter_row.addWidget(self._project_combo)
 
-        filter_row.addWidget(QLabel("담당자"))
+        user_label = QLabel("담당자")
+        user_label.setObjectName("form_label")
+        user_label.setFixedWidth(50)
+        filter_row.addWidget(user_label)
+
         self._user_edit = QLineEdit()
         self._user_edit.setPlaceholderText("이름 입력 후 선택")
         self._user_edit.setMaximumWidth(170)
@@ -182,7 +188,8 @@ class MyTasksTab(QWidget):
         filter_row.addWidget(self._user_combo)
 
         self._user_info = QLabel("")
-        self._user_info.setProperty("dim", True)
+        self._user_info.setObjectName("validation_label")
+        self._user_info.setVisible(False)
         filter_row.addWidget(self._user_info)
 
         me_btn = QPushButton("나로 설정")
@@ -190,7 +197,6 @@ class MyTasksTab(QWidget):
         me_btn.clicked.connect(self._guess_me)
         filter_row.addWidget(me_btn)
 
-        filter_row.addWidget(QLabel("상태"))
         self._status_filter = QComboBox()
         self._status_filter.addItems(["(전체)", "wip", "retake", "wtg", "fin"])
         self._status_filter.setFixedWidth(100)
@@ -206,20 +212,20 @@ class MyTasksTab(QWidget):
 
         # Loading indicator
         self._loading_label = QLabel("")
-        self._loading_label.setProperty("dim", True)
+        self._loading_label.setObjectName("status_msg")
         root.addWidget(self._loading_label)
 
         # ── Splitter: card list (top) + notes (bottom) ──────────────
         splitter = QSplitter(Qt.Orientation.Vertical)
 
-        # Card list
+        # Card list inside QScrollArea
         card_area = QScrollArea()
         card_area.setWidgetResizable(True)
         card_area.setFrameShape(QFrame.Shape.NoFrame)
         self._card_host = QWidget()
         self._card_layout = QVBoxLayout(self._card_host)
         self._card_layout.setContentsMargins(0, 0, 0, 0)
-        self._card_layout.setSpacing(6)
+        self._card_layout.setSpacing(8)
         self._card_layout.addStretch()
         card_area.setWidget(self._card_host)
         splitter.addWidget(card_area)
@@ -230,12 +236,12 @@ class MyTasksTab(QWidget):
         note_lay.setContentsMargins(8, 8, 8, 8)
         note_hdr = QHBoxLayout()
         note_title = QLabel("Notes")
-        note_title.setStyleSheet(f"color: {ACCENT}; font-weight: bold;")
+        note_title.setObjectName("log_title")
         note_hdr.addWidget(note_title)
         note_hdr.addStretch()
         note_lay.addLayout(note_hdr)
         self._note_area = QLabel("샷을 선택하면 노트가 표시됩니다")
-        self._note_area.setProperty("dim", True)
+        self._note_area.setObjectName("page_subtitle")
         self._note_area.setAlignment(Qt.AlignmentFlag.AlignTop)
         self._note_area.setWordWrap(True)
         note_lay.addWidget(self._note_area, 1)
@@ -284,11 +290,13 @@ class MyTasksTab(QWidget):
         user = result  # type: ignore[assignment]
         if not user or not isinstance(user, dict):
             self._user_info.setText("자동 감지 실패")
+            self._user_info.setVisible(True)
             return
         self._user_id = user.get("id")
         name = user.get("name") or user.get("login") or ""
         self._user_edit.setText(name)
-        self._user_info.setText(f"#{self._user_id}")
+        self._user_info.setText(f"✓ #{self._user_id}")
+        self._user_info.setVisible(True)
 
     def _do_user_search(self) -> None:
         query = self._user_edit.text().strip()
@@ -323,7 +331,8 @@ class MyTasksTab(QWidget):
         uid = self._user_combo.itemData(idx)
         if uid is not None:
             self._user_id = int(uid)
-            self._user_info.setText(f"#{self._user_id}")
+            self._user_info.setText(f"✓ #{self._user_id}")
+            self._user_info.setVisible(True)
 
     # ── Refresh / fetch tasks ───────────────────────────────────────
 

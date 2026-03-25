@@ -11,11 +11,13 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
 from bpe.core.settings import get_tools_settings, save_tools_settings
+from bpe.gui import theme
 
 
 _TOOL_DEFS = [
@@ -61,14 +63,17 @@ class ToolsTab(QWidget):
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        # Header
+        # Page header
         hdr = QHBoxLayout()
-        hdr.setContentsMargins(28, 24, 28, 0)
+        hdr.setContentsMargins(theme.CONTENT_MARGIN, 24, theme.CONTENT_MARGIN, 0)
+        hdr.setSpacing(12)
         title = QLabel("Tools")
-        title.setProperty("class", "title")
-        subtitle = QLabel("Nuke 편의기능 온/오프 관리")
-        subtitle.setProperty("dim", True)
+        title.setObjectName("page_title")
+        subtitle = QLabel("Nuke 렌더 도구 설정")
+        subtitle.setObjectName("page_subtitle")
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignBottom)
         hdr.addWidget(title)
         hdr.addWidget(subtitle)
         hdr.addStretch()
@@ -79,9 +84,9 @@ class ToolsTab(QWidget):
             "스위치를 켠 뒤, Nuke에서 setup_pro → BPE Tools → "
             "Reload Tool Hooks를 한 번 실행해야 적용됩니다."
         )
-        banner.setProperty("dim", True)
+        banner.setObjectName("page_subtitle")
         banner.setWordWrap(True)
-        banner.setContentsMargins(28, 12, 28, 4)
+        banner.setContentsMargins(theme.CONTENT_MARGIN, 12, theme.CONTENT_MARGIN, 4)
         root.addWidget(banner)
 
         # Scrollable card area
@@ -91,14 +96,16 @@ class ToolsTab(QWidget):
 
         card_container = QWidget()
         card_layout = QVBoxLayout(card_container)
-        card_layout.setContentsMargins(20, 8, 20, 16)
-        card_layout.setSpacing(12)
+        card_layout.setContentsMargins(theme.CONTENT_MARGIN, 16, theme.CONTENT_MARGIN, theme.CONTENT_MARGIN)
+        card_layout.setSpacing(theme.FORM_SPACING)
 
         tools_cfg = get_tools_settings()
 
         for defn in _TOOL_DEFS:
             card = self._build_tool_card(defn, tools_cfg)
-            card_layout.addWidget(card)
+            card.setMaximumWidth(600)
+            card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+            card_layout.addWidget(card, 0, Qt.AlignmentFlag.AlignLeft)
 
         card_layout.addStretch()
         scroll.setWidget(card_container)
@@ -108,10 +115,10 @@ class ToolsTab(QWidget):
         self, defn: Dict[str, str], tools_cfg: Dict[str, Any]
     ) -> QFrame:
         card = QFrame()
-        card.setFrameShape(QFrame.Shape.StyledPanel)
-        card.setProperty("class", "card")
+        card.setObjectName("card")
         layout = QHBoxLayout(card)
-        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(12)
 
         # Switch
         switch = QCheckBox()
@@ -127,17 +134,17 @@ class ToolsTab(QWidget):
         text_col.setSpacing(4)
 
         title_lbl = QLabel(defn["title"])
-        title_lbl.setStyleSheet("font-weight: bold;")
+        title_lbl.setStyleSheet(f"font-weight: 600; font-size: {theme.FONT_SIZE}px;")
         text_col.addWidget(title_lbl)
 
         sub_lbl = QLabel(defn["subtitle"])
         sub_lbl.setWordWrap(True)
-        sub_lbl.setProperty("dim", True)
+        sub_lbl.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: {theme.FONT_SIZE_SMALL}px;")
         text_col.addWidget(sub_lbl)
 
         detail_lbl = QLabel(defn["detail"])
         detail_lbl.setWordWrap(True)
-        detail_lbl.setProperty("dim", True)
+        detail_lbl.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: {theme.FONT_SIZE_SMALL}px;")
         text_col.addWidget(detail_lbl)
 
         layout.addLayout(text_col, 1)
