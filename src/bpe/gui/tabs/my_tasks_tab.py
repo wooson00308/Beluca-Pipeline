@@ -128,8 +128,7 @@ class MyTasksTab(QWidget):
         self._projects: List[Dict[str, Any]] = []
         self._user_id: Optional[int] = None
         self._cards: List[_ShotCard] = []
-        self._worker: Optional[ShotGridWorker] = None
-        self._thumb_workers: List[ShotGridWorker] = []
+        self._workers: List[ShotGridWorker] = []
 
         self._user_timer = QTimer(self)
         self._user_timer.setSingleShot(True)
@@ -262,7 +261,7 @@ class MyTasksTab(QWidget):
         w.finished.connect(self._on_projects_loaded)
         w.error.connect(lambda e: self._loading_label.setText(f"프로젝트 로드 오류: {e}"))
         w.start()
-        self._worker = w
+        self._workers.append(w)
 
     def _on_projects_loaded(self, result: object) -> None:
         projects: List[Dict[str, Any]] = result if isinstance(result, list) else []
@@ -284,7 +283,7 @@ class MyTasksTab(QWidget):
         w.finished.connect(self._on_guess_me_result)
         w.error.connect(lambda e: self._user_info.setText(f"자동 감지 실패: {e}"))
         w.start()
-        self._worker = w
+        self._workers.append(w)
 
     def _on_guess_me_result(self, result: object) -> None:
         user = result  # type: ignore[assignment]
@@ -312,7 +311,7 @@ class MyTasksTab(QWidget):
         w.finished.connect(self._on_user_results)
         w.error.connect(lambda _: None)
         w.start()
-        self._worker = w
+        self._workers.append(w)
 
     def _on_user_results(self, result: object) -> None:
         users: List[Dict[str, Any]] = result if isinstance(result, list) else []
@@ -362,7 +361,7 @@ class MyTasksTab(QWidget):
         w.finished.connect(self._on_tasks_loaded)
         w.error.connect(lambda e: self._loading_label.setText(f"오류: {e}"))
         w.start()
-        self._worker = w
+        self._workers.append(w)
 
     def _on_tasks_loaded(self, result: object) -> None:
         tasks: List[Dict[str, Any]] = result if isinstance(result, list) else []
@@ -403,7 +402,7 @@ class MyTasksTab(QWidget):
         w = ShotGridWorker(_download)
         w.finished.connect(lambda data: self._apply_thumbnail(card, data))
         w.start()
-        self._thumb_workers.append(w)
+        self._workers.append(w)
 
     def _apply_thumbnail(self, card: _ShotCard, data: object) -> None:
         if not data or not isinstance(data, bytes):

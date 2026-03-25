@@ -67,7 +67,7 @@ class PublishTab(QWidget):
         self._artist_id: Optional[int] = None
         self._task_id: Optional[int] = None
         self._tasks_cache: List[Dict[str, Any]] = []
-        self._worker: Optional[ShotGridWorker] = None
+        self._workers: List[Any] = []
         self._upload_worker: Optional[UploadWorker] = None
 
         self._artist_timer = QTimer(self)
@@ -291,7 +291,7 @@ class PublishTab(QWidget):
         w.finished.connect(self._on_shot_found)
         w.error.connect(lambda e: self._on_shot_error(e))
         w.start()
-        self._worker = w
+        self._workers.append(w)
 
     def _on_shot_found(self, result: object) -> None:
         shot = result  # type: ignore[assignment]
@@ -324,7 +324,7 @@ class PublishTab(QWidget):
         w.finished.connect(self._on_tasks_loaded)
         w.error.connect(lambda e: self._log_msg(f"Task 로드 오류: {e}"))
         w.start()
-        self._worker = w
+        self._workers.append(w)
 
     def _on_tasks_loaded(self, result: object) -> None:
         tasks: List[Dict[str, Any]] = result if isinstance(result, list) else []
@@ -382,7 +382,7 @@ class PublishTab(QWidget):
         w.finished.connect(self._on_artist_results)
         w.error.connect(lambda e: self._log_msg(f"Artist 검색 오류: {e}"))
         w.start()
-        self._worker = w
+        self._workers.append(w)
 
     def _on_artist_results(self, result: object) -> None:
         users: List[Dict[str, Any]] = result if isinstance(result, list) else []
@@ -456,7 +456,7 @@ class PublishTab(QWidget):
         w.finished.connect(lambda ver: self._on_version_created(ver, mov_path))
         w.error.connect(self._on_create_error)
         w.start()
-        self._worker = w
+        self._workers.append(w)
 
     def _on_version_created(self, result: object, mov_path: str) -> None:
         ver = result  # type: ignore[assignment]
@@ -510,4 +510,4 @@ class PublishTab(QWidget):
         w.finished.connect(lambda _: self._log_msg(f"Task 상태 → {status_code}"))
         w.error.connect(lambda e: self._log_msg(f"Task 상태 변경 오류: {e}"))
         w.start()
-        self._worker = w
+        self._workers.append(w)
