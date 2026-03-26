@@ -247,7 +247,7 @@ class MyTasksTab(QWidget):
         note_hdr.addWidget(note_sub)
         note_hdr.addStretch()
         note_refresh_btn = QPushButton("노트 새로고침")
-        note_refresh_btn.setFixedWidth(100)
+        note_refresh_btn.setFixedWidth(120)
         note_refresh_btn.clicked.connect(self._refresh_notes_clicked)
         note_hdr.addWidget(note_refresh_btn)
         note_lay.addLayout(note_hdr)
