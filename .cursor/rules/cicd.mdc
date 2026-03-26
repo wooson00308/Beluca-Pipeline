@@ -32,9 +32,10 @@ alwaysApply: true
 파일: `.github/workflows/release.yml`
 
 `v*` 태그를 push하면:
-1. macOS + Windows에서 PyInstaller 빌드
-2. `BPE-macOS.zip`, `BPE-Windows.zip` 생성
-3. GitHub Release 페이지에 자동 업로드
+1. gate job (ubuntu, lint + test) — 실패 시 빌드 자체가 안 돌아감
+2. macOS + Windows에서 PyInstaller 빌드
+3. `BPE-macOS.zip`, `BPE-Windows.zip` 생성
+4. GitHub Release 페이지에 자동 업로드
 
 ## 버전 관리
 
