@@ -68,6 +68,10 @@ jobs:
       - name: Build with PyInstaller
         run: pyinstaller installer/bpe.spec
 
+      - name: Ad-hoc codesign (macOS)
+        if: runner.os == 'macOS'
+        run: codesign --force --deep -s - dist/BPE.app
+
       - name: Install create-dmg (macOS)
         if: runner.os == 'macOS'
         run: brew install create-dmg
