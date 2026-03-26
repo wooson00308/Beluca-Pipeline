@@ -18,6 +18,7 @@ SRC = ROOT / "src"
 datas = [
     (str(SRC / "bpe"), "bpe"),
     (str(ROOT / "VERSION.txt"), "."),
+    (str(ROOT / "installer" / "icon.png"), "."),
 ]
 
 # 템플릿이 있으면 포함
@@ -91,6 +92,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=str(ROOT / "installer" / ("icon.icns" if sys.platform == "darwin" else "icon.ico")),
 )
 
 # macOS .app 번들 (Windows에서는 무시됨)
@@ -98,6 +100,6 @@ if sys.platform == "darwin":
     app = BUNDLE(
         exe,
         name="BPE.app",
-        icon=None,
+        icon=str(ROOT / "installer" / "icon.icns"),
         bundle_identifier="com.beluca.bpe",
     )

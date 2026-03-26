@@ -68,12 +68,26 @@ jobs:
       - name: Build with PyInstaller
         run: pyinstaller installer/bpe.spec
 
+      - name: Install create-dmg (macOS)
+        if: runner.os == 'macOS'
+        run: brew install create-dmg
+
       - name: Package artifact (macOS)
         if: runner.os == 'macOS'
         run: |
-          cd dist
-          zip -r ../${{ matrix.artifact }}.zip BPE.app || zip -r ../${{ matrix.artifact }}.zip BPE
-          cd ..
+          create-dmg \
+            --volname "BPE" \
+            --volicon "installer/icon.icns" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 100 \
+            --icon "BPE.app" 150 190 \
+            --app-drop-link 450 190 \
+            --hide-extension "BPE.app" \
+            --no-internet-enable \
+            "${{ matrix.artifact }}.dmg" \
+            "dist/BPE.app" || \
+          (cd dist && zip -r ../${{ matrix.artifact }}.zip BPE.app && cd ..)
 
       - name: Package artifact (Windows)
         if: runner.os == 'Windows'
@@ -85,7 +99,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}.zip
+          path: |
+            ${{ matrix.artifact }}.dmg
+            ${{ matrix.artifact }}.zip
 
   release:
     needs: build
@@ -102,5 +118,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*.zip
+          files: |
+            artifacts/**/*.dmg
+            artifacts/**/*.zip
           generate_release_notes: true
