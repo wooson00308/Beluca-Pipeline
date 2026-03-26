@@ -80,6 +80,24 @@ python -m pytest tests/ -q   # 테스트 전부 통과
 git push                     # CI가 나머지 검증
 ```
 
+## 커밋 메시지 컨벤션
+
+```
+<type>: <설명>
+```
+
+타입:
+- `feat` — 새 기능 (`feat: Shot Builder 폴더 템플릿 선택 구현`)
+- `fix` — 버그 수정 (`fix: QThread GC 크래시 수정`)
+- `refactor` — 리팩토링 (`refactor: preset 로딩 로직 core/로 분리`)
+- `style` — 코드 포맷/린트 (`style: ruff format 적용`)
+- `test` — 테스트 추가/수정 (`test: MockShotgun 버전 업로드 테스트 추가`)
+- `docs` — 문서 (`docs: README ShotGrid 연결 섹션 추가`)
+- `ci` — CI/CD 수정 (`ci: Ubuntu Qt 의존성 추가`)
+- `chore` — 기타 잡일 (`chore: .gitignore bpe.spec 예외 추가`)
+
+한글로 쓰되, 끝에 마침표 붙이지 마. 한 줄로 끝내는 게 기본.
+
 ## 주의사항
 
 - `installer/bpe.spec` 수정하면 빌드가 깨질 수 있음. PyInstaller 숙지 후 수정할 것

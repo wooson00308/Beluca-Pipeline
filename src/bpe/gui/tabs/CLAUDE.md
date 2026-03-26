@@ -1,0 +1,81 @@
+# GUI 탭 작성 규칙
+
+이 규칙은 src/bpe/gui/widgets/ 에도 동일하게 적용됨.
+
+## 탭 클래스 구조
+
+모든 탭은 QWidget 서브클래스:
+```python
+class MyTab(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._workers: List[Any] = []  # QThread 참조 유지용
+        self._build_ui()
+```
+
+## 폼 레이아웃 패턴
+
+QFormLayout 쓰지 말 것. 직접 QHBoxLayout으로:
+```python
+def _form_row(label_text: str, widget: QWidget) -> QHBoxLayout:
+    row = QHBoxLayout()
+    row.setSpacing(12)
+    lbl = QLabel(label_text)
+    lbl.setObjectName("form_label")
+    lbl.setFixedWidth(120)
+    lbl.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+    row.addWidget(lbl)
+    row.addWidget(widget, 1)
+    return row
+```
+
+## 디자인 토큰 (theme.py)
+
+색상/크기는 하드코딩 금지. theme 모듈 참조:
+```python
+from bpe.gui import theme
+# theme.ACCENT, theme.BG, theme.CONTENT_MARGIN 등
+```
+
+## objectName 규칙
+
+QSS 스타일링은 objectName 기반:
+- `#page_title` — 페이지 제목 (큰 볼드)
+- `#page_subtitle` — 제목 옆 설명 (dim)
+- `#form_label` — 폼 라벨 (120px 고정)
+- `#validation_label` — 초록색 확인 텍스트
+- `#log_title` — 로그 섹션 제목 (주황)
+- `#log_area` — 로그 텍스트 영역 (모노스페이스)
+- `#status_msg` — 상태 메시지 (dim)
+- `#drop_zone` — 드래그앤드롭 영역
+- `#card` — 카드 컨테이너
+
+## 버튼 스타일
+
+- Primary (주황 outline): `btn.setProperty("primary", True)`
+- Secondary (회색): 기본 QPushButton
+- 최소 너비: 한글 4글자 이상이면 setFixedWidth(100) 이상
+
+## 리사이즈 안전
+
+반드시 QScrollArea로 콘텐츠를 감싸기. 콘텐츠 마진 32px.
+```python
+scroll = QScrollArea()
+scroll.setWidgetResizable(True)
+container = QWidget()
+# ... 레이아웃 구성 ...
+scroll.setWidget(container)
+```
+
+## ShotGrid 호출
+
+UI 스레드에서 SG API 직접 호출 금지. 반드시 ShotGridWorker:
+```python
+from bpe.gui.workers.sg_worker import ShotGridWorker
+
+w = ShotGridWorker(some_sg_function)
+w.finished.connect(self._on_result)
+w.error.connect(lambda e: self._log(f"오류: {e}"))
+w.start()
+self._workers.append(w)  # GC 방지 필수
+```

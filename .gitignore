@@ -22,6 +22,8 @@ venv/
 .cursor/
 !.cursor/rules/
 !.cursor/skills/
+.claude/
+!.claude/skills/
 *.swp
 
 # OS
