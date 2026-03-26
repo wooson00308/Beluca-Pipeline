@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from bpe import __version__
 from bpe.gui import theme
 
 TAB_DEFS: List[Dict[str, str]] = [
@@ -29,7 +30,7 @@ TAB_DEFS: List[Dict[str, str]] = [
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("BPE v0.2.0")
+        self.setWindowTitle(f"BPE v{__version__}")
         self.setMinimumSize(theme.MIN_WIDTH, theme.MIN_HEIGHT)
         self.resize(theme.DEFAULT_WIDTH, theme.DEFAULT_HEIGHT)
 
@@ -78,7 +79,7 @@ class MainWindow(QMainWindow):
         sb.addStretch()
 
         # Version at bottom
-        ver = QLabel("BPE v0.2.0")
+        ver = QLabel(f"BPE v{__version__}")
         ver.setObjectName("sidebar_version")
         ver.setContentsMargins(20, 0, 0, 16)
         sb.addWidget(ver)

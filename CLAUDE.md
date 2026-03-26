@@ -115,6 +115,15 @@ raise ShotGridError("사용자에게 보여줄 메시지")
 python -m pytest tests/ -v
 ```
 
+## 버전 관리
+
+VERSION.txt가 단일 진실 소스. 아래 파일들은 전부 VERSION.txt에서 읽어감:
+- `pyproject.toml` — hatch dynamic version
+- `src/bpe/__init__.py` — `__version__`
+- `src/bpe/gui/main_window.py` — 윈도우 타이틀 + 사이드바
+
+버전 바꿀 때 VERSION.txt만 수정하면 됨. 다른 파일 손대지 말 것.
+
 ## CI/CD
 
 ```
@@ -122,7 +131,7 @@ python -m pytest tests/ -v
                               ↓ 통과
                         개발 계속...
                               ↓ 배포 준비 되면
-                        git tag v0.x.x → push → CD 자동 (빌드 + Release)
+                        VERSION.txt 수정 → 커밋 → 태그 → push → CD 자동 (빌드 + Release)
 ```
 
 - CI: `.github/workflows/ci.yml` — 매 push/PR마다 Ubuntu/Windows/macOS x Python 3.9/3.11 매트릭스에서 ruff + pytest

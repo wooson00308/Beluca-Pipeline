@@ -13,15 +13,40 @@ python -m pytest tests/ -q   # 테스트 전부 통과
 
 ## 절차
 
-### 1. 커밋 + push
+### 1. 현재 최신 태그 확인 + 다음 버전 결정
 
 ```bash
-git add -A
-git commit -m "변경 내용 설명"
+git tag --sort=-v:refname | head -5
+```
+
+최신 태그를 확인한 뒤, 다음 버전을 계산한다:
+- 버그 수정/패치: 마지막 자리 +1 (예: 0.2.1 → 0.2.2)
+- 기능 추가: 가운데 자리 +1, 마지막 자리 0 (예: 0.2.2 → 0.3.0)
+- 대규모 변경: 첫째 자리 +1 (예: 0.3.0 → 1.0.0)
+
+사용자에게 반드시 질문할 것:
+- 현재 최신 태그가 무엇인지 알려주기
+- 이번 변경이 패치/기능/대규모 중 어느 쪽인지 확인하기
+- 계산한 다음 버전을 제시하고, 이 버전으로 진행할지 확인받기
+
+확인 없이 버전을 올리거나 태그를 생성하지 말 것.
+
+### 2. VERSION.txt 수정
+
+사용자가 확인한 버전으로 수정:
+```bash
+echo "<확정된 버전>" > VERSION.txt
+git add VERSION.txt
+git commit -m "chore: v<확정된 버전> 버전 범프"
+```
+
+### 3. push
+
+```bash
 git push
 ```
 
-### 2. CI 통과 확인
+### 4. CI 통과 확인
 
 ```bash
 gh run list --limit 1
@@ -31,12 +56,7 @@ gh run list --limit 1
 gh run view --log-failed
 ```
 
-### 3. 버전 태그
-
-현재 최신 태그 확인:
-```bash
-git tag --sort=-v:refname | head -5
-```
+### 5. 버전 태그
 
 새 태그 생성 + push:
 ```bash
@@ -44,7 +64,7 @@ git tag v0.x.x
 git push origin v0.x.x
 ```
 
-### 4. Release 빌드 확인 (3~5분)
+### 6. Release 빌드 확인 (3~5분)
 
 ```bash
 gh run list --workflow=release.yml --limit 1
@@ -55,7 +75,7 @@ gh run list --workflow=release.yml --limit 1
 gh release view v0.x.x
 ```
 
-### 5. 배포 완료
+### 7. 배포 완료
 
 릴리즈 페이지에 `BPE-macOS.zip`, `BPE-Windows.zip`이 올라감.
 URL: `https://github.com/wooson00308/Beluca-Pipeline/releases/tag/v0.x.x`

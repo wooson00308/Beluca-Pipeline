@@ -36,25 +36,40 @@ alwaysApply: true
 2. `BPE-macOS.zip`, `BPE-Windows.zip` 생성
 3. GitHub Release 페이지에 자동 업로드
 
+## 버전 관리
+
+VERSION.txt가 단일 진실 소스. 아래 파일들은 전부 VERSION.txt에서 읽어감:
+- `pyproject.toml` — hatch dynamic version
+- `src/bpe/__init__.py` — `__version__`
+- `src/bpe/gui/main_window.py` — 윈도우 타이틀 + 사이드바
+
+버전 바꿀 때 VERSION.txt만 수정하면 됨. 다른 파일 손대지 말 것.
+
 ## 배포 방법
 
 ```bash
-# 1. 코드 수정 완료 + push
-git add -A && git commit -m "설명" && git push
+# 1. 현재 최신 태그 확인
+git tag --sort=-v:refname | head -5
 
-# 2. CI 통과 확인
+# 2. VERSION.txt 수정
+echo "0.x.x" > VERSION.txt
+
+# 3. 커밋 + push
+git add VERSION.txt && git commit -m "chore: v0.x.x 버전 범프" && git push
+
+# 4. CI 통과 확인
 gh run list --limit 1
 # "completed success" 확인
 
-# 3. 버전 태그 생성 + push
-git tag v0.2.2
-git push origin v0.2.2
+# 5. 버전 태그 생성 + push
+git tag v0.x.x
+git push origin v0.x.x
 
-# 4. Release 빌드 완료 대기 (3~5분)
+# 6. Release 빌드 완료 대기 (3~5분)
 gh run list --workflow=release.yml --limit 1
 
-# 5. 릴리즈 확인
-gh release view v0.2.2
+# 7. 릴리즈 확인
+gh release view v0.x.x
 ```
 
 ## macOS 보안 해제
