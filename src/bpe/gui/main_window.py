@@ -146,12 +146,22 @@ class MainWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl(info.html_url))
             return
 
+        import os
+        import shutil
         import subprocess
+        import tempfile
 
         try:
+            # _MEIPASS 안의 런처를 임시 경로로 복사 (BPE 종료 시 _MEIPASS 삭제되므로)
+            tmp_dir = tempfile.mkdtemp(prefix="bpe_launcher_")
+            tmp_launcher = Path(tmp_dir) / launcher.name
+            shutil.copy2(str(launcher), str(tmp_launcher))
+            if os.name != "nt":
+                os.chmod(str(tmp_launcher), 0o755)
+
             subprocess.Popen(
                 [
-                    str(launcher),
+                    str(tmp_launcher),
                     "--version",
                     info.latest_version,
                     "--download-url",
