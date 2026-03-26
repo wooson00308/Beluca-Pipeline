@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QHBoxLayout,
@@ -105,6 +105,11 @@ class MainWindow(QMainWindow):
         self._update_info: Any = None
         self._init_update_toast()
         self._start_update_check()
+
+        # 4시간마다 재체크
+        self._update_timer = QTimer(self)
+        self._update_timer.timeout.connect(self._start_update_check)
+        self._update_timer.start(4 * 60 * 60 * 1000)
 
     def _init_update_toast(self) -> None:
         from bpe.gui.widgets.update_toast import UpdateToast

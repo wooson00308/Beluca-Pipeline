@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import ssl
 import sys
 import urllib.request
 from dataclasses import dataclass
@@ -10,6 +11,17 @@ from pathlib import Path
 from typing import Callable, Optional, Tuple
 
 from bpe.core.logging import get_logger
+
+
+def _make_ssl_context() -> ssl.SSLContext:
+    """certifi 인증서가 있으면 사용, 없으면 기본 context."""
+    try:
+        import certifi
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        return ssl.create_default_context()
+
 
 logger = get_logger("update_checker")
 
@@ -71,7 +83,8 @@ def check_latest_release(current_version: str) -> Optional[UpdateInfo]:
                 "User-Agent": "BPE-UpdateChecker",
             },
         )
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        ctx = _make_ssl_context()
+        with urllib.request.urlopen(req, timeout=10, context=ctx) as resp:
             data = json.loads(resp.read().decode("utf-8"))
 
         tag = data.get("tag_name", "")
@@ -104,8 +117,9 @@ def download_release_asset(
     """
     req = urllib.request.Request(url, headers={"User-Agent": "BPE-UpdateChecker"})
     dest.parent.mkdir(parents=True, exist_ok=True)
+    ctx = _make_ssl_context()
 
-    with urllib.request.urlopen(req, timeout=60) as resp:
+    with urllib.request.urlopen(req, timeout=60, context=ctx) as resp:
         total = int(resp.headers.get("Content-Length", 0))
         downloaded = 0
 
