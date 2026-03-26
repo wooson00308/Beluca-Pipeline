@@ -6,7 +6,8 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
-from PySide6.QtCore import QDesktopServices, Qt, QUrl
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
