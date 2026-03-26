@@ -98,7 +98,8 @@ class ToolsTab(QWidget):
         for defn in _TOOL_DEFS:
             card = self._build_tool_card(defn, tools_cfg)
             card.setMaximumWidth(600)
-            card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+            # Vertical Fixed locks height to an early (wrong) hint for word-wrapped QLabels.
+            card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
             card_layout.addWidget(card, 0, Qt.AlignmentFlag.AlignLeft)
 
         card_layout.addStretch()
@@ -132,11 +133,13 @@ class ToolsTab(QWidget):
         sub_lbl = QLabel(defn["subtitle"])
         sub_lbl.setWordWrap(True)
         sub_lbl.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: {theme.FONT_SIZE_SMALL}px;")
+        sub_lbl.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         text_col.addWidget(sub_lbl)
 
         detail_lbl = QLabel(defn["detail"])
         detail_lbl.setWordWrap(True)
         detail_lbl.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: {theme.FONT_SIZE_SMALL}px;")
+        detail_lbl.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         text_col.addWidget(detail_lbl)
 
         layout.addLayout(text_col, 1)
