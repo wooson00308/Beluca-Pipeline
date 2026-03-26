@@ -83,6 +83,7 @@ def test_check_new_version_available(monkeypatch: pytest.MonkeyPatch) -> None:
         "bpe.core.update_checker.urllib.request.urlopen",
         lambda *a, **kw: _FakeResponse(data),
     )
+    monkeypatch.setattr("bpe.core.update_checker._make_ssl_context", lambda: None)
     monkeypatch.setattr("bpe.core.update_checker.sys.platform", "darwin")
 
     result = check_latest_release("0.4.0")
@@ -101,6 +102,7 @@ def test_check_already_latest(monkeypatch: pytest.MonkeyPatch) -> None:
         "bpe.core.update_checker.urllib.request.urlopen",
         lambda *a, **kw: _FakeResponse(data),
     )
+    monkeypatch.setattr("bpe.core.update_checker._make_ssl_context", lambda: None)
 
     assert check_latest_release("0.4.0") is None
 
@@ -113,6 +115,7 @@ def test_check_network_error(monkeypatch: pytest.MonkeyPatch) -> None:
         "bpe.core.update_checker.urllib.request.urlopen",
         _raise,
     )
+    monkeypatch.setattr("bpe.core.update_checker._make_ssl_context", lambda: None)
 
     assert check_latest_release("0.4.0") is None
 
@@ -130,6 +133,7 @@ def test_check_windows_asset(monkeypatch: pytest.MonkeyPatch) -> None:
         "bpe.core.update_checker.urllib.request.urlopen",
         lambda *a, **kw: _FakeResponse(data),
     )
+    monkeypatch.setattr("bpe.core.update_checker._make_ssl_context", lambda: None)
     monkeypatch.setattr("bpe.core.update_checker.sys.platform", "win32")
 
     result = check_latest_release("0.4.0")
