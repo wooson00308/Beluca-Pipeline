@@ -149,3 +149,49 @@ def parse_nk_file(nk_path: str) -> Dict[str, Any]:
             result["read_input_transform"] = cs
 
     return result
+
+
+# Default values used when NK analysis misses a field.
+_PRESET_DEFAULTS: Dict[str, Any] = {
+    "project_type": "드라마(OTT)",
+    "project_code": "",
+    "delivery_format": "EXR 16bit",
+    "fps": "23.976",
+    "plate_format_choice": "(직접입력)",
+    "plate_format_name": "",
+    "plate_width": "1920",
+    "plate_height": "1080",
+    "ocio_path": "",
+    "write_enabled": True,
+    "write_channels": "all",
+    "write_datatype": "16 bit half",
+    "write_compression": "PIZ Wavelet (32 scanlines)",
+    "write_metadata": "all metadata",
+    "write_transform_type": "colorspace",
+    "write_out_colorspace": "ACES - ACES2065-1",
+    "write_output_display": "ACES",
+    "write_output_view": "Rec.709",
+    "write_colorspace": "ACES - ACES2065-1",
+    "read_input_transform": "ACES - ACES2065-1",
+}
+
+
+def parse_nk_for_preset(nk_path: str, preset_name: str = "") -> Dict[str, Any]:
+    """
+    Parse an NK file and return a complete preset dict with defaults filled in.
+
+    *preset_name* is written into ``project_code`` when provided.
+
+    Raises ``ValueError`` when the file cannot be read (propagated from
+    :func:`parse_nk_file`).
+    """
+    parsed = parse_nk_file(nk_path)
+    data: Dict[str, Any] = {}
+    for key, default in _PRESET_DEFAULTS.items():
+        data[key] = parsed.get(key, default)
+    # write_colorspace falls back to write_out_colorspace when not explicitly set
+    if "write_colorspace" not in parsed:
+        data["write_colorspace"] = data["write_out_colorspace"]
+    if preset_name:
+        data["project_code"] = preset_name
+    return data

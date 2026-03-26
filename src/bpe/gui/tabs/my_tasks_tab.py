@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from typing import Any, Dict, List, Optional
 
 from PySide6.QtCore import Qt, QTimer
@@ -20,15 +19,17 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from bpe.core.logging import get_logger
 from bpe.core.nk_finder import find_latest_nk_and_open
-from bpe.gui.theme import ACCENT, BORDER
+from bpe.gui import theme
 from bpe.gui.workers.sg_worker import ShotGridWorker
 from bpe.shotgrid.client import get_default_sg
+from bpe.shotgrid.notes import list_notes_for_shots
 from bpe.shotgrid.projects import list_active_projects
 from bpe.shotgrid.tasks import list_comp_tasks_for_project_user
 from bpe.shotgrid.users import guess_human_user_for_me, search_human_users
 
-logger = logging.getLogger(__name__)
+logger = get_logger("gui.tabs.my_tasks_tab")
 
 _AUTOCOMPLETE_DELAY = 350
 _THUMB_W = 80
@@ -58,7 +59,7 @@ class _ShotCard(QFrame):
         self.thumb_label.setFixedSize(_THUMB_W, _THUMB_H)
         self.thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.thumb_label.setStyleSheet(
-            f"background-color: {BORDER}; border-radius: 4px; border: none;"
+            f"background-color: {theme.BORDER}; border-radius: 4px; border: none;"
         )
         self.thumb_label.setText("img")
         lay.addWidget(self.thumb_label)
@@ -73,7 +74,7 @@ class _ShotCard(QFrame):
         due = d.get("due_date") or ""
 
         title = QLabel(f"{shot_code}  —  {task_content}")
-        title.setStyleSheet(f"font-weight: bold; border: none; color: {ACCENT};")
+        title.setStyleSheet(f"font-weight: bold; border: none; color: {theme.ACCENT};")
         info.addWidget(title)
 
         status_label = QLabel(f"상태: {status}")
@@ -129,6 +130,9 @@ class MyTasksTab(QWidget):
         self._user_id: Optional[int] = None
         self._cards: List[_ShotCard] = []
         self._workers: List[ShotGridWorker] = []
+        self._note_widgets: List[QFrame] = []
+        self._last_shot_ids: List[int] = []
+        self._notes_req_seq: int = 0
 
         self._user_timer = QTimer(self)
         self._user_timer.setSingleShot(True)
@@ -233,17 +237,32 @@ class MyTasksTab(QWidget):
         note_panel = QWidget()
         note_lay = QVBoxLayout(note_panel)
         note_lay.setContentsMargins(8, 8, 8, 8)
+
         note_hdr = QHBoxLayout()
         note_title = QLabel("Notes")
         note_title.setObjectName("log_title")
         note_hdr.addWidget(note_title)
+        note_sub = QLabel("최근 2주 코멘트")
+        note_sub.setObjectName("page_subtitle")
+        note_hdr.addWidget(note_sub)
         note_hdr.addStretch()
+        note_refresh_btn = QPushButton("노트 새로고침")
+        note_refresh_btn.setFixedWidth(100)
+        note_refresh_btn.clicked.connect(self._refresh_notes_clicked)
+        note_hdr.addWidget(note_refresh_btn)
         note_lay.addLayout(note_hdr)
-        self._note_area = QLabel("샷을 선택하면 노트가 표시됩니다")
-        self._note_area.setObjectName("page_subtitle")
-        self._note_area.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self._note_area.setWordWrap(True)
-        note_lay.addWidget(self._note_area, 1)
+
+        note_scroll = QScrollArea()
+        note_scroll.setWidgetResizable(True)
+        note_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._note_host = QWidget()
+        self._note_layout = QVBoxLayout(self._note_host)
+        self._note_layout.setContentsMargins(0, 0, 0, 0)
+        self._note_layout.setSpacing(6)
+        self._note_layout.addStretch()
+        note_scroll.setWidget(self._note_host)
+        note_lay.addWidget(note_scroll, 1)
+
         splitter.addWidget(note_panel)
 
         splitter.setStretchFactor(0, 3)
@@ -377,6 +396,15 @@ class MyTasksTab(QWidget):
         for card in self._cards:
             self._load_thumbnail(card)
 
+        # Kick off note loading
+        shot_ids = [int(t.get("shot_id")) for t in tasks if t.get("shot_id") is not None]
+        self._last_shot_ids = shot_ids
+        if shot_ids:
+            self._load_notes(shot_ids)
+        else:
+            self._clear_notes()
+            self._add_note_placeholder("조회된 샷이 없습니다.")
+
     def _clear_cards(self) -> None:
         for card in self._cards:
             self._card_layout.removeWidget(card)
@@ -411,3 +439,90 @@ class MyTasksTab(QWidget):
         pm.loadFromData(data)
         if not pm.isNull():
             card.set_thumbnail(pm)
+
+    # ── Notes panel ──────────────────────────────────────────────────
+
+    def _refresh_notes_clicked(self) -> None:
+        if not self._last_shot_ids:
+            self._loading_label.setText("먼저 조회를 실행하세요.")
+            return
+        self._load_notes(self._last_shot_ids)
+
+    def _load_notes(self, shot_ids: List[int]) -> None:
+        self._notes_req_seq += 1
+        seq = self._notes_req_seq
+        ids = [int(sid) for sid in shot_ids if sid is not None][:150]
+        self._loading_label.setText("노트 불러오는 중...")
+
+        def _fetch() -> List[Dict[str, Any]]:
+            sg = get_default_sg()
+            return list_notes_for_shots(sg, ids)
+
+        def _on_done(result: object) -> None:
+            if seq != self._notes_req_seq:
+                return
+            notes: List[Dict[str, Any]] = result if isinstance(result, list) else []
+            self._loading_label.setText("")
+            self._render_notes(notes)
+
+        def _on_error(msg: str) -> None:
+            if seq != self._notes_req_seq:
+                return
+            self._loading_label.setText("")
+            logger.warning("노트 로드 실패: %s", msg)
+            self._clear_notes()
+            self._add_note_placeholder("노트 로드 실패")
+
+        w = ShotGridWorker(_fetch)
+        w.finished.connect(_on_done)
+        w.error.connect(_on_error)
+        w.start()
+        self._workers.append(w)
+
+    def _clear_notes(self) -> None:
+        for widget in self._note_widgets:
+            self._note_layout.removeWidget(widget)
+            widget.deleteLater()
+        self._note_widgets.clear()
+
+    def _add_note_placeholder(self, text: str) -> None:
+        lbl = QLabel(text)
+        lbl.setObjectName("page_subtitle")
+        self._note_layout.insertWidget(self._note_layout.count() - 1, lbl)
+        self._note_widgets.append(lbl)  # type: ignore[arg-type]
+
+    def _render_notes(self, notes: List[Dict[str, Any]]) -> None:
+        self._clear_notes()
+        if not notes:
+            self._add_note_placeholder("코멘트가 없거나 아직 조회하지 않았습니다.")
+            return
+        for rec in notes:
+            card = self._make_note_card(rec)
+            self._note_layout.insertWidget(self._note_layout.count() - 1, card)
+            self._note_widgets.append(card)
+
+    def _make_note_card(self, rec: Dict[str, Any]) -> QFrame:
+        card = QFrame()
+        card.setObjectName("card")
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(12, 8, 12, 8)
+        lay.setSpacing(4)
+
+        proj = (rec.get("project_name") or "—").strip()
+        author = (rec.get("author") or "—").strip()
+        context = (rec.get("context") or "—").strip()
+        ts = (rec.get("timestamp") or "—").strip()
+        meta = f"{proj}  ·  {author}  ·  {context}  ·  {ts}"
+
+        meta_label = QLabel(meta)
+        meta_label.setStyleSheet(f"color: {theme.TEXT_DIM}; border: none;")
+        lay.addWidget(meta_label)
+
+        raw = (rec.get("content") or rec.get("subject") or "—").strip()
+        body = raw.replace("\n", " ").strip() or "—"
+        body_label = QLabel(body)
+        body_label.setWordWrap(True)
+        body_label.setStyleSheet(f"color: {theme.TEXT}; border: none;")
+        lay.addWidget(body_label)
+
+        return card

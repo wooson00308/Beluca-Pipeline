@@ -7,10 +7,12 @@ from pathlib import Path
 import pytest
 
 from bpe.core.nk_parser import (
+    _PRESET_DEFAULTS,
     _extract_all_blocks,
     _find_named_block,
     _get_knob,
     parse_nk_file,
+    parse_nk_for_preset,
 )
 
 # ---------------------------------------------------------------------------
@@ -204,3 +206,71 @@ class TestParseNkFile:
         result = parse_nk_file(str(p))
         assert result["plate_width"] == "1920"
         assert result["plate_height"] == "1080"
+
+
+# ---------------------------------------------------------------------------
+# parse_nk_for_preset
+# ---------------------------------------------------------------------------
+
+
+class TestParseNkForPreset:
+    def test_fills_defaults_for_empty_file(self, tmp_path: Path):
+        """Empty NK file should produce a dict with all default values."""
+        p = tmp_path / "empty.nk"
+        p.write_text("", encoding="utf-8")
+        result = parse_nk_for_preset(str(p))
+        for key, default in _PRESET_DEFAULTS.items():
+            assert key in result
+            assert result[key] == default
+
+    def test_detected_values_override_defaults(self, tmp_path: Path):
+        nk = (
+            "Root {\n"
+            " fps 24\n"
+            ' format "4096 2160 0 0 4096 2160 1 UHD"\n'
+            "}\n"
+            "Write {\n"
+            " file_type exr\n"
+            ' datatype "32 bit float"\n'
+            ' compression "DWAA"\n'
+            ' ocioColorspace "ACES - ACEScg"\n'
+            " name Write2\n"
+            "}\n"
+        )
+        p = tmp_path / "test.nk"
+        p.write_text(nk, encoding="utf-8")
+        result = parse_nk_for_preset(str(p))
+        assert result["fps"] == "24"
+        assert result["plate_width"] == "4096"
+        assert result["plate_height"] == "2160"
+        assert result["delivery_format"] == "EXR 32bit"
+        assert result["write_compression"] == "DWAA"
+        assert result["write_out_colorspace"] == "ACES - ACEScg"
+        assert result["write_colorspace"] == "ACES - ACEScg"
+
+    def test_preset_name_sets_project_code(self, tmp_path: Path):
+        p = tmp_path / "test.nk"
+        p.write_text("", encoding="utf-8")
+        result = parse_nk_for_preset(str(p), preset_name="MY_PROJECT")
+        assert result["project_code"] == "MY_PROJECT"
+
+    def test_write_colorspace_fallback(self, tmp_path: Path):
+        """write_colorspace should fall back to write_out_colorspace."""
+        nk = 'Write {\n file_type exr\n ocioColorspace "ACES - ACEScg"\n name Write2\n}\n'
+        p = tmp_path / "test.nk"
+        p.write_text(nk, encoding="utf-8")
+        result = parse_nk_for_preset(str(p))
+        assert result["write_colorspace"] == result["write_out_colorspace"]
+        assert result["write_colorspace"] == "ACES - ACEScg"
+
+    def test_invalid_path_raises(self, tmp_path: Path):
+        with pytest.raises(ValueError, match="NK 파일을 읽지 못했습니다"):
+            parse_nk_for_preset(str(tmp_path / "nonexistent.nk"))
+
+    def test_all_default_keys_present(self, tmp_path: Path):
+        """Result should always contain every key from _PRESET_DEFAULTS."""
+        p = tmp_path / "minimal.nk"
+        p.write_text("Root {\n fps 30\n}\n", encoding="utf-8")
+        result = parse_nk_for_preset(str(p))
+        for key in _PRESET_DEFAULTS:
+            assert key in result
