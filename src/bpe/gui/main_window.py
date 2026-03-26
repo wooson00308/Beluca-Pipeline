@@ -146,18 +146,22 @@ class MainWindow(QMainWindow):
 
         import subprocess
 
-        subprocess.Popen(
-            [
-                str(launcher),
-                "--version",
-                info.latest_version,
-                "--download-url",
-                info.download_url,
-                "--app-path",
-                self._get_app_path(),
-            ]
-        )
-        QApplication.instance().quit()
+        try:
+            subprocess.Popen(
+                [
+                    str(launcher),
+                    "--version",
+                    info.latest_version,
+                    "--download-url",
+                    info.download_url,
+                    "--app-path",
+                    self._get_app_path(),
+                ]
+            )
+            QApplication.instance().quit()
+        except Exception:
+            logger.warning("런처 실행 실패, 브라우저 폴백", exc_info=True)
+            QDesktopServices.openUrl(QUrl(info.html_url))
 
     def _find_launcher(self) -> Optional[Path]:
         """번들 내 런처 바이너리를 찾는다."""
