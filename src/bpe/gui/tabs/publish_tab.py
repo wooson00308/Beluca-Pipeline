@@ -469,14 +469,13 @@ class PublishTab(QWidget):
         self._log_msg(f"Version #{ver_id} 생성 완료. 업로드 시작...")
         self._set_progress(10, "업로드 중...")
 
-        sg = get_default_sg()
-        uw = UploadWorker(sg, ver_id, mov_path)
+        uw = UploadWorker(ver_id, mov_path)
         uw.progress.connect(lambda v: self._set_progress(int(10 + v * 85)))
         uw.status.connect(lambda s: self._status_msg.setText(s))
         uw.finished.connect(lambda: self._on_upload_done(ver_id))
         uw.error.connect(self._on_upload_error)
         uw.start()
-        self._upload_worker = uw
+        self._workers.append(uw)
 
     def _on_upload_done(self, version_id: int) -> None:
         self._set_progress(100, "업로드 완료!")

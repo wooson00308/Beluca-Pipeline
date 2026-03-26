@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Optional
 
 from PySide6.QtCore import QThread, Signal
 
@@ -17,25 +17,26 @@ class UploadWorker(QThread):
 
     def __init__(
         self,
-        sg: Any,
         version_id: int,
         movie_path: str,
         *,
         image_path: Optional[str] = None,
     ) -> None:
         super().__init__()
-        self._sg = sg
         self._version_id = version_id
         self._movie_path = movie_path
         self._image_path = image_path
 
     def run(self) -> None:
+        from bpe.shotgrid.client import get_default_sg
         from bpe.shotgrid.versions import upload_movie_to_version, upload_thumbnail_to_version
 
         try:
+            sg = get_default_sg()
+
             self.status.emit("Uploading movie...")
             upload_movie_to_version(
-                self._sg,
+                sg,
                 self._version_id,
                 self._movie_path,
                 progress_cb=self._on_progress,
@@ -43,7 +44,7 @@ class UploadWorker(QThread):
 
             self.status.emit("Uploading thumbnail...")
             upload_thumbnail_to_version(
-                self._sg,
+                sg,
                 self._version_id,
                 image_path=self._image_path,
                 movie_path=self._movie_path,
