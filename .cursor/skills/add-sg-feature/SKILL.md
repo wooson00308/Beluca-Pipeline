@@ -1,3 +1,8 @@
+---
+name: add-sg-feature
+description: Guides adding ShotGrid-backed features in bpe.shotgrid modules, tests with MockShotgun, and GUI calls via ShotGridWorker. Use when extending ShotGrid integration, new SG API wrappers, or tab features that call ShotGrid.
+---
+
 # ShotGrid 기능 추가하기
 
 ShotGrid API를 사용하는 새 기능을 추가할 때 따라야 할 절차.

@@ -1,3 +1,8 @@
+---
+name: add-tab
+description: Steps to add a new PySide6 tab in BPE — scaffold under gui/tabs, register in main_window, theme objectNames, ShotGridWorker for SG. Use when adding a sidebar tab or new GUI page.
+---
+
 # 새 탭 추가하기
 
 BPE에 새 탭을 추가할 때 따라야 할 절차.

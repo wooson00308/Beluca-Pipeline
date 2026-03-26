@@ -19,10 +19,10 @@ venv/
 # IDE
 .idea/
 .vscode/
-.cursor/
+.cursor/*
 !.cursor/rules/
 !.cursor/skills/
-.claude/
+.claude/*
 !.claude/skills/
 *.swp
 

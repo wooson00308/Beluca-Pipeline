@@ -1,3 +1,8 @@
+---
+name: deploy
+description: Documents BPE release workflow — ruff, pytest, VERSION.txt bump, CI success, v* tag push, GitHub Actions Release zips. Use when shipping a version, cutting a release, or publishing BPE binaries.
+---
+
 # 배포하기
 
 코드 수정 후 새 버전을 배포하는 절차.
