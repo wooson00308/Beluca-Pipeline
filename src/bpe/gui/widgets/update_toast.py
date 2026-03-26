@@ -40,6 +40,11 @@ class UpdateToast(QWidget):
         self._msg_label = QLabel()
         self._msg_label.setWordWrap(True)
 
+        self._notes_label = QLabel()
+        self._notes_label.setWordWrap(True)
+        self._notes_label.setObjectName("status_msg")
+        self._notes_label.setVisible(False)
+
         self._progress_bar = QProgressBar()
         self._progress_bar.setRange(0, 100)
         self._progress_bar.setTextVisible(False)
@@ -62,6 +67,7 @@ class UpdateToast(QWidget):
         root.setContentsMargins(16, 16, 16, 16)
         root.setSpacing(10)
         root.addWidget(self._msg_label)
+        root.addWidget(self._notes_label)
         root.addWidget(self._progress_bar)
         root.addWidget(self._pct_label)
         root.addLayout(btn_row)
@@ -75,8 +81,15 @@ class UpdateToast(QWidget):
 
     # ── public API ──
 
-    def show_update(self, version: str) -> None:
+    def show_update(self, version: str, release_notes: str = "") -> None:
         self._msg_label.setText(f"v{version} 업데이트 가능")
+        if release_notes:
+            # 첫 2줄만 표시
+            lines = release_notes.strip().splitlines()[:2]
+            self._notes_label.setText("\n".join(lines))
+            self._notes_label.setVisible(True)
+        else:
+            self._notes_label.setVisible(False)
         self._btn_primary.setText("Install")
         self._btn_secondary.setText("Later")
         self._set_state(_State.NOTIFY)

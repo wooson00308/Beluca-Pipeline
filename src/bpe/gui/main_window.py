@@ -129,7 +129,9 @@ class MainWindow(QMainWindow):
 
     def _on_update_available(self, info: object) -> None:
         self._update_info = info
-        self._toast.show_update(info.latest_version)  # type: ignore[attr-defined]
+        self._toast.show_update(  # type: ignore[attr-defined]
+            info.latest_version, info.release_notes
+        )
 
     def _on_up_to_date(self) -> None:
         self._ver_label.setText(f"BPE v{__version__} (최신)")
