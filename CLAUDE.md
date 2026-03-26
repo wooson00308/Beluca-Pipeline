@@ -24,6 +24,18 @@ src/bpe/
 
 위반하면 앱이 빌드에서 터지거나 Nuke에서 크래시 남.
 
+## PySide6 import 검증 (반드시 지킬 것)
+
+PySide6 클래스는 올바른 모듈에서 import해야 함. 잘못된 모듈에서 import하면 PyInstaller 빌드에서 앱이 안 뜸.
+린트/테스트는 통과해도 빌드에서 터지는 케이스이므로 반드시 수동 확인 필요.
+
+자주 틀리는 것들:
+- QDesktopServices → QtGui (QtCore 아님)
+- QAction → QtGui (QtWidgets 아님)
+- QUrl → QtCore (QtGui 아님)
+
+PySide6 import 추가할 때 공식 문서에서 소속 모듈을 확인할 것.
+
 ## config 참조 패턴
 
 config.py의 상수(APP_DIR 등)는 기본 인자로 쓰지 말 것. 런타임에 참조해야 테스트가 돌아감.
