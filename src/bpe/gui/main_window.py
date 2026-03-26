@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Dict, List
+import sys
+from pathlib import Path
+from typing import Any, Dict, List
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QDesktopServices, Qt, QUrl
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -16,7 +18,10 @@ from PySide6.QtWidgets import (
 )
 
 from bpe import __version__
+from bpe.core.logging import get_logger
 from bpe.gui import theme
+
+logger = get_logger("main_window")
 
 TAB_DEFS: List[Dict[str, str]] = [
     {"key": "presets", "label": "Preset Manager"},
@@ -33,6 +38,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"BPE v{__version__}")
         self.setMinimumSize(theme.MIN_WIDTH, theme.MIN_HEIGHT)
         self.resize(theme.DEFAULT_WIDTH, theme.DEFAULT_HEIGHT)
+        self._workers: List[Any] = []
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -79,10 +85,10 @@ class MainWindow(QMainWindow):
         sb.addStretch()
 
         # Version at bottom
-        ver = QLabel(f"BPE v{__version__}")
-        ver.setObjectName("sidebar_version")
-        ver.setContentsMargins(20, 0, 0, 16)
-        sb.addWidget(ver)
+        self._ver_label = QLabel(f"BPE v{__version__}")
+        self._ver_label.setObjectName("sidebar_version")
+        self._ver_label.setContentsMargins(20, 0, 0, 16)
+        sb.addWidget(self._ver_label)
 
         root.addWidget(sidebar)
 
@@ -93,6 +99,63 @@ class MainWindow(QMainWindow):
         root.addWidget(self._stack, 1)
 
         self._switch_tab("presets")
+
+        # ── Update check ──
+        self._update_info: Any = None
+        self._init_update_toast()
+        self._start_update_check()
+
+    def _init_update_toast(self) -> None:
+        from bpe.gui.widgets.update_toast import UpdateToast
+
+        self._toast = UpdateToast(self.centralWidget())
+        self._toast.install_requested.connect(self._on_install_requested)
+        self._toast.open_folder_requested.connect(self._on_open_folder)
+
+    def _start_update_check(self) -> None:
+        from bpe.gui.workers.update_worker import UpdateCheckWorker
+
+        w = UpdateCheckWorker(__version__)
+        w.update_available.connect(self._on_update_available)
+        w.up_to_date.connect(self._on_up_to_date)
+        w.start()
+        self._workers.append(w)
+
+    def _on_update_available(self, info: object) -> None:
+        self._update_info = info
+        self._toast.show_update(info.latest_version)  # type: ignore[attr-defined]
+
+    def _on_up_to_date(self) -> None:
+        self._ver_label.setText(f"BPE v{__version__} (최신)")
+
+    def _on_install_requested(self) -> None:
+        info = self._update_info
+        if info is None or not info.download_url:
+            return
+
+        from bpe.gui.workers.update_worker import UpdateDownloadWorker
+
+        if sys.platform == "darwin":
+            filename = "BPE-macOS.dmg"
+        else:
+            filename = "BPE-Windows.zip"
+        dest = Path.home() / "Downloads" / filename
+
+        w = UpdateDownloadWorker(info.download_url, str(dest))
+        w.progress.connect(lambda v: self._toast.show_progress(int(v * 100)))
+        w.finished.connect(lambda p: self._toast.show_done(p))
+        w.error.connect(lambda e: logger.warning("Download error: %s", e))
+        w.start()
+        self._workers.append(w)
+
+    def _on_open_folder(self, path: str) -> None:
+        folder = str(Path(path).parent)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+
+    def resizeEvent(self, event: Any) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if hasattr(self, "_toast"):
+            self._toast.reposition()
 
     def _build_tabs(self) -> None:
         from bpe.gui.tabs.my_tasks_tab import MyTasksTab

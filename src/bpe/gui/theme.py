@@ -426,4 +426,28 @@ def build_stylesheet() -> str:
     #card:hover {{
         border-color: {TEXT_DIM};
     }}
+
+    /* ── Update toast ── */
+    #update_toast {{
+        background-color: {PANEL_BG};
+        border: 2px solid {ACCENT};
+        border-radius: 8px;
+        padding: 16px;
+    }}
+    #update_toast QLabel {{
+        background: transparent;
+        color: {TEXT};
+        font-size: {FONT_SIZE}px;
+    }}
+    #update_toast QProgressBar {{
+        background-color: {INPUT_BG};
+        border: none;
+        border-radius: 4px;
+        min-height: 14px;
+        max-height: 14px;
+    }}
+    #update_toast QProgressBar::chunk {{
+        background-color: {ACCENT};
+        border-radius: 4px;
+    }}
     """
