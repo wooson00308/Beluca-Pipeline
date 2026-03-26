@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QApplication,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -139,20 +139,65 @@ class MainWindow(QMainWindow):
         if info is None or not info.download_url:
             return
 
-        from bpe.gui.workers.update_worker import UpdateDownloadWorker
+        launcher = self._find_launcher()
+        if launcher is None:
+            QDesktopServices.openUrl(QUrl(info.html_url))
+            return
 
-        if sys.platform == "darwin":
-            filename = "BPE-macOS.dmg"
+        import subprocess
+
+        subprocess.Popen(
+            [
+                str(launcher),
+                "--version",
+                info.latest_version,
+                "--download-url",
+                info.download_url,
+                "--app-path",
+                self._get_app_path(),
+            ]
+        )
+        QApplication.instance().quit()
+
+    def _find_launcher(self) -> Optional[Path]:
+        """번들 내 런처 바이너리를 찾는다."""
+        import sys as _sys
+
+        if _sys.platform == "darwin":
+            name = "BPELauncher"
         else:
-            filename = "BPE-Windows.zip"
-        dest = Path.home() / "Downloads" / filename
+            name = "BPELauncher.exe"
 
-        w = UpdateDownloadWorker(info.download_url, str(dest))
-        w.progress.connect(lambda v: self._toast.show_progress(int(v * 100)))
-        w.finished.connect(lambda p: self._toast.show_done(p))
-        w.error.connect(lambda e: logger.warning("Download error: %s", e))
-        w.start()
-        self._workers.append(w)
+        # PyInstaller 번들
+        meipass = getattr(_sys, "_MEIPASS", None)
+        if meipass:
+            p = Path(meipass) / name
+            if p.exists():
+                return p
+            # macOS .app 번들
+            p = Path(_sys.executable).parent / name
+            if p.exists():
+                return p
+
+        # 개발 모드: 프로젝트 루트의 launcher-dl/
+        dev_path = Path(__file__).resolve().parent.parent.parent.parent / "launcher-dl" / name
+        if dev_path.exists():
+            return dev_path
+
+        return None
+
+    def _get_app_path(self) -> str:
+        """현재 앱의 실행 경로를 반환한다."""
+        import sys as _sys
+
+        if _sys.platform == "darwin":
+            exe = Path(_sys.executable)
+            for parent in exe.parents:
+                if parent.suffix == ".app":
+                    return str(parent)
+            return str(exe)
+        else:
+            return _sys.executable
 
     def _on_open_folder(self, path: str) -> None:
         folder = str(Path(path).parent)

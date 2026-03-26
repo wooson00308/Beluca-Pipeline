@@ -61,6 +61,12 @@ templates_dir = ROOT / "templates"
 if templates_dir.exists():
     datas.append((str(templates_dir), "templates"))
 
+# 런처 바이너리 (빌드 시 release.yml에서 다운로드)
+_launcher_name = "BPELauncher" if sys.platform == "darwin" else "BPELauncher.exe"
+_launcher_src = ROOT / "launcher-dl" / _launcher_name
+if _launcher_src.exists():
+    datas.append((str(_launcher_src), "."))
+
 binaries = []
 
 hiddenimports = [

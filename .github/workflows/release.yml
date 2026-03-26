@@ -65,6 +65,13 @@ jobs:
           pip install -e ".[dev]"
           pip install pyinstaller
 
+      - name: Download launcher binary
+        run: |
+          gh release download v1.0.0 --repo wooson00308/Beluca-Launcher --pattern "BPELauncher-${{ runner.os == 'macOS' && 'macOS' || 'Windows' }}.zip" --dir launcher-dl
+          cd launcher-dl && unzip *.zip && cd ..
+        env:
+          GH_TOKEN: ${{ github.token }}
+
       - name: Build with PyInstaller
         run: pyinstaller installer/bpe.spec
 
