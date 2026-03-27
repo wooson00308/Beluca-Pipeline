@@ -9,8 +9,12 @@ import pytest
 
 from bpe.core.nk_finder import (
     _NK_VERSION_RE,
+    _find_nukex_exe_under_roots,
+    _find_server_root_from_drive_roots,
     _nk_is_junk_file,
     find_latest_nk_path,
+    find_nukex_exe,
+    find_server_root_auto,
 )
 
 # ── _nk_is_junk_file ────────────────────────────────────────────
@@ -135,3 +139,89 @@ class TestFindLatestNkPath:
         result = find_latest_nk_path("E01_S01_005", "PRJ", str(tmp_path))
         assert result is not None
         assert "E01_S01_005" in result.name
+
+    def test_finds_latest_in_version_subfolders(self, tmp_path):
+        """nuke/v001, nuke/v003 구조에서 최신 버전 폴더의 nk를 고른다."""
+        shot_root = self._make_shot_tree(tmp_path, "E102_S017_0120")
+        nuke_dir = shot_root / "comp" / "devl" / "nuke"
+        (nuke_dir / "v001" / "E102_S017_0120_comp_v001.nk").parent.mkdir(parents=True)
+        (nuke_dir / "v001" / "E102_S017_0120_comp_v001.nk").write_text("1")
+        (nuke_dir / "v003" / "E102_S017_0120_comp_v003.nk").parent.mkdir(parents=True)
+        (nuke_dir / "v003" / "E102_S017_0120_comp_v003.nk").write_text("3")
+
+        result = find_latest_nk_path("E102_S017_0120", "PRJ", str(tmp_path))
+        assert result is not None
+        assert "v003" in str(result).replace("\\", "/")
+        assert "v003" in result.name
+
+
+# ── find_server_root_auto / drive scan ───────────────────────────
+
+
+class TestFindServerRootFromDriveRoots:
+    def test_picks_highest_year(self, tmp_path):
+        fake_w = tmp_path / "fake_w"
+        (fake_w / "vfx" / "project_2025" / "SBS_030").mkdir(parents=True)
+        (fake_w / "vfx" / "project_2026" / "SBS_030").mkdir(parents=True)
+
+        got = _find_server_root_from_drive_roots("SBS_030", [fake_w])
+        assert got is not None
+        assert str(Path(got).name).lower() == "project_2026"
+
+    def test_missing_project_folder_ignored(self, tmp_path):
+        fake_w = tmp_path / "fake_w"
+        (fake_w / "vfx" / "project_2026" / "OTHER").mkdir(parents=True)
+
+        assert _find_server_root_from_drive_roots("SBS_030", [fake_w]) is None
+
+
+class TestFindServerRootAuto:
+    def test_non_windows_returns_none(self, monkeypatch):
+        monkeypatch.setattr("sys.platform", "linux")
+        assert find_server_root_auto("SBS_030") is None
+
+
+# ── find_nukex_exe ───────────────────────────────────────────────
+
+
+class TestFindNukexExeUnderRoots:
+    def test_prefers_higher_version_folder(self, tmp_path):
+        pf = tmp_path / "pf"
+        (pf / "Nuke14.0" / "Nuke14.0.exe").parent.mkdir(parents=True)
+        (pf / "Nuke14.0" / "Nuke14.0.exe").write_text("exe")
+        (pf / "Nuke15.1" / "Nuke15.1.exe").parent.mkdir(parents=True)
+        (pf / "Nuke15.1" / "Nuke15.1.exe").write_text("exe")
+
+        got = _find_nukex_exe_under_roots([pf])
+        assert got is not None
+        assert "15.1" in got.parent.name
+
+    def test_prefers_nukex_named_exe_in_same_major_line(self, tmp_path):
+        pf = tmp_path / "pf"
+        (pf / "Nuke15.1v1" / "Nuke15.1.exe").parent.mkdir(parents=True)
+        (pf / "Nuke15.1v1" / "Nuke15.1.exe").write_text("a")
+        (pf / "Nuke15.1v1" / "NukeX15.1.exe").write_text("b")
+
+        got = _find_nukex_exe_under_roots([pf])
+        assert got is not None
+        assert got.name.lower().startswith("nukex")
+
+    def test_skips_studio_folder(self, tmp_path):
+        pf = tmp_path / "pf"
+        (pf / "Nuke15.1" / "Nuke15.1.exe").parent.mkdir(parents=True)
+        (pf / "Nuke15.1" / "Nuke15.1.exe").write_text("ok")
+        (pf / "NukeStudio15.1" / "NukeStudio15.1.exe").parent.mkdir(parents=True)
+        (pf / "NukeStudio15.1" / "NukeStudio15.1.exe").write_text("bad")
+
+        got = _find_nukex_exe_under_roots([pf])
+        assert got is not None
+        assert "Studio" not in got.parent.name
+
+
+class TestFindNukexExeEnv:
+    def test_bpe_nukex_exe_override(self, tmp_path, monkeypatch):
+        exe = tmp_path / "custom_nukex.exe"
+        exe.write_text("x")
+        monkeypatch.setenv("BPE_NUKEX_EXE", str(exe))
+        got = find_nukex_exe()
+        assert got == exe.resolve()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, List, Optional
 
 from PySide6.QtCore import Qt, QTimer
@@ -20,7 +21,7 @@ from PySide6.QtWidgets import (
 )
 
 from bpe.core.logging import get_logger
-from bpe.core.nk_finder import find_latest_nk_and_open
+from bpe.core.nk_finder import find_latest_nk_and_open, find_server_root_auto
 from bpe.gui import theme
 from bpe.gui.workers.sg_worker import ShotGridWorker
 from bpe.shotgrid.client import get_default_sg
@@ -102,9 +103,14 @@ class _ShotCard(QFrame):
         project_code = d.get("project_code") or d.get("project_folder", "")
         if not shot_code or not project_code:
             return
-        import os
 
-        server_root = os.environ.get("BPE_SERVER_ROOT", "")
+        server_root = find_server_root_auto(project_code) or (os.environ.get("BPE_SERVER_ROOT") or "").strip()
+        if not server_root:
+            logger.warning(
+                "NK 열기: 서버 루트를 찾을 수 없음 (드라이브:\\vfx\\project_연도\\%s)",
+                project_code,
+            )
+            return
         try:
             find_latest_nk_and_open(shot_code, project_code, server_root)
         except Exception as e:
