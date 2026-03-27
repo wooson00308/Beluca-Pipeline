@@ -1,4 +1,4 @@
-"""My Tasks tab — ShotGrid comp task list with thumbnails, NukeX open, install folder."""
+"""My Tasks tab — ShotGrid comp task list with thumbnails, NukeX open, shot folder."""
 
 from __future__ import annotations
 
@@ -23,8 +23,8 @@ from PySide6.QtWidgets import (
 from bpe.core.logging import get_logger
 from bpe.core.nk_finder import (
     find_latest_nk_and_open,
-    find_nukex_install_dir,
     find_server_root_auto,
+    find_shot_folder,
 )
 from bpe.gui import theme
 from bpe.gui.workers.sg_worker import ShotGridWorker
@@ -97,7 +97,7 @@ class _ShotCard(QFrame):
 
         folder_btn = QPushButton("폴더 열기")
         folder_btn.setMinimumWidth(100)
-        folder_btn.clicked.connect(self._open_nukex_folder)
+        folder_btn.clicked.connect(self._open_shot_folder)
         lay.addWidget(folder_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
 
         nuke_btn = QPushButton("NukeX")
@@ -105,12 +105,27 @@ class _ShotCard(QFrame):
         nuke_btn.clicked.connect(self._open_nk)
         lay.addWidget(nuke_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
 
-    def _open_nukex_folder(self) -> None:
-        d = find_nukex_install_dir()
-        if d is None or not d.is_dir():
-            logger.warning("NukeX 설치 폴더를 찾을 수 없음")
+    def _open_shot_folder(self) -> None:
+        d = self.task_data
+        shot_code = d.get("shot_code", "")
+        project_code = d.get("project_code") or d.get("project_folder", "")
+        if not shot_code or not project_code:
+            logger.warning("폴더 열기: shot_code 또는 project_code 없음")
             return
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(d.resolve())))
+
+        env_root = (os.environ.get("BPE_SERVER_ROOT") or "").strip()
+        server_root = find_server_root_auto(project_code) or env_root
+        if not server_root:
+            logger.warning(
+                "폴더 열기: 서버 루트를 찾을 수 없음 (드라이브:\\vfx\\project_연도\\%s)",
+                project_code,
+            )
+            return
+        folder = find_shot_folder(shot_code, project_code, server_root)
+        if folder is None or not folder.is_dir():
+            logger.warning("폴더 열기: 샷 폴더를 찾을 수 없음 (%s)", shot_code)
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder.resolve())))
 
     def _open_nk(self) -> None:
         d = self.task_data

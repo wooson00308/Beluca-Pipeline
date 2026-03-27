@@ -26,6 +26,9 @@ _PROJECT_YEAR_DIR_RE = re.compile(r"^project_(\d{4})$", re.I)
 # Nuke15.1v4 폴더명에서 버전 추출
 _NUKE_FOLDER_VER_RE = re.compile(r"Nuke(\d+)\.(\d+)(?:v(\d+))?", re.I)
 
+# Start Menu: "Nuke 14.1v4" 만 허용 (Hiero/Nuke Studio 등 다른 메뉴 제외)
+_NUKE_START_MENU_FOLDER_RE = re.compile(r"^Nuke\s+(\d+\.\d+(?:v\d+)?)$", re.I)
+
 
 # ---------------------------------------------------------------------------
 # Junk-file filter
@@ -154,10 +157,21 @@ def _parse_nuke_folder_version(name: str) -> Tuple[int, int, int]:
     return (int(m.group(1)), int(m.group(2)), int(patch_s) if patch_s else 0)
 
 
+def _is_nukex_executable_basename(filename: str, *, require_exe_suffix: bool) -> bool:
+    """일반 Nuke가 아니라 NukeX 바이너리 이름인지 (소문자 ``nukex`` 로 시작)."""
+    el = filename.lower()
+    if "studio" in el or "hiero" in el:
+        return False
+    if not el.startswith("nukex"):
+        return False
+    if require_exe_suffix:
+        return el.endswith(".exe")
+    return True
+
+
 def _find_nukex_exe_under_roots(search_roots: List[Path]) -> Optional[Path]:
-    """search_roots 아래 ``Nuke*`` 폴더에서 NukeX 우선 실행 파일을 고른다."""
-    candidates: List[Tuple[Tuple[int, int, int], int, Path]] = []
-    # tuple: (version, prefer_nukex_flag 1=nukeX in name, path)
+    """search_roots 아래 ``Nuke*`` 폴더에서 ``nukex*.exe`` 만 고른다 (일반 Nuke 제외)."""
+    candidates: List[Tuple[Tuple[int, int, int], Path]] = []
     for base in search_roots:
         try:
             if not base.is_dir():
@@ -177,47 +191,45 @@ def _find_nukex_exe_under_roots(search_roots: List[Path]) -> Optional[Path]:
                 except OSError:
                     continue
                 nukex_exe: Optional[Path] = None
-                nuke_exe: Optional[Path] = None
                 for exe in exes:
-                    el = exe.name.lower()
-                    if "studio" in el or "hiero" in el:
-                        continue
-                    if el.startswith("nukex") and el.endswith(".exe"):
+                    if _is_nukex_executable_basename(exe.name, require_exe_suffix=True):
                         nukex_exe = exe
                         break
-                    if el.startswith("nuke") and el.endswith(".exe") and nuke_exe is None:
-                        nuke_exe = exe
-                chosen = nukex_exe or nuke_exe
-                if chosen is None:
+                if nukex_exe is None:
                     continue
-                prefer = 1 if nukex_exe is not None else 0
-                candidates.append((ver_t, prefer, chosen))
+                candidates.append((ver_t, nukex_exe))
         except OSError:
             continue
 
     if not candidates:
         return None
 
-    # 최신 버전 폴더, 같은 버전이면 NukeX 이름 우선
-    best = max(candidates, key=lambda x: (x[0], x[1], str(x[2]).lower()))
-    return best[2]
+    best = max(candidates, key=lambda x: (x[0], str(x[1]).lower()))
+    return best[1]
 
 
 def find_nukex_exe() -> Optional[Path]:
-    """설치된 NukeX(또는 Nuke) 실행 파일 경로. 없으면 ``None``.
+    """설치된 NukeX 실행 파일 경로(Windows: ``nukex*.exe``). 없으면 ``None``.
 
-    ``BPE_NUKEX_EXE`` 환경 변수가 있으면 그 경로를 그대로 반환(파일이 존재할 때만).
+    ``BPE_NUKEX_EXE`` 환경 변수가 있으면 해당 파일이 NukeX 이름일 때만 반환.
     """
     override = (os.environ.get("BPE_NUKEX_EXE") or "").strip()
     if override:
         p = Path(override).expanduser()
         try:
-            if p.is_file():
+            req_exe = sys.platform == "win32"
+            if p.is_file() and _is_nukex_executable_basename(p.name, require_exe_suffix=req_exe):
                 return p.resolve()
+            if p.is_file():
+                logger.warning(
+                    "BPE_NUKEX_EXE는 NukeX 바이너리만 지정하세요 — 무시함: %s",
+                    p,
+                )
         except OSError:
             return None
         return None
-    return _find_nukex_exe_under_roots(_nuke_program_dirs())
+    prog_dirs = _nuke_program_dirs()
+    return _find_nukex_exe_under_roots(prog_dirs)
 
 
 def find_nukex_install_dir() -> Optional[Path]:
@@ -226,6 +238,106 @@ def find_nukex_install_dir() -> Optional[Path]:
     if exe is None:
         return None
     return exe.parent
+
+
+def _start_menu_foundry_root() -> Path:
+    """The Foundry Start Menu 프로그램 폴더 (테스트에서 monkeypatch 가능)."""
+    pd = (os.environ.get("ProgramData") or r"C:\ProgramData").strip() or r"C:\ProgramData"
+    return Path(pd) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "The Foundry"
+
+
+def _parse_nuke_version_suffix(ver_suffix: str) -> Optional[Tuple[int, int, int]]:
+    """``14.1v4`` 또는 ``15.0`` 형태를 (major, minor, patch)로 파싱. patch 없으면 0."""
+    s = (ver_suffix or "").strip()
+    if not s:
+        return None
+    m = re.match(r"^(\d+)\.(\d+)(?:v(\d+))?$", s, re.I)
+    if not m:
+        return None
+    patch_s = m.group(3)
+    return (int(m.group(1)), int(m.group(2)), int(patch_s) if patch_s else 0)
+
+
+def _program_files_nuke_exe_path(major: int, minor: int, patch: int) -> List[Path]:
+    """``Nuke14.1v4`` / ``Nuke14.1.exe`` 규칙으로 Program Files 후보 경로."""
+    if patch > 0:
+        inst = f"Nuke{major}.{minor}v{patch}"
+    else:
+        inst = f"Nuke{major}.{minor}"
+    exe_name = f"Nuke{major}.{minor}.exe"
+    return [root / inst / exe_name for root in _nuke_program_dirs()]
+
+
+def _find_nukex_via_start_menu() -> Optional[Tuple[Path, List[str]]]:
+    """Start Menu의 The Foundry / ``Nuke x.xvx`` + ``NukeX x.xvx.lnk``로 Nuke 14+ 실행 경로 탐색.
+
+    Nuke 14+ 는 ``Nuke14.1.exe --nukex`` 형태이며 ``nukex*.exe`` 단일 파일이 없을 수 있다.
+    """
+    if sys.platform != "win32":
+        return None
+    root = _start_menu_foundry_root()
+    try:
+        if not root.is_dir():
+            return None
+    except OSError:
+        return None
+
+    candidates: List[Tuple[Tuple[int, int, int], Path]] = []
+    try:
+        for child in root.iterdir():
+            if not child.is_dir():
+                continue
+            mdir = _NUKE_START_MENU_FOLDER_RE.match(child.name)
+            if not mdir:
+                continue
+            ver_suffix = (mdir.group(1) or "").strip()
+            lnk = child / f"NukeX {ver_suffix}.lnk"
+            try:
+                if not lnk.is_file():
+                    continue
+            except OSError:
+                continue
+            vt = _parse_nuke_version_suffix(ver_suffix)
+            if vt is None:
+                continue
+            major, minor, patch = vt
+            for exe_path in _program_files_nuke_exe_path(major, minor, patch):
+                try:
+                    if exe_path.is_file():
+                        candidates.append((vt, exe_path))
+                        break
+                except OSError:
+                    continue
+    except OSError:
+        return None
+
+    if not candidates:
+        return None
+    best = max(candidates, key=lambda x: (x[0], str(x[1]).lower()))
+    return (best[1], ["--nukex"])
+
+
+def find_nukex_exe_and_args() -> Tuple[Optional[Path], List[str]]:
+    """NukeX로 NK를 열 때 사용할 실행 파일과 추가 인자.
+
+    Windows: Start Menu 기반 ``NukeX.exe`` + ``--nukex`` 우선, 없으면 legacy ``nukex*.exe``.
+    ``BPE_NUKEX_EXE``가 있으면 ``find_nukex_exe()`` 규칙만 사용 (추가 인자 없음).
+    """
+    override = (os.environ.get("BPE_NUKEX_EXE") or "").strip()
+    if override:
+        legacy = find_nukex_exe()
+        if legacy is not None:
+            return (legacy, [])
+        return (None, [])
+
+    sm = _find_nukex_via_start_menu()
+    if sm is not None:
+        return (sm[0], sm[1])
+
+    legacy = find_nukex_exe()
+    if legacy is not None:
+        return (legacy, [])
+    return (None, [])
 
 
 # ---------------------------------------------------------------------------
@@ -283,6 +395,41 @@ def _find_shot_root_heuristic(
         except OSError:
             continue
     return None
+
+
+def find_shot_folder(shot_name: str, project_code: str, server_root: str) -> Optional[Path]:
+    """샷 작업 폴더 경로: ``comp/devl/nuke`` 가 있으면 그 경로, 없으면 ``shot_root``."""
+    sn = (shot_name or "").strip()
+    pc = (project_code or "").strip()
+    sr = (server_root or "").strip()
+    if not sn or not sr:
+        return None
+
+    shot_root: Optional[Path] = None
+    if pc:
+        bp = build_shot_paths(sr, pc, sn)
+        if bp:
+            cand = bp["shot_root"]
+            try:
+                if cand.exists():
+                    shot_root = cand
+            except OSError:
+                shot_root = None
+    if shot_root is None:
+        shot_root = _find_shot_root_heuristic(sr, pc, sn)
+    if shot_root is None:
+        return None
+
+    nuke_dir = shot_root / "comp" / "devl" / "nuke"
+    try:
+        if nuke_dir.is_dir():
+            return nuke_dir.resolve()
+    except OSError:
+        pass
+    try:
+        return shot_root.resolve()
+    except OSError:
+        return shot_root
 
 
 # ---------------------------------------------------------------------------
@@ -397,7 +544,10 @@ def find_latest_nk_path(shot_name: str, project_code: str, server_root: str) -> 
 
 
 def find_latest_nk_and_open(shot_name: str, project_code: str, server_root: str) -> Optional[Path]:
-    """최신 NK를 찾아 연다. Windows에서는 NukeX(또는 Nuke) 실행 파일로 연 뒤, 실패 시 기본 앱."""
+    """최신 NK를 찾아 연다.
+
+    Windows: NukeX 실행 파일로만 연다. 일반 Nuke나 파일 연결 프로그램으로는 열지 않는다.
+    """
     path = find_latest_nk_path(shot_name, project_code, server_root)
     if path is None:
         return None
@@ -405,12 +555,14 @@ def find_latest_nk_and_open(shot_name: str, project_code: str, server_root: str)
         if sys.platform == "darwin":
             subprocess.run(["open", str(path)], check=False)
         elif sys.platform == "win32":
-            exe = find_nukex_exe()
+            exe, extra_args = find_nukex_exe_and_args()
             if exe is not None:
-                subprocess.Popen([str(exe), str(path)], close_fds=True)
+                subprocess.Popen([str(exe), *extra_args, str(path)], close_fds=True)
             else:
-                logger.warning("NukeX 실행 파일을 찾지 못함 — 기본 앱으로 연다: %s", path)
-                os.startfile(str(path))  # type: ignore[attr-defined]  # noqa: S606
+                logger.warning(
+                    "NukeX 실행 파일을 찾지 못해 NK를 열지 않음: %s",
+                    path,
+                )
         else:
             subprocess.run(["xdg-open", str(path)], check=False)
     except Exception:

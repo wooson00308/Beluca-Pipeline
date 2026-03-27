@@ -8,7 +8,7 @@ import os
 import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files, collect_all
+from PyInstaller.utils.hooks import collect_all
 
 # 프로젝트 루트 (installer/ 상위)
 ROOT = Path(SPECPATH).parent
@@ -69,6 +69,17 @@ binaries = []
 if _launcher_src.exists():
     binaries.append((str(_launcher_src), "."))
 
+# PySide6 — 바이너리·플러그인·데이터 전부 (미설치 시 빌드는 의미 없는 얇은 exe만 나옴)
+try:
+    _ps6_datas, _ps6_binaries, _ps6_hidden = collect_all("PySide6")
+except Exception as exc:
+    raise RuntimeError(
+        "PyInstaller: PySide6가 필요합니다. "
+        "pip install -e . 또는 pip install PySide6 후 다시 빌드하세요."
+    ) from exc
+datas += _ps6_datas
+binaries += _ps6_binaries
+
 hiddenimports = [
     "PySide6",
     "PySide6.QtCore",
@@ -90,9 +101,7 @@ hiddenimports = [
     "bpe.gui",
     "bpe.shotgrid",
 ]
-
-# PySide6 데이터
-datas += collect_data_files("PySide6", include_py_files=False)
+hiddenimports += list(_ps6_hidden)
 
 a = Analysis(
     [str(SRC / "bpe" / "__main__.py")],

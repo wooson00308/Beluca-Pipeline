@@ -1,0 +1,60 @@
+---
+description: Windows 로컬 테스트 exe — scripts/build_test_exe.ps1 로 BPE-Windows/Test_exe 에 복사 (릴리즈와 별도)
+alwaysApply: false
+---
+
+# 로컬 Windows 테스트 exe (릴리즈 대체용)
+
+`git push` · 태그 릴리즈 · GitHub Actions 배포 흐름은 **변경하지 않는다**. 이 규칙은 **같은 머신에서 exe로 빠르게 확인**할 때만 쓴다.
+
+## 출력 폴더 (기본)
+
+`C:\Users\yklee\Desktop\BPE-Windows\Test_exe`
+
+다른 경로를 쓰려면 PowerShell에서 실행 전에:
+
+`$env:BPE_LOCAL_TEST_EXE_DIR = "D:\원하는\폴더"`
+
+## 빌드 방법
+
+저장소 루트에서 **한 번** `pip install -e ".[dev]"` 로 PySide6·의존성을 넣은 뒤 (PyInstaller가 Qt를 번들에 넣으려면 필수):
+
+```powershell
+.\scripts\build_test_exe.ps1
+```
+
+스크립트가 빌드 직전 `import PySide6` 를 검사한다. 실패하면 위 `pip` 부터 다시 한다.
+
+또는:
+
+```bat
+scripts\build_test_exe.bat
+```
+
+## 산출물
+
+`Test_exe\BPE_dev.exe` **한 파일만** 매 빌드마다 덮어쓴다. 실행 중이면 복사가 실패할 수 있으니 빌드 전에 해당 exe를 끈다.
+
+## 빌드 전 검사 (선택)
+
+push 전과 동일하게 확인하려면:
+
+```powershell
+.\scripts\build_test_exe.ps1 -Check
+```
+
+(`ruff check` + `pytest`, Qt는 offscreen)
+
+## 에이전트 동작
+
+- 사용자가 수정을 요청하고 코드 수정이 완료되면, **항상** 저장소 루트에서 아래 명령을 실행해 `C:\Users\yklee\Desktop\BPE-Windows\Test_exe\BPE_dev.exe` 를 갱신한다:
+  ```powershell
+  .\scripts\build_test_exe.ps1
+  ```
+- 빌드가 완료되면 사용자에게 `BPE_dev.exe` 경로를 알려주고 실행을 안내한다.
+- CI/`release.yml`/VERSION.txt 태그 배포 절차는 **이 스크립트로 대체하지 않는다**.
+
+## 참고
+
+- `launcher-dl` 런처가 없으면 spec에서 해당 바이너리만 빠진 상태로 빌드된다 (로컬 스모크에는 보통 무관).
+- 릴리즈 ZIP과 동일한 바이너리를 원하면 Actions Release 산출물을 사용한다.

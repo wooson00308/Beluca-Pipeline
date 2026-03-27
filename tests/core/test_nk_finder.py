@@ -14,8 +14,10 @@ from bpe.core.nk_finder import (
     _nk_is_junk_file,
     find_latest_nk_path,
     find_nukex_exe,
+    find_nukex_exe_and_args,
     find_nukex_install_dir,
     find_server_root_auto,
+    find_shot_folder,
 )
 
 # ── _nk_is_junk_file ────────────────────────────────────────────
@@ -188,14 +190,15 @@ class TestFindServerRootAuto:
 class TestFindNukexExeUnderRoots:
     def test_prefers_higher_version_folder(self, tmp_path):
         pf = tmp_path / "pf"
-        (pf / "Nuke14.0" / "Nuke14.0.exe").parent.mkdir(parents=True)
-        (pf / "Nuke14.0" / "Nuke14.0.exe").write_text("exe")
-        (pf / "Nuke15.1" / "Nuke15.1.exe").parent.mkdir(parents=True)
-        (pf / "Nuke15.1" / "Nuke15.1.exe").write_text("exe")
+        (pf / "Nuke14.0" / "NukeX14.0.exe").parent.mkdir(parents=True)
+        (pf / "Nuke14.0" / "NukeX14.0.exe").write_text("exe")
+        (pf / "Nuke15.1" / "NukeX15.1.exe").parent.mkdir(parents=True)
+        (pf / "Nuke15.1" / "NukeX15.1.exe").write_text("exe")
 
         got = _find_nukex_exe_under_roots([pf])
         assert got is not None
         assert "15.1" in got.parent.name
+        assert got.name.lower().startswith("nukex")
 
     def test_prefers_nukex_named_exe_in_same_major_line(self, tmp_path):
         pf = tmp_path / "pf"
@@ -209,8 +212,8 @@ class TestFindNukexExeUnderRoots:
 
     def test_skips_studio_folder(self, tmp_path):
         pf = tmp_path / "pf"
-        (pf / "Nuke15.1" / "Nuke15.1.exe").parent.mkdir(parents=True)
-        (pf / "Nuke15.1" / "Nuke15.1.exe").write_text("ok")
+        (pf / "Nuke15.1" / "NukeX15.1.exe").parent.mkdir(parents=True)
+        (pf / "Nuke15.1" / "NukeX15.1.exe").write_text("ok")
         (pf / "NukeStudio15.1" / "NukeStudio15.1.exe").parent.mkdir(parents=True)
         (pf / "NukeStudio15.1" / "NukeStudio15.1.exe").write_text("bad")
 
@@ -218,14 +221,29 @@ class TestFindNukexExeUnderRoots:
         assert got is not None
         assert "Studio" not in got.parent.name
 
+    def test_plain_nuke_exe_only_returns_none(self, tmp_path):
+        """일반 Nuke(Nuke*.exe)만 있으면 NukeX를 쓰지 않는다."""
+        pf = tmp_path / "pf"
+        (pf / "Nuke15.1" / "Nuke15.1.exe").parent.mkdir(parents=True)
+        (pf / "Nuke15.1" / "Nuke15.1.exe").write_text("no")
+
+        assert _find_nukex_exe_under_roots([pf]) is None
+
 
 class TestFindNukexExeEnv:
     def test_bpe_nukex_exe_override(self, tmp_path, monkeypatch):
-        exe = tmp_path / "custom_nukex.exe"
+        exe = tmp_path / "NukeX_custom.exe"
         exe.write_text("x")
         monkeypatch.setenv("BPE_NUKEX_EXE", str(exe))
         got = find_nukex_exe()
         assert got == exe.resolve()
+
+    def test_bpe_nukex_exe_rejects_plain_nuke_on_windows(self, tmp_path, monkeypatch):
+        exe = tmp_path / "Nuke15.1.exe"
+        exe.write_text("x")
+        monkeypatch.setenv("BPE_NUKEX_EXE", str(exe))
+        monkeypatch.setattr("sys.platform", "win32")
+        assert find_nukex_exe() is None
 
 
 # ── find_nukex_install_dir ───────────────────────────────────────
@@ -234,16 +252,96 @@ class TestFindNukexExeEnv:
 class TestFindNukexInstallDir:
     def test_matches_exe_parent_under_roots(self, tmp_path, monkeypatch):
         pf = tmp_path / "pf"
-        (pf / "Nuke15.1" / "Nuke15.1.exe").parent.mkdir(parents=True)
-        (pf / "Nuke15.1" / "Nuke15.1.exe").write_text("exe")
+        (pf / "Nuke15.1" / "NukeX15.1.exe").parent.mkdir(parents=True)
+        (pf / "Nuke15.1" / "NukeX15.1.exe").write_text("exe")
         monkeypatch.setattr("bpe.core.nk_finder._nuke_program_dirs", lambda: [pf])
         monkeypatch.delenv("BPE_NUKEX_EXE", raising=False)
         got = find_nukex_install_dir()
         assert got == (pf / "Nuke15.1").resolve()
 
     def test_bpe_nukex_exe_override_parent(self, tmp_path, monkeypatch):
-        exe = tmp_path / "custom_nukex.exe"
+        exe = tmp_path / "NukeX_custom.exe"
         exe.write_text("x")
         monkeypatch.setenv("BPE_NUKEX_EXE", str(exe))
         got = find_nukex_install_dir()
         assert got == exe.parent.resolve()
+
+
+# ── find_nukex_exe_and_args / Start Menu ─────────────────────────
+
+
+class TestFindNukexViaStartMenu:
+    def test_nuke14_style_exe_with_nukex_flag(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("sys.platform", "win32")
+        sm = tmp_path / "sm" / "The Foundry"
+        (sm / "Nuke 14.1v4").mkdir(parents=True)
+        (sm / "Nuke 14.1v4" / "NukeX 14.1v4.lnk").write_text("")
+        pf = tmp_path / "pf"
+        (pf / "Nuke14.1v4" / "Nuke14.1.exe").parent.mkdir(parents=True)
+        (pf / "Nuke14.1v4" / "Nuke14.1.exe").write_text("exe")
+        monkeypatch.setattr("bpe.core.nk_finder._start_menu_foundry_root", lambda: sm)
+        monkeypatch.setattr("bpe.core.nk_finder._nuke_program_dirs", lambda: [pf])
+        monkeypatch.delenv("BPE_NUKEX_EXE", raising=False)
+        exe, args = find_nukex_exe_and_args()
+        assert exe is not None
+        assert exe.name == "Nuke14.1.exe"
+        assert args == ["--nukex"]
+
+    def test_start_menu_without_matching_exe_falls_back_none(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("sys.platform", "win32")
+        sm = tmp_path / "sm" / "The Foundry"
+        (sm / "Nuke 14.1v4").mkdir(parents=True)
+        (sm / "Nuke 14.1v4" / "NukeX 14.1v4.lnk").write_text("")
+        monkeypatch.setattr("bpe.core.nk_finder._start_menu_foundry_root", lambda: sm)
+        monkeypatch.setattr(
+            "bpe.core.nk_finder._nuke_program_dirs",
+            lambda: [tmp_path / "empty_pf"],
+        )
+        monkeypatch.delenv("BPE_NUKEX_EXE", raising=False)
+        exe, args = find_nukex_exe_and_args()
+        assert exe is None
+        assert args == []
+
+    def test_bpe_nukex_exe_override_skips_start_menu(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("sys.platform", "win32")
+        sm = tmp_path / "sm" / "The Foundry"
+        (sm / "Nuke 14.1v4").mkdir(parents=True)
+        (sm / "Nuke 14.1v4" / "NukeX 14.1v4.lnk").write_text("")
+        exe_good = tmp_path / "NukeX15.1.exe"
+        exe_good.write_text("x")
+        monkeypatch.setenv("BPE_NUKEX_EXE", str(exe_good))
+        monkeypatch.setattr("bpe.core.nk_finder._start_menu_foundry_root", lambda: sm)
+        exe, args = find_nukex_exe_and_args()
+        assert exe == exe_good.resolve()
+        assert args == []
+
+
+# ── find_shot_folder ──────────────────────────────────────────────
+
+
+class TestFindShotFolder:
+    def test_prefers_comp_devl_nuke(self, tmp_path):
+        ep = "E01_S01_001".split("_")[0].upper()
+        shot_root = tmp_path / "PRJ" / "04_sq" / ep / "E01_S01_001"
+        nuke_dir = shot_root / "comp" / "devl" / "nuke"
+        nuke_dir.mkdir(parents=True)
+        got = find_shot_folder("E01_S01_001", "PRJ", str(tmp_path))
+        assert got == nuke_dir.resolve()
+
+    def test_falls_back_to_shot_root(self, tmp_path):
+        ep = "E01_S01_002".split("_")[0].upper()
+        shot_root = tmp_path / "PRJ" / "04_sq" / ep / "E01_S01_002"
+        shot_root.mkdir(parents=True)
+        got = find_shot_folder("E01_S01_002", "PRJ", str(tmp_path))
+        assert got == shot_root.resolve()
+
+    def test_heuristic_when_standard_path_missing(self, tmp_path):
+        shot = tmp_path / "PRJ" / "extra" / "E99_S99_099"
+        shot.mkdir(parents=True)
+        got = find_shot_folder("E99_S99_099", "PRJ", str(tmp_path))
+        assert got is not None
+        assert got.name == "E99_S99_099"
+
+    def test_returns_none_for_missing_args(self):
+        assert find_shot_folder("", "PRJ", "/x") is None
+        assert find_shot_folder("S", "PRJ", "") is None
