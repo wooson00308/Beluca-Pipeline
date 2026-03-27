@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtCore import QRect, Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QPixmap, QShowEvent
 from PySide6.QtWidgets import (
     QComboBox,
@@ -39,8 +39,58 @@ from bpe.shotgrid.users import guess_human_user_for_me, search_human_users
 logger = get_logger("gui.tabs.my_tasks_tab")
 
 _AUTOCOMPLETE_DELAY = 350
-_THUMB_W = 80
-_THUMB_H = 60
+_THUMB_W = 160
+_THUMB_H = 110
+
+# Task status code -> (background hex, text hex) — ShotGrid-style palette
+_STATUS_COLORS: Dict[str, Tuple[str, str]] = {
+    "wtg": ("#FFFF00", "#111111"),
+    "assign": ("#E8E4C0", "#111111"),
+    "wip": ("#F0A0C0", "#111111"),
+    "retake": ("#FF6600", "#FFFFFF"),
+    "cfrm": ("#CCCCCC", "#111111"),
+    "sv": ("#00AA00", "#FFFFFF"),
+    "pub-s": ("#003399", "#FFFFFF"),
+    "pubok": ("#00CCCC", "#111111"),
+    "ct": ("#88AAFF", "#111111"),
+    "cts": ("#007799", "#FFFFFF"),
+    "ctr": ("#CC0000", "#FFFFFF"),
+    "cto": ("#8800CC", "#FFFFFF"),
+    "disent": ("#00AACC", "#FFFFFF"),
+    "fin": ("#1A1A1A", "#FFFFFF"),
+    "hld": ("#000000", "#FFFFFF"),
+    "omt": ("#666666", "#FFFFFF"),
+    "nocg": ("#444444", "#AAAAAA"),
+    "error": ("#777777", "#FFFFFF"),
+    "rev": ("#00AA77", "#FFFFFF"),
+    "tm": ("#88CC88", "#111111"),
+}
+
+
+def _status_cell_colors(status_code: str) -> Tuple[str, str]:
+    key = (status_code or "").strip().lower()
+    return _STATUS_COLORS.get(key, (theme.PANEL_BG, theme.TEXT))
+
+
+def _format_task_date(val: Any) -> str:
+    if val is None:
+        return "—"
+    if isinstance(val, dict):
+        inner = val.get("date") or val.get("name") or val.get("value")
+        if inner is not None:
+            return str(inner).strip() or "—"
+        return "—"
+    s = str(val).strip()
+    return s if s else "—"
+
+
+def _vline() -> QFrame:
+    line = QFrame()
+    line.setFrameShape(QFrame.Shape.VLine)
+    line.setFrameShadow(QFrame.Shadow.Plain)
+    line.setFixedWidth(1)
+    line.setStyleSheet(f"background-color: {theme.BORDER}; border: none;")
+    return line
 
 
 class _ShotCard(QFrame):
@@ -60,59 +110,118 @@ class _ShotCard(QFrame):
 
     def _build(self, d: Dict[str, Any]) -> None:
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(12, 10, 12, 10)
-        lay.setSpacing(12)
+        lay.setContentsMargins(0, 8, 8, 8)
+        lay.setSpacing(0)
 
-        # Thumbnail placeholder (80x60)
+        # Thumbnail (fills cell; pixmap cropped in set_thumbnail)
         self.thumb_label = QLabel()
         self.thumb_label.setFixedSize(_THUMB_W, _THUMB_H)
         self.thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.thumb_label.setStyleSheet(
-            f"background-color: {theme.BORDER}; border-radius: 4px; border: none;"
-        )
+        self.thumb_label.setStyleSheet(f"background-color: {theme.BORDER}; border: none;")
         self.thumb_label.setText("img")
         lay.addWidget(self.thumb_label)
-
-        # Info column (shot code, status, due date)
-        info = QVBoxLayout()
-        info.setSpacing(2)
 
         shot_code = d.get("shot_code", "")
         task_content = d.get("task_content", "")
         status = d.get("task_status", "")
-        due = d.get("due_date") or ""
+        due = _format_task_date(d.get("due_date"))
+        vfx_wo = (d.get("vfx_work_order") or "").strip()
 
+        lay.addWidget(_vline())
+
+        # Shot code + task name
+        info = QVBoxLayout()
+        info.setSpacing(4)
+        info.setContentsMargins(8, 0, 8, 0)
         title = QLabel(f"{shot_code}  —  {task_content}")
         title.setStyleSheet(f"font-weight: bold; border: none; color: {theme.ACCENT};")
         info.addWidget(title)
-
-        status_label = QLabel(f"상태: {status}")
-        status_label.setObjectName("page_subtitle")
-        status_label.setStyleSheet("border: none;")
-        info.addWidget(status_label)
-
-        due_label = QLabel(f"납기: {due}")
-        due_label.setObjectName("page_subtitle")
-        due_label.setStyleSheet("border: none;")
-        info.addWidget(due_label)
-
         info.addStretch()
         lay.addLayout(info, 1)
 
+        lay.addWidget(_vline())
+
+        # Status cell (full background color)
+        bg, fg = _status_cell_colors(status)
+        status_cell = QWidget()
+        status_cell.setFixedWidth(76)
+        status_cell.setStyleSheet(f"background-color: {bg}; border: none;")
+        st_lay = QVBoxLayout(status_cell)
+        st_lay.setContentsMargins(6, 6, 6, 6)
+        st_hdr = QLabel("STATUS")
+        st_hdr.setStyleSheet(
+            f"color: {fg}; font-size: 10px; border: none; background: transparent;"
+        )
+        st_val = QLabel((status or "—").strip() or "—")
+        st_val.setWordWrap(True)
+        st_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        st_val.setStyleSheet(
+            f"color: {fg}; font-weight: bold; font-size: 13px; border: none; "
+            "background: transparent;"
+        )
+        st_lay.addWidget(st_hdr)
+        st_lay.addWidget(st_val)
+        st_lay.addStretch()
+        lay.addWidget(status_cell, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+        lay.addWidget(_vline())
+
+        # Task date column
+        date_col = QWidget()
+        date_col.setFixedWidth(100)
+        dc_lay = QVBoxLayout(date_col)
+        dc_lay.setContentsMargins(6, 6, 6, 6)
+        dc_hdr = QLabel("Task Date")
+        dc_hdr.setObjectName("page_subtitle")
+        dc_hdr.setStyleSheet("border: none;")
+        dc_val = QLabel(due)
+        dc_val.setWordWrap(True)
+        dc_val.setStyleSheet(f"color: {theme.TEXT}; border: none;")
+        dc_lay.addWidget(dc_hdr)
+        dc_lay.addWidget(dc_val)
+        dc_lay.addStretch()
+        lay.addWidget(date_col, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+        lay.addWidget(_vline())
+
+        # VFX work order (stretch)
+        vfx_col = QWidget()
+        vfx_lay = QVBoxLayout(vfx_col)
+        vfx_lay.setContentsMargins(6, 6, 6, 6)
+        vfx_hdr = QLabel("VFX W/O")
+        vfx_hdr.setObjectName("page_subtitle")
+        vfx_hdr.setStyleSheet("border: none;")
+        vfx_val = QLabel(vfx_wo if vfx_wo else "—")
+        vfx_val.setWordWrap(True)
+        vfx_val.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        vfx_val.setStyleSheet(f"color: {theme.TEXT}; border: none;")
+        vfx_lay.addWidget(vfx_hdr)
+        vfx_lay.addWidget(vfx_val)
+        vfx_lay.addStretch()
+        lay.addWidget(vfx_col, 2)
+
+        lay.addWidget(_vline())
+
+        # Action buttons (vertical stack)
+        btn_col = QVBoxLayout()
+        btn_col.setSpacing(6)
+        btn_col.setContentsMargins(4, 0, 0, 0)
         folder_btn = QPushButton("폴더 열기")
         folder_btn.setMinimumWidth(100)
         folder_btn.clicked.connect(self._open_shot_folder)
-        lay.addWidget(folder_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
+        btn_col.addWidget(folder_btn)
 
         nuke_btn = QPushButton("NukeX")
         nuke_btn.setMinimumWidth(72)
         nuke_btn.clicked.connect(self._open_nk)
-        lay.addWidget(nuke_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
+        btn_col.addWidget(nuke_btn)
 
         publish_btn = QPushButton("퍼블리쉬")
         publish_btn.setMinimumWidth(80)
         publish_btn.clicked.connect(self._on_publish)
-        lay.addWidget(publish_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
+        btn_col.addWidget(publish_btn)
+        btn_col.addStretch()
+        lay.addLayout(btn_col)
 
     def _on_publish(self) -> None:
         if self._publish_callback is not None:
@@ -161,13 +270,18 @@ class _ShotCard(QFrame):
             logger.warning("NK 열기 실패: %s", e)
 
     def set_thumbnail(self, pixmap: QPixmap) -> None:
+        if pixmap.isNull():
+            return
         scaled = pixmap.scaled(
             _THUMB_W,
             _THUMB_H,
-            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
             Qt.TransformationMode.SmoothTransformation,
         )
-        self.thumb_label.setPixmap(scaled)
+        x = max(0, (scaled.width() - _THUMB_W) // 2)
+        y = max(0, (scaled.height() - _THUMB_H) // 2)
+        cropped = scaled.copy(QRect(x, y, _THUMB_W, _THUMB_H))
+        self.thumb_label.setPixmap(cropped)
         self.thumb_label.setText("")
 
 

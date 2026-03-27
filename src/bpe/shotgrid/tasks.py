@@ -8,6 +8,47 @@ from bpe.core.logging import get_logger
 
 logger = get_logger("shotgrid.tasks")
 
+# Shot entity field for VFX work order (detected once per process from Shot schema)
+_VFX_FIELD_CACHE: Optional[str] = None
+
+
+def _detect_shot_vfx_field(sg: Any) -> str:
+    """Return Shot API field name for VFX work order, or "" if none."""
+    global _VFX_FIELD_CACHE
+    if _VFX_FIELD_CACHE is not None:
+        return _VFX_FIELD_CACHE
+    names: List[str] = []
+    try:
+        raw = sg.schema_field_read("Shot")
+        if isinstance(raw, dict):
+            names = list(raw.keys())
+    except Exception as e:
+        logger.debug("detect_shot_vfx_field schema read failed: %s", e)
+    for name in names:
+        low = str(name).lower()
+        if "vfx" in low and ("work" in low or "order" in low):
+            _VFX_FIELD_CACHE = str(name)
+            return _VFX_FIELD_CACHE
+    _VFX_FIELD_CACHE = ""
+    return ""
+
+
+def _vfx_work_order_from_row(t: Dict[str, Any], vfx_field: str) -> str:
+    if not vfx_field:
+        return ""
+    key = f"entity.Shot.{vfx_field}"
+    val: Any = t.get(key)
+    if val is None:
+        ent = t.get("entity") or {}
+        if isinstance(ent, dict):
+            val = ent.get(vfx_field)
+    if val is None:
+        return ""
+    if isinstance(val, dict):
+        return str(val.get("name") or val.get("value") or "").strip()
+    return str(val).strip()
+
+
 # ── company task status presets (19) ─────────────────────────────────
 
 BELUCA_TASK_STATUS_PRESETS: List[Tuple[str, str]] = [
@@ -200,8 +241,10 @@ def list_comp_tasks_for_assignee(
     order = [{"field_name": "id", "direction": "desc"}]
     lim = int(limit)
 
+    vfx_field = _detect_shot_vfx_field(sg)
+
     def _task_fields_for_due(due_col: str) -> List[str]:
-        return [
+        out = [
             "id",
             "content",
             due_col,
@@ -214,6 +257,9 @@ def list_comp_tasks_for_assignee(
             "project.Project.code",
             "project.Project.name",
         ]
+        if vfx_field:
+            out.append(f"entity.Shot.{vfx_field}")
+        return out
 
     fields: List[str] = _task_fields_for_due(due_fn_effective)
 
@@ -312,6 +358,7 @@ def list_comp_tasks_for_assignee(
                 "task_status": (t.get(status_fn) or "").strip(),
                 "status_field": status_fn,
                 "due_date": due_val,
+                "vfx_work_order": _vfx_work_order_from_row(t, vfx_field),
                 "shot_id": ent.get("id"),
                 "shot_code": shot_code,
                 "shot_description": desc,
@@ -362,6 +409,8 @@ def list_comp_tasks_for_project_user(
     st_use: bool = bool(st)
     due_fn_effective = (due_date_field or "").strip() or "due_date"
 
+    vfx_field = _detect_shot_vfx_field(sg)
+
     def _fields() -> List[str]:
         base = [
             "id",
@@ -378,6 +427,8 @@ def list_comp_tasks_for_project_user(
         ]
         if due_fn_effective != "due_date":
             base.append("due_date")
+        if vfx_field:
+            base.append(f"entity.Shot.{vfx_field}")
         return base
 
     tc_raw = (task_content or "").strip()
@@ -418,6 +469,8 @@ def list_comp_tasks_for_project_user(
                     "project.Project.code",
                     "project.Project.name",
                 ]
+                if vfx_field:
+                    fb_fields.append(f"entity.Shot.{vfx_field}")
                 try:
                     rows = sg.find("Task", list(base_filters), fb_fields, limit=limit)
                 except Exception as e3:
@@ -448,6 +501,7 @@ def list_comp_tasks_for_project_user(
                 "task_status": (t.get(status_fn) or "").strip(),
                 "status_field": status_fn,
                 "due_date": due_val,
+                "vfx_work_order": _vfx_work_order_from_row(t, vfx_field),
                 "shot_id": ent.get("id"),
                 "shot_code": (ent.get("code") or ent.get("name") or "").strip(),
                 "shot_description": (ent.get("description") or "").strip(),
