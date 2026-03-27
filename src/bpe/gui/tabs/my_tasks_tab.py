@@ -1,12 +1,12 @@
-"""My Tasks tab — ShotGrid comp task list with thumbnails and NK open."""
+"""My Tasks tab — ShotGrid comp task list with thumbnails, NukeX open, install folder."""
 
 from __future__ import annotations
 
 import os
 from typing import Any, Dict, List, Optional
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QPixmap
+from PySide6.QtCore import Qt, QTimer, QUrl
+from PySide6.QtGui import QDesktopServices, QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -21,7 +21,11 @@ from PySide6.QtWidgets import (
 )
 
 from bpe.core.logging import get_logger
-from bpe.core.nk_finder import find_latest_nk_and_open, find_server_root_auto
+from bpe.core.nk_finder import (
+    find_latest_nk_and_open,
+    find_nukex_install_dir,
+    find_server_root_auto,
+)
 from bpe.gui import theme
 from bpe.gui.workers.sg_worker import ShotGridWorker
 from bpe.shotgrid.client import get_default_sg
@@ -91,11 +95,22 @@ class _ShotCard(QFrame):
         info.addStretch()
         lay.addLayout(info, 1)
 
-        # NK open button
-        btn = QPushButton("NK 열기")
-        btn.setFixedWidth(72)
-        btn.clicked.connect(self._open_nk)
-        lay.addWidget(btn, alignment=Qt.AlignmentFlag.AlignVCenter)
+        folder_btn = QPushButton("폴더 열기")
+        folder_btn.setMinimumWidth(100)
+        folder_btn.clicked.connect(self._open_nukex_folder)
+        lay.addWidget(folder_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+        nuke_btn = QPushButton("NukeX")
+        nuke_btn.setMinimumWidth(72)
+        nuke_btn.clicked.connect(self._open_nk)
+        lay.addWidget(nuke_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+    def _open_nukex_folder(self) -> None:
+        d = find_nukex_install_dir()
+        if d is None or not d.is_dir():
+            logger.warning("NukeX 설치 폴더를 찾을 수 없음")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(d.resolve())))
 
     def _open_nk(self) -> None:
         d = self.task_data

@@ -14,6 +14,7 @@ from bpe.core.nk_finder import (
     _nk_is_junk_file,
     find_latest_nk_path,
     find_nukex_exe,
+    find_nukex_install_dir,
     find_server_root_auto,
 )
 
@@ -225,3 +226,24 @@ class TestFindNukexExeEnv:
         monkeypatch.setenv("BPE_NUKEX_EXE", str(exe))
         got = find_nukex_exe()
         assert got == exe.resolve()
+
+
+# ── find_nukex_install_dir ───────────────────────────────────────
+
+
+class TestFindNukexInstallDir:
+    def test_matches_exe_parent_under_roots(self, tmp_path, monkeypatch):
+        pf = tmp_path / "pf"
+        (pf / "Nuke15.1" / "Nuke15.1.exe").parent.mkdir(parents=True)
+        (pf / "Nuke15.1" / "Nuke15.1.exe").write_text("exe")
+        monkeypatch.setattr("bpe.core.nk_finder._nuke_program_dirs", lambda: [pf])
+        monkeypatch.delenv("BPE_NUKEX_EXE", raising=False)
+        got = find_nukex_install_dir()
+        assert got == (pf / "Nuke15.1").resolve()
+
+    def test_bpe_nukex_exe_override_parent(self, tmp_path, monkeypatch):
+        exe = tmp_path / "custom_nukex.exe"
+        exe.write_text("x")
+        monkeypatch.setenv("BPE_NUKEX_EXE", str(exe))
+        got = find_nukex_install_dir()
+        assert got == exe.parent.resolve()

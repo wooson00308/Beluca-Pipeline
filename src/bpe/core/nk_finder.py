@@ -220,6 +220,14 @@ def find_nukex_exe() -> Optional[Path]:
     return _find_nukex_exe_under_roots(_nuke_program_dirs())
 
 
+def find_nukex_install_dir() -> Optional[Path]:
+    """``find_nukex_exe()``의 부모 디렉터리(설치 폴더). 실행 파일 없으면 ``None``."""
+    exe = find_nukex_exe()
+    if exe is None:
+        return None
+    return exe.parent
+
+
 # ---------------------------------------------------------------------------
 # Heuristic shot-root finder (BFS)
 # ---------------------------------------------------------------------------
