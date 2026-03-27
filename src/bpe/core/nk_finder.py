@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 from collections import deque
@@ -589,3 +590,107 @@ def find_latest_nk_and_open(shot_name: str, project_code: str, server_root: str)
     except Exception:
         logger.warning("NK 파일 열기 실패: %s", path)
     return path
+
+
+# ---------------------------------------------------------------------------
+# Plate MOV + RV
+# ---------------------------------------------------------------------------
+
+_PLATE_VERSION_DIR_RE = re.compile(r"^v\d+$", re.IGNORECASE)
+
+
+def _find_rv_exe() -> Optional[str]:
+    """RV 실행 파일 경로 탐색 (PATH → 공통 설치 경로 → Program Files glob 순)."""
+    rv = shutil.which("rv") or shutil.which("rv.exe")
+    if rv:
+        return rv
+    if sys.platform == "win32":
+        for c in (
+            r"C:\Program Files\RV\bin\rv.exe",
+            r"C:\Program Files\Autodesk\RV\bin\rv.exe",
+            r"C:\Program Files\ShotGrid\RV\bin\rv.exe",
+        ):
+            p = Path(c)
+            if p.is_file():
+                return str(p)
+        for pf in (
+            os.environ.get("ProgramFiles", r"C:\Program Files"),
+            os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+        ):
+            root = Path(pf)
+            try:
+                if not root.is_dir():
+                    continue
+                hits = sorted(root.glob("**/bin/rv.exe"))
+                if hits:
+                    return str(hits[0])
+            except OSError:
+                continue
+    elif sys.platform == "darwin":
+        for c in (
+            "/Applications/RV.app/Contents/MacOS/RV",
+            "/Applications/Autodesk RV.app/Contents/MacOS/RV",
+        ):
+            p = Path(c)
+            if p.is_file():
+                return str(p)
+    return None
+
+
+def find_plate_mov(shot_name: str, project_code: str, server_root: str) -> Optional[Path]:
+    """plate/org/vXXX/mov/*.mov 중 최신 버전의 첫 파일 반환.
+
+    버전 내림차순 탐색; mov 폴더가 없거나 비어 있으면 이전 버전으로 폴백.
+    """
+    paths = build_shot_paths(server_root, project_code, shot_name)
+    if paths is None:
+        return None
+    plate_org = paths["shot_root"] / "plate" / "org"
+    if not plate_org.is_dir():
+        return None
+    try:
+        children = list(plate_org.iterdir())
+    except OSError:
+        return None
+    version_dirs = sorted(
+        [d for d in children if d.is_dir() and _PLATE_VERSION_DIR_RE.match(d.name)],
+        key=lambda d: int(d.name[1:]),
+        reverse=True,
+    )
+    for vdir in version_dirs:
+        mov_dir = vdir / "mov"
+        if not mov_dir.is_dir():
+            continue
+        try:
+            movs = [p for p in mov_dir.glob("*.mov") if p.is_file()]
+        except OSError:
+            continue
+        if movs:
+            return sorted(movs)[0]
+    return None
+
+
+def open_plate_in_rv(shot_name: str, project_code: str, server_root: str) -> bool:
+    """플레이트 MOV를 RV로 실행. RV 없거나 MOV 없으면 False."""
+    mov = find_plate_mov(shot_name, project_code, server_root)
+    if mov is None:
+        logger.warning(
+            "RV: plate/org 아래 .mov 없음 또는 샷 경로 없음 (shot=%s project=%s root=%s)",
+            shot_name,
+            project_code,
+            server_root,
+        )
+        return False
+    rv_exe = _find_rv_exe()
+    if rv_exe is None:
+        logger.warning(
+            "RV 실행 파일을 찾지 못함 — PATH·Program Files 확인 (mov=%s)",
+            mov,
+        )
+        return False
+    try:
+        subprocess.Popen([rv_exe, str(mov)], close_fds=True)
+    except OSError as e:
+        logger.warning("RV 실행 실패: %s", e)
+        return False
+    return True

@@ -17,6 +17,7 @@ from bpe.core.nk_finder import (
     find_nukex_exe,
     find_nukex_exe_and_args,
     find_nukex_install_dir,
+    find_plate_mov,
     find_server_root_auto,
     find_shot_folder,
 )
@@ -394,3 +395,50 @@ class TestFindShotFolder:
     def test_returns_none_for_missing_args(self):
         assert find_shot_folder("", "PRJ", "/x") is None
         assert find_shot_folder("S", "PRJ", "") is None
+
+
+# ── find_plate_mov ───────────────────────────────────────────────
+
+
+class TestFindPlateMov:
+    def _make_plate_org(self, tmp_path: Path, shot_name: str) -> Path:
+        ep = shot_name.split("_")[0].upper()
+        shot_root = tmp_path / "PRJ" / "04_sq" / ep / shot_name.upper()
+        plate_org = shot_root / "plate" / "org"
+        plate_org.mkdir(parents=True)
+        return plate_org
+
+    def test_prefers_highest_version_with_mov(self, tmp_path):
+        plate_org = self._make_plate_org(tmp_path, "E01_S01_010")
+        (plate_org / "v001" / "mov").mkdir(parents=True)
+        (plate_org / "v001" / "mov" / "a.mov").write_bytes(b"x")
+        (plate_org / "v003" / "mov").mkdir(parents=True)
+        (plate_org / "v003" / "mov" / "b.mov").write_bytes(b"y")
+
+        result = find_plate_mov("E01_S01_010", "PRJ", str(tmp_path))
+        assert result is not None
+        assert "v003" in str(result).replace("\\", "/")
+        assert result.name == "b.mov"
+
+    def test_falls_back_when_newer_version_has_no_mov(self, tmp_path):
+        plate_org = self._make_plate_org(tmp_path, "E01_S01_011")
+        (plate_org / "v002" / "mov").mkdir(parents=True)
+        (plate_org / "v001" / "mov").mkdir(parents=True)
+        (plate_org / "v001" / "mov" / "only.mov").write_bytes(b"z")
+
+        result = find_plate_mov("E01_S01_011", "PRJ", str(tmp_path))
+        assert result is not None
+        assert result.name == "only.mov"
+
+    def test_returns_none_when_no_mov(self, tmp_path):
+        plate_org = self._make_plate_org(tmp_path, "E01_S01_012")
+        (plate_org / "v001" / "mov").mkdir(parents=True)
+
+        assert find_plate_mov("E01_S01_012", "PRJ", str(tmp_path)) is None
+
+    def test_returns_none_missing_plate_org(self, tmp_path):
+        ep = "E01_S01_013".split("_")[0].upper()
+        shot_root = tmp_path / "PRJ" / "04_sq" / ep / "E01_S01_013"
+        shot_root.mkdir(parents=True)
+
+        assert find_plate_mov("E01_S01_013", "PRJ", str(tmp_path)) is None

@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from PySide6.QtCore import QEvent, QRect, Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QMouseEvent, QPixmap, QShowEvent
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QDialog,
     QFrame,
@@ -29,6 +30,7 @@ from bpe.core.nk_finder import (
     find_latest_nk_and_open,
     find_server_root_auto,
     find_shot_folder,
+    open_plate_in_rv,
 )
 from bpe.gui import theme
 from bpe.gui.widgets.clickable_image import ClickableImage
@@ -92,6 +94,7 @@ def _vline() -> QFrame:
     line.setFrameShape(QFrame.Shape.VLine)
     line.setFrameShadow(QFrame.Shadow.Plain)
     line.setFixedWidth(1)
+    line.setMinimumHeight(_THUMB_H)
     line.setStyleSheet(f"background-color: {theme.BORDER}; border: none;")
     return line
 
@@ -147,6 +150,16 @@ class _ShotCard(QFrame):
         self._publish_callback = publish_callback
         self.setObjectName("card")
         self._build(task_data)
+        self.thumb_label.installEventFilter(self)
+        self.thumb_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.thumb_label.setToolTip("플레이트 MOV를 RV로 열기")
+
+    def eventFilter(self, obj: object, event: object) -> bool:
+        if obj is self.thumb_label and event.type() == QEvent.Type.MouseButtonPress:
+            if isinstance(event, QMouseEvent) and event.button() == Qt.MouseButton.LeftButton:
+                self._open_plate_in_rv()
+                return True
+        return super().eventFilter(obj, event)
 
     def set_selected(self, selected: bool) -> None:
         self.setProperty("selected", selected)
@@ -160,11 +173,12 @@ class _ShotCard(QFrame):
 
         # Thumbnail (fills cell; pixmap cropped in set_thumbnail)
         self.thumb_label = QLabel()
-        self.thumb_label.setFixedSize(_THUMB_W, _THUMB_H)
+        self.thumb_label.setFixedWidth(_THUMB_W)
+        self.thumb_label.setMinimumHeight(_THUMB_H)
         self.thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.thumb_label.setStyleSheet(f"background-color: {theme.BORDER}; border: none;")
         self.thumb_label.setText("img")
-        lay.addWidget(self.thumb_label)
+        lay.addWidget(self.thumb_label, alignment=Qt.AlignmentFlag.AlignTop)
 
         shot_code = d.get("shot_code", "")
         task_content = d.get("task_content", "")
@@ -172,15 +186,44 @@ class _ShotCard(QFrame):
         delivery = _format_task_date(d.get("delivery_date"))
         vfx_wo = (d.get("vfx_work_order") or "").strip()
 
-        lay.addWidget(_vline())
+        lay.addWidget(_vline(), alignment=Qt.AlignmentFlag.AlignTop)
 
         # Shot name, task, version (thumbnail right; local NK는 백그라운드에서 채움)
         info = QVBoxLayout()
         info.setSpacing(4)
         info.setContentsMargins(8, 0, 8, 0)
+        title_row = QHBoxLayout()
+        title_row.setSpacing(4)
+        title_row.setContentsMargins(0, 0, 0, 0)
         title = QLabel(shot_code)
         title.setStyleSheet(f"font-weight: bold; border: none; color: {theme.ACCENT};")
-        info.addWidget(title)
+        copy_btn = QPushButton("\u29c9")
+        copy_btn.setFixedSize(18, 18)
+        copy_btn.setToolTip("샷 이름 복사")
+        _copy_style_default = (
+            f"QPushButton {{ color: {theme.ACCENT}; background: transparent; "
+            f"border: 1px solid {theme.ACCENT}; border-radius: 3px; font-size: 10px; padding: 0; "
+            f"min-width: 18px; min-height: 18px; }}"
+            f"QPushButton:hover {{ background: {theme.ACCENT}; color: {theme.BG}; }}"
+        )
+        _copy_style_ok = (
+            f"QPushButton {{ color: {theme.SUCCESS}; background: transparent; "
+            f"border: 1px solid {theme.SUCCESS}; border-radius: 3px; font-size: 10px; padding: 0; "
+            f"min-width: 18px; min-height: 18px; }}"
+            f"QPushButton:hover {{ background: {theme.SUCCESS}; color: {theme.BG}; }}"
+        )
+        copy_btn.setStyleSheet(_copy_style_default)
+
+        def _on_copy_shot_name() -> None:
+            QApplication.clipboard().setText(shot_code)
+            copy_btn.setStyleSheet(_copy_style_ok)
+            QTimer.singleShot(800, lambda: copy_btn.setStyleSheet(_copy_style_default))
+
+        copy_btn.clicked.connect(_on_copy_shot_name)
+        title_row.addWidget(title)
+        title_row.addWidget(copy_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
+        title_row.addStretch()
+        info.addLayout(title_row)
         task_line = QLabel(f"Task: {task_content}")
         task_line.setObjectName("page_subtitle")
         task_line.setStyleSheet(f"border: none; color: {theme.TEXT};")
@@ -192,7 +235,7 @@ class _ShotCard(QFrame):
         info.addStretch()
         lay.addLayout(info, 1)
 
-        lay.addWidget(_vline())
+        lay.addWidget(_vline(), alignment=Qt.AlignmentFlag.AlignTop)
 
         # Status cell (full background color)
         bg, fg = _status_cell_colors(status)
@@ -215,9 +258,9 @@ class _ShotCard(QFrame):
         st_lay.addWidget(st_hdr)
         st_lay.addWidget(st_val)
         st_lay.addStretch()
-        lay.addWidget(status_cell, alignment=Qt.AlignmentFlag.AlignVCenter)
+        lay.addWidget(status_cell, alignment=Qt.AlignmentFlag.AlignTop)
 
-        lay.addWidget(_vline())
+        lay.addWidget(_vline(), alignment=Qt.AlignmentFlag.AlignTop)
 
         # Delivery date column (Shot field)
         date_col = QWidget()
@@ -233,11 +276,11 @@ class _ShotCard(QFrame):
         dc_lay.addWidget(dc_hdr)
         dc_lay.addWidget(dc_val)
         dc_lay.addStretch()
-        lay.addWidget(date_col, alignment=Qt.AlignmentFlag.AlignVCenter)
+        lay.addWidget(date_col, alignment=Qt.AlignmentFlag.AlignTop)
 
-        lay.addWidget(_vline())
+        lay.addWidget(_vline(), alignment=Qt.AlignmentFlag.AlignTop)
 
-        # VFX work order (stretch) — wrap + scroll so long lines do not push status/date
+        # VFX work order (stretch) — wrap; card height grows with content (no inner scroll)
         vfx_col = QWidget()
         vfx_col.setMinimumWidth(0)
         vfx_lay = QVBoxLayout(vfx_col)
@@ -245,24 +288,21 @@ class _ShotCard(QFrame):
         vfx_hdr = QLabel("VFX work order")
         vfx_hdr.setObjectName("page_subtitle")
         vfx_hdr.setStyleSheet("border: none;")
-        vfx_scroll = QScrollArea()
-        vfx_scroll.setWidgetResizable(True)
-        vfx_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        vfx_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        vfx_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        vfx_scroll.setMaximumHeight(_THUMB_H - 22)
         vfx_val = QLabel(vfx_wo if vfx_wo else "—")
         vfx_val.setWordWrap(True)
         vfx_val.setMinimumWidth(0)
         vfx_val.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         vfx_val.setStyleSheet(f"color: {theme.TEXT}; border: none;")
-        vfx_scroll.setWidget(vfx_val)
+        vfx_val.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
+        vfx_val.setCursor(Qt.CursorShape.IBeamCursor)
         vfx_lay.addWidget(vfx_hdr)
-        vfx_lay.addWidget(vfx_scroll)
-        vfx_lay.addStretch()
+        vfx_lay.addWidget(vfx_val)
         lay.addWidget(vfx_col, 2)
 
-        lay.addWidget(_vline())
+        lay.addWidget(_vline(), alignment=Qt.AlignmentFlag.AlignTop)
 
         # Action buttons (vertical stack)
         btn_col = QVBoxLayout()
@@ -330,6 +370,26 @@ class _ShotCard(QFrame):
             find_latest_nk_and_open(shot_code, project_code, server_root)
         except Exception as e:
             logger.warning("NK 열기 실패: %s", e)
+
+    def _open_plate_in_rv(self) -> None:
+        d = self.task_data
+        shot_code = d.get("shot_code", "")
+        project_code = d.get("project_code") or d.get("project_folder", "")
+        if not shot_code or not project_code:
+            logger.warning("RV 열기: shot_code 또는 project_code 없음")
+            return
+
+        env_root = (os.environ.get("BPE_SERVER_ROOT") or "").strip()
+        server_root = find_server_root_auto(project_code) or env_root
+        if not server_root:
+            logger.warning(
+                "RV 열기: 서버 루트를 찾을 수 없음 (드라이브:\\vfx\\project_연도\\%s)",
+                project_code,
+            )
+            return
+        logger.info("RV: server_root=%s shot=%s", server_root, shot_code)
+        if not open_plate_in_rv(shot_code, project_code, server_root):
+            logger.warning("RV 열기 실패: MOV 없거나 rv 미설치 (%s)", shot_code)
 
     def set_thumbnail(self, pixmap: QPixmap) -> None:
         if pixmap.isNull():
@@ -474,6 +534,7 @@ class MyTasksTab(QWidget):
         self._card_area = QScrollArea()
         self._card_area.setWidgetResizable(True)
         self._card_area.setFrameShape(QFrame.Shape.NoFrame)
+        self._card_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._card_host = QWidget()
         self._card_layout = QVBoxLayout(self._card_host)
         self._card_layout.setContentsMargins(0, 0, 0, 0)
