@@ -6,7 +6,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 from PySide6.QtCore import Qt, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices, QPixmap
+from PySide6.QtGui import QDesktopServices, QPixmap, QShowEvent
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -170,6 +170,8 @@ class MyTasksTab(QWidget):
         self._note_widgets: List[QFrame] = []
         self._last_shot_ids: List[int] = []
         self._notes_req_seq: int = 0
+        self._splitter_halves_done: bool = False
+        self._splitter_equalize_attempts: int = 0
 
         self._user_timer = QTimer(self)
         self._user_timer.setSingleShot(True)
@@ -256,10 +258,24 @@ class MyTasksTab(QWidget):
         root.addWidget(self._loading_label)
 
         # ── Splitter: card list (left) + notes (right) ─────────────
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setChildrenCollapsible(False)
+        self._splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._splitter.setChildrenCollapsible(False)
 
-        # Card list inside QScrollArea
+        # Shot list panel (header + scroll, mirrors note_panel)
+        shot_panel = QWidget()
+        shot_lay = QVBoxLayout(shot_panel)
+        shot_lay.setContentsMargins(8, 8, 8, 8)
+
+        shot_hdr = QHBoxLayout()
+        shot_title = QLabel("샷 목록")
+        shot_title.setObjectName("log_title")
+        shot_hdr.addWidget(shot_title)
+        shot_sub = QLabel("배정 comp 태스크")
+        shot_sub.setObjectName("page_subtitle")
+        shot_hdr.addWidget(shot_sub)
+        shot_hdr.addStretch()
+        shot_lay.addLayout(shot_hdr)
+
         card_area = QScrollArea()
         card_area.setWidgetResizable(True)
         card_area.setFrameShape(QFrame.Shape.NoFrame)
@@ -269,7 +285,9 @@ class MyTasksTab(QWidget):
         self._card_layout.setSpacing(8)
         self._card_layout.addStretch()
         card_area.setWidget(self._card_host)
-        splitter.addWidget(card_area)
+        shot_lay.addWidget(card_area, 1)
+
+        self._splitter.addWidget(shot_panel)
 
         # Notes panel
         note_panel = QWidget()
@@ -301,11 +319,31 @@ class MyTasksTab(QWidget):
         note_scroll.setWidget(self._note_host)
         note_lay.addWidget(note_scroll, 1)
 
-        splitter.addWidget(note_panel)
+        self._splitter.addWidget(note_panel)
 
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 1)
-        root.addWidget(splitter, 1)
+        self._splitter.setStretchFactor(0, 1)
+        self._splitter.setStretchFactor(1, 1)
+        root.addWidget(self._splitter, 1)
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        if not self._splitter_halves_done:
+            QTimer.singleShot(0, self._equalize_splitter_first_show)
+
+    def _equalize_splitter_first_show(self) -> None:
+        if self._splitter_halves_done:
+            return
+        w = self._splitter.width()
+        if w <= 0:
+            self._splitter_equalize_attempts += 1
+            if self._splitter_equalize_attempts < 20:
+                QTimer.singleShot(50, self._equalize_splitter_first_show)
+            else:
+                self._splitter_halves_done = True
+            return
+        self._splitter_halves_done = True
+        half = w // 2
+        self._splitter.setSizes([half, w - half])
 
     # ── Project loading ─────────────────────────────────────────────
 
