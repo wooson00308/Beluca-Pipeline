@@ -5,7 +5,7 @@ from __future__ import annotations
 import subprocess
 import sys
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -14,10 +14,10 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
-    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -26,6 +26,9 @@ from bpe.core.nk_generator import generate_nk_content
 from bpe.core.presets import load_presets
 from bpe.core.settings import get_shot_builder_settings, save_shot_builder_settings
 from bpe.core.shot_builder import build_shot_paths, parse_shot_name
+
+_NK_VERSION = "v001"
+_LOG_RULE = "─" * 42
 
 
 def _form_row(label_text: str, widget: QWidget) -> QHBoxLayout:
@@ -44,7 +47,7 @@ class ShotBuilderTab(QWidget):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
 
-        self._last_paths: Optional[Dict[str, Path]] = None
+        self._last_open_folder_path: Optional[Path] = None
 
         # ── Outer layout (holds scroll area) ──────────────────────
         outer = QVBoxLayout(self)
@@ -113,39 +116,7 @@ class ShotBuilderTab(QWidget):
         # Shot name
         self._shot_name_edit = QLineEdit()
         self._shot_name_edit.setPlaceholderText("E107_S022_0080")
-        self._shot_name_edit.textChanged.connect(self._update_path_preview)
         form.addLayout(_form_row("샷 이름", self._shot_name_edit))
-
-        # NK version
-        self._nk_version_spin = QSpinBox()
-        self._nk_version_spin.setMinimum(1)
-        self._nk_version_spin.setMaximum(999)
-        self._nk_version_spin.setValue(1)
-        self._nk_version_spin.setFixedWidth(100)
-        form.addLayout(_form_row("NK 버전", self._nk_version_spin))
-
-        # Path preview — individual dim labels
-        preview_title_lbl = QLabel("경로 미리보기")
-        preview_title_lbl.setObjectName("form_label")
-        preview_title_lbl.setFixedWidth(120)
-        preview_title_lbl.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-
-        self._path_preview_container = QVBoxLayout()
-        self._path_preview_container.setSpacing(4)
-        self._path_preview_placeholder = QLabel("—")
-        self._path_preview_placeholder.setProperty("dim", True)
-        self._path_preview_placeholder.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        self._path_preview_container.addWidget(self._path_preview_placeholder)
-
-        preview_row = QHBoxLayout()
-        preview_row.setSpacing(12)
-        preview_row.addWidget(preview_title_lbl, 0, Qt.AlignmentFlag.AlignTop)
-        preview_right = QWidget()
-        preview_right.setLayout(self._path_preview_container)
-        preview_row.addWidget(preview_right, 1)
-        form.addLayout(preview_row)
 
         root.addLayout(form)
 
@@ -206,22 +177,33 @@ class ShotBuilderTab(QWidget):
             }
         )
 
-    def _clear_path_preview(self) -> None:
-        while self._path_preview_container.count():
-            item = self._path_preview_container.takeAt(0)
-            if item is not None:
-                w = item.widget()
-                if w is not None:
-                    w.deleteLater()
-
-    def _set_path_preview_lines(self, lines: list[str]) -> None:
-        self._clear_path_preview()
-        for line in lines:
-            lbl = QLabel(line)
-            lbl.setProperty("dim", True)
-            lbl.setWordWrap(True)
-            lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-            self._path_preview_container.addWidget(lbl)
+    def _append_success_log(
+        self,
+        preset_name: str,
+        shot_display: str,
+        nk_path: Path,
+        paths: Dict[str, Path],
+        warnings: List[str],
+    ) -> None:
+        self._log.appendPlainText("[성공] NK 파일이 생성되었습니다.")
+        self._log.appendPlainText(_LOG_RULE)
+        self._log.appendPlainText(f"샷 이름      : {shot_display}")
+        self._log.appendPlainText(f"프리셋       : {preset_name}")
+        self._log.appendPlainText(_LOG_RULE)
+        self._log.appendPlainText(f"NK 파일      : {nk_path}")
+        self._log.appendPlainText(f"플레이트 경로 : {paths['plate_hi']}")
+        self._log.appendPlainText(f"Edit 경로    : {paths['edit']}")
+        self._log.appendPlainText(f"렌더 경로    : {paths['renders']}")
+        self._log.appendPlainText(f"엘리먼트 경로 : {paths['element']}")
+        self._log.appendPlainText(f"샷 루트      : {paths['shot_root']}")
+        self._log.appendPlainText(_LOG_RULE)
+        self._log.appendPlainText(
+            "※ 이 NK는 v001 전용입니다. 버전업·덮어쓰기는 NukeX에서 직접 진행하세요."
+        )
+        if warnings:
+            self._log.appendPlainText(_LOG_RULE)
+            for w in warnings:
+                self._log.appendPlainText(w)
 
     # ── Slots ─────────────────────────────────────────────────────
 
@@ -232,33 +214,10 @@ class ShotBuilderTab(QWidget):
         if path:
             self._server_root_edit.setText(path)
 
-    def _update_path_preview(self) -> None:
-        server_root = self._server_root_edit.text().strip()
-        preset_name = self._preset_combo.currentText().strip()
-        shot_name = self._shot_name_edit.text().strip()
-
-        if not server_root or not preset_name or not shot_name:
-            self._clear_path_preview()
-            placeholder = QLabel("—")
-            placeholder.setProperty("dim", True)
-            self._path_preview_container.addWidget(placeholder)
-            self._last_paths = None
-            return
-
-        paths = build_shot_paths(server_root, preset_name, shot_name)
-        if paths is None:
-            self._clear_path_preview()
-            err = QLabel("샷 이름을 파싱할 수 없습니다.")
-            err.setProperty("dim", True)
-            self._path_preview_container.addWidget(err)
-            self._last_paths = None
-            return
-
-        self._last_paths = paths
-        self._set_path_preview_lines([f"{key}: {val}" for key, val in paths.items()])
-
     def _create_nk(self) -> None:
         self._log.clear()
+        self._open_folder_btn.setEnabled(False)
+        self._last_open_folder_path = None
 
         server_root = self._server_root_edit.text().strip()
         preset_name = self._preset_combo.currentText().strip()
@@ -279,6 +238,8 @@ class ShotBuilderTab(QWidget):
             self._log.appendPlainText("[오류] 샷 이름 형식이 올바르지 않습니다. 예) E107_S022_0080")
             return
 
+        shot_display = parsed["full"]
+
         paths = build_shot_paths(server_root, preset_name, shot_name)
         if paths is None:
             self._log.appendPlainText("[오류] 경로를 생성할 수 없습니다.")
@@ -290,19 +251,41 @@ class ShotBuilderTab(QWidget):
             self._log.appendPlainText(f"[오류] 프리셋 '{preset_name}'을(를) 찾을 수 없습니다.")
             return
 
-        nk_version = f"v{self._nk_version_spin.value():03d}"
-        nk_content, warnings = generate_nk_content(preset_data, shot_name, paths, nk_version)
-
-        # Ensure directories exist
         nuke_dir = paths["nuke_dir"]
+        nk_v001_dir = nuke_dir / _NK_VERSION
+        nk_filename = f"{shot_display}_comp_{_NK_VERSION}.nk"
+        nk_path = nk_v001_dir / nk_filename
+
+        if nk_v001_dir.exists():
+            existing_nks = list(nk_v001_dir.glob("*.nk"))
+            if existing_nks:
+                self._log.appendPlainText(
+                    "[오류] v001 폴더에 이미 NK 파일이 있습니다. "
+                    "덮어쓰기·버전업은 NukeX에서 직접 진행해주세요."
+                )
+                for p in sorted(existing_nks):
+                    self._log.appendPlainText(f"  - {p}")
+                return
+
+        if not nk_v001_dir.exists():
+            reply = QMessageBox.question(
+                self,
+                "v001 폴더 없음",
+                "v001 폴더가 없습니다. 폴더를 만들고 계속할까요?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                self._log.appendPlainText("[취소] 폴더를 만들지 않아 NK를 생성하지 않았습니다.")
+                return
+
+        nk_content, warnings = generate_nk_content(preset_data, shot_display, paths, _NK_VERSION)
+
         try:
-            nuke_dir.mkdir(parents=True, exist_ok=True)
+            nk_v001_dir.mkdir(parents=True, exist_ok=True)
         except OSError as e:
             self._log.appendPlainText(f"[오류] 폴더 생성 실패: {e}")
             return
-
-        nk_filename = f"{shot_name}_comp_{nk_version}.nk"
-        nk_path = nuke_dir / nk_filename
 
         try:
             nk_path.write_text(nk_content, encoding="utf-8")
@@ -310,23 +293,18 @@ class ShotBuilderTab(QWidget):
             self._log.appendPlainText(f"[오류] NK 파일 저장 실패: {e}")
             return
 
-        self._last_paths = paths
+        self._last_open_folder_path = nk_v001_dir
         self._open_folder_btn.setEnabled(True)
 
-        self._log.appendPlainText(f"NK 파일 생성 완료: {nk_path}")
-        for w in warnings:
-            self._log.appendPlainText(w)
+        self._append_success_log(preset_name, shot_display, nk_path, paths, warnings)
 
-        # Save last used settings
         self._save_settings()
 
     def _open_folder(self) -> None:
-        if self._last_paths is None:
+        if self._last_open_folder_path is None:
             return
-        target = self._last_paths.get("nuke_dir")
-        if target is None or not target.exists():
-            target = self._last_paths.get("shot_root")
-        if target is None:
+        target = self._last_open_folder_path
+        if not target.exists():
             return
 
         path_str = str(target)
