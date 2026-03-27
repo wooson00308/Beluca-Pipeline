@@ -10,6 +10,8 @@ logger = get_logger("shotgrid.tasks")
 
 # Shot entity field for VFX work order (detected once per process from Shot schema)
 _VFX_FIELD_CACHE: Optional[str] = None
+# Shot entity field for delivery date (detected once per process from Shot schema)
+_DELIVERY_FIELD_CACHE: Optional[str] = None
 
 
 def _detect_shot_vfx_field(sg: Any) -> str:
@@ -47,6 +49,53 @@ def _vfx_work_order_from_row(t: Dict[str, Any], vfx_field: str) -> str:
     if isinstance(val, dict):
         return str(val.get("name") or val.get("value") or "").strip()
     return str(val).strip()
+
+
+def _detect_shot_delivery_date_field(sg: Any) -> str:
+    """Return Shot API field name for delivery date, or "" if none."""
+    global _DELIVERY_FIELD_CACHE
+    if _DELIVERY_FIELD_CACHE is not None:
+        return _DELIVERY_FIELD_CACHE
+    names: List[str] = []
+    try:
+        raw = sg.schema_field_read("Shot")
+        if isinstance(raw, dict):
+            names = list(raw.keys())
+    except Exception as e:
+        logger.debug("detect_shot_delivery_date_field schema read failed: %s", e)
+    for name in names:
+        if str(name) == "sg_delivery_date":
+            _DELIVERY_FIELD_CACHE = str(name)
+            return _DELIVERY_FIELD_CACHE
+    for name in names:
+        low = str(name).lower()
+        if "delivery" in low and "date" in low:
+            _DELIVERY_FIELD_CACHE = str(name)
+            return _DELIVERY_FIELD_CACHE
+    for name in names:
+        low = str(name).lower()
+        if "delivery" in low:
+            _DELIVERY_FIELD_CACHE = str(name)
+            return _DELIVERY_FIELD_CACHE
+    _DELIVERY_FIELD_CACHE = ""
+    return ""
+
+
+def _delivery_date_from_row(t: Dict[str, Any], delivery_field: str) -> Any:
+    if not delivery_field:
+        return None
+    key = f"entity.Shot.{delivery_field}"
+    val: Any = t.get(key)
+    if val is None:
+        ent = t.get("entity") or {}
+        if isinstance(ent, dict):
+            val = ent.get(delivery_field)
+    if val is None:
+        return None
+    if isinstance(val, dict):
+        inner = val.get("date") or val.get("name") or val.get("value")
+        return inner
+    return val
 
 
 # ── company task status presets (19) ─────────────────────────────────
@@ -242,6 +291,7 @@ def list_comp_tasks_for_assignee(
     lim = int(limit)
 
     vfx_field = _detect_shot_vfx_field(sg)
+    delivery_field = _detect_shot_delivery_date_field(sg)
 
     def _task_fields_for_due(due_col: str) -> List[str]:
         out = [
@@ -259,6 +309,8 @@ def list_comp_tasks_for_assignee(
         ]
         if vfx_field:
             out.append(f"entity.Shot.{vfx_field}")
+        if delivery_field:
+            out.append(f"entity.Shot.{delivery_field}")
         return out
 
     fields: List[str] = _task_fields_for_due(due_fn_effective)
@@ -358,6 +410,7 @@ def list_comp_tasks_for_assignee(
                 "task_status": (t.get(status_fn) or "").strip(),
                 "status_field": status_fn,
                 "due_date": due_val,
+                "delivery_date": _delivery_date_from_row(t, delivery_field),
                 "vfx_work_order": _vfx_work_order_from_row(t, vfx_field),
                 "shot_id": ent.get("id"),
                 "shot_code": shot_code,
@@ -410,6 +463,7 @@ def list_comp_tasks_for_project_user(
     due_fn_effective = (due_date_field or "").strip() or "due_date"
 
     vfx_field = _detect_shot_vfx_field(sg)
+    delivery_field = _detect_shot_delivery_date_field(sg)
 
     def _fields() -> List[str]:
         base = [
@@ -429,6 +483,8 @@ def list_comp_tasks_for_project_user(
             base.append("due_date")
         if vfx_field:
             base.append(f"entity.Shot.{vfx_field}")
+        if delivery_field:
+            base.append(f"entity.Shot.{delivery_field}")
         return base
 
     tc_raw = (task_content or "").strip()
@@ -471,6 +527,8 @@ def list_comp_tasks_for_project_user(
                 ]
                 if vfx_field:
                     fb_fields.append(f"entity.Shot.{vfx_field}")
+                if delivery_field:
+                    fb_fields.append(f"entity.Shot.{delivery_field}")
                 try:
                     rows = sg.find("Task", list(base_filters), fb_fields, limit=limit)
                 except Exception as e3:
@@ -501,6 +559,7 @@ def list_comp_tasks_for_project_user(
                 "task_status": (t.get(status_fn) or "").strip(),
                 "status_field": status_fn,
                 "due_date": due_val,
+                "delivery_date": _delivery_date_from_row(t, delivery_field),
                 "vfx_work_order": _vfx_work_order_from_row(t, vfx_field),
                 "shot_id": ent.get("id"),
                 "shot_code": (ent.get("code") or ent.get("name") or "").strip(),
