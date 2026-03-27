@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QPixmap, QShowEvent
 from PySide6.QtWidgets import (
     QComboBox,
+    QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -16,6 +17,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSplitter,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -47,10 +49,12 @@ class _ShotCard(QFrame):
     def __init__(
         self,
         task_data: Dict[str, Any],
+        publish_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
         self.task_data = task_data
+        self._publish_callback = publish_callback
         self.setObjectName("card")
         self._build(task_data)
 
@@ -104,6 +108,15 @@ class _ShotCard(QFrame):
         nuke_btn.setMinimumWidth(72)
         nuke_btn.clicked.connect(self._open_nk)
         lay.addWidget(nuke_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+        publish_btn = QPushButton("퍼블리쉬")
+        publish_btn.setMinimumWidth(80)
+        publish_btn.clicked.connect(self._on_publish)
+        lay.addWidget(publish_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+    def _on_publish(self) -> None:
+        if self._publish_callback is not None:
+            self._publish_callback(self.task_data)
 
     def _open_shot_folder(self) -> None:
         d = self.task_data
@@ -289,10 +302,36 @@ class MyTasksTab(QWidget):
 
         self._splitter.addWidget(shot_panel)
 
-        # Notes panel
-        note_panel = QWidget()
-        note_lay = QVBoxLayout(note_panel)
-        note_lay.setContentsMargins(8, 8, 8, 8)
+        # Right panel — panel selector + stacked (Notes | Shot Builder)
+        right_panel = QWidget()
+        right_lay = QVBoxLayout(right_panel)
+        right_lay.setContentsMargins(8, 8, 8, 8)
+        right_lay.setSpacing(6)
+
+        # Panel toggle row
+        sel_row = QHBoxLayout()
+        sel_row.setSpacing(4)
+        self._notes_panel_btn = QPushButton("Notes")
+        self._notes_panel_btn.setProperty("selected", True)
+        self._notes_panel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._notes_panel_btn.clicked.connect(lambda: self._switch_right_panel(0))
+        sel_row.addWidget(self._notes_panel_btn)
+        self._shot_builder_panel_btn = QPushButton("Shot Builder")
+        self._shot_builder_panel_btn.setProperty("selected", False)
+        self._shot_builder_panel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._shot_builder_panel_btn.clicked.connect(lambda: self._switch_right_panel(1))
+        sel_row.addWidget(self._shot_builder_panel_btn)
+        sel_row.addStretch()
+        right_lay.addLayout(sel_row)
+
+        # Stacked widget
+        self._right_stack = QStackedWidget()
+
+        # ── Page 0: Notes ────────────────────────────────────────────
+        notes_page = QWidget()
+        notes_page_lay = QVBoxLayout(notes_page)
+        notes_page_lay.setContentsMargins(0, 0, 0, 0)
+        notes_page_lay.setSpacing(4)
 
         note_hdr = QHBoxLayout()
         note_title = QLabel("Notes")
@@ -306,7 +345,7 @@ class MyTasksTab(QWidget):
         note_refresh_btn.setFixedWidth(120)
         note_refresh_btn.clicked.connect(self._refresh_notes_clicked)
         note_hdr.addWidget(note_refresh_btn)
-        note_lay.addLayout(note_hdr)
+        notes_page_lay.addLayout(note_hdr)
 
         note_scroll = QScrollArea()
         note_scroll.setWidgetResizable(True)
@@ -317,9 +356,18 @@ class MyTasksTab(QWidget):
         self._note_layout.setSpacing(6)
         self._note_layout.addStretch()
         note_scroll.setWidget(self._note_host)
-        note_lay.addWidget(note_scroll, 1)
+        notes_page_lay.addWidget(note_scroll, 1)
 
-        self._splitter.addWidget(note_panel)
+        self._right_stack.addWidget(notes_page)
+
+        # ── Page 1: Shot Builder ──────────────────────────────────────
+        from bpe.gui.tabs.shot_builder_tab import ShotBuilderTab
+
+        self._shot_builder_panel = ShotBuilderTab()
+        self._right_stack.addWidget(self._shot_builder_panel)
+
+        right_lay.addWidget(self._right_stack, 1)
+        self._splitter.addWidget(right_panel)
 
         self._splitter.setStretchFactor(0, 1)
         self._splitter.setStretchFactor(1, 1)
@@ -463,7 +511,7 @@ class MyTasksTab(QWidget):
         self._loading_label.setText(f"{len(tasks)}개 Task 로드됨")
         self._clear_cards()
         for t in tasks:
-            card = _ShotCard(t)
+            card = _ShotCard(t, publish_callback=self._open_publish_dialog)
             self._cards.append(card)
             # Insert before the stretch
             self._card_layout.insertWidget(self._card_layout.count() - 1, card)
@@ -602,3 +650,35 @@ class MyTasksTab(QWidget):
         lay.addWidget(body_label)
 
         return card
+
+    # ── Right panel toggle ────────────────────────────────────────────
+
+    def _switch_right_panel(self, idx: int) -> None:
+        self._right_stack.setCurrentIndex(idx)
+        for i, btn in enumerate([self._notes_panel_btn, self._shot_builder_panel_btn]):
+            btn.setProperty("selected", i == idx)
+            btn.style().unpolish(btn)
+            btn.style().polish(btn)
+
+    # ── Publish dialog ────────────────────────────────────────────────
+
+    def _open_publish_dialog(self, task_data: Dict[str, Any]) -> None:
+        from bpe.gui.tabs.publish_tab import PublishTab
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("퍼블리쉬")
+        dlg.setMinimumSize(720, 640)
+        dlg.resize(820, 720)
+
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(0, 0, 0, 0)
+
+        pub = PublishTab()
+        lay.addWidget(pub)
+
+        shot_code = task_data.get("shot_code", "")
+        if shot_code:
+            pub._shot_edit.setText(shot_code)
+            pub._lookup_shot(shot_code)
+
+        dlg.exec()

@@ -26,8 +26,6 @@ logger = get_logger("main_window")
 
 TAB_DEFS: List[Dict[str, str]] = [
     {"key": "my_tasks", "label": "My Tasks"},
-    {"key": "shot_builder", "label": "Shot Builder"},
-    {"key": "publish", "label": "Publish"},
     {"key": "presets", "label": "Preset Manager"},
     {"key": "tools", "label": "Tools"},
 ]
@@ -227,15 +225,11 @@ class MainWindow(QMainWindow):
     def _build_tabs(self) -> None:
         from bpe.gui.tabs.my_tasks_tab import MyTasksTab
         from bpe.gui.tabs.preset_tab import PresetTab
-        from bpe.gui.tabs.publish_tab import PublishTab
-        from bpe.gui.tabs.shot_builder_tab import ShotBuilderTab
         from bpe.gui.tabs.tools_tab import ToolsTab
 
         tab_classes: Dict[str, type] = {
             "presets": PresetTab,
-            "shot_builder": ShotBuilderTab,
             "my_tasks": MyTasksTab,
-            "publish": PublishTab,
             "tools": ToolsTab,
         }
         for tab_def in TAB_DEFS:
