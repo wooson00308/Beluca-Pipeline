@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-from PySide6.QtCore import QRect, Qt, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices, QPixmap, QShowEvent
+from PySide6.QtCore import QEvent, QRect, Qt, QTimer, QUrl
+from PySide6.QtGui import QDesktopServices, QMouseEvent, QPixmap, QShowEvent
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSplitter,
     QStackedWidget,
     QVBoxLayout,
@@ -30,9 +31,10 @@ from bpe.core.nk_finder import (
     find_shot_folder,
 )
 from bpe.gui import theme
+from bpe.gui.widgets.clickable_image import ClickableImage
 from bpe.gui.workers.sg_worker import ShotGridWorker
 from bpe.shotgrid.client import get_default_sg
-from bpe.shotgrid.notes import list_notes_for_shots
+from bpe.shotgrid.notes import download_attachment_bytes, get_note_attachments, list_notes_for_shots
 from bpe.shotgrid.projects import list_active_projects
 from bpe.shotgrid.tasks import list_comp_tasks_for_project_user
 from bpe.shotgrid.users import guess_human_user_for_me, search_human_users
@@ -94,6 +96,43 @@ def _vline() -> QFrame:
     return line
 
 
+class _NoteCardFrame(QFrame):
+    """Note row; click (except image thumbnails) scrolls the shot list to the linked shot."""
+
+    def __init__(
+        self,
+        shot_ids: List[int],
+        on_navigate: Callable[[List[int]], None],
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._shot_ids = shot_ids
+        self._on_navigate = on_navigate
+        self.setObjectName("card")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def wire_click_filters(self) -> None:
+        """Install filters after children are attached; ClickableImage is excluded."""
+        for w in self.findChildren(QWidget):
+            if isinstance(w, ClickableImage):
+                continue
+            w.installEventFilter(self)
+
+    def eventFilter(self, obj: object, event: object) -> bool:
+        if isinstance(obj, ClickableImage):
+            return False
+        if event.type() == QEvent.Type.MouseButtonPress:
+            if isinstance(event, QMouseEvent) and event.button() == Qt.MouseButton.LeftButton:
+                self._on_navigate(self._shot_ids)
+                return True
+        return False
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._on_navigate(self._shot_ids)
+        super().mousePressEvent(event)
+
+
 class _ShotCard(QFrame):
     """Single shot card widget inside the task list."""
 
@@ -108,6 +147,11 @@ class _ShotCard(QFrame):
         self._publish_callback = publish_callback
         self.setObjectName("card")
         self._build(task_data)
+
+    def set_selected(self, selected: bool) -> None:
+        self.setProperty("selected", selected)
+        self.style().unpolish(self)
+        self.style().polish(self)
 
     def _build(self, d: Dict[str, Any]) -> None:
         lay = QHBoxLayout(self)
@@ -193,19 +237,28 @@ class _ShotCard(QFrame):
 
         lay.addWidget(_vline())
 
-        # VFX work order (stretch)
+        # VFX work order (stretch) — wrap + scroll so long lines do not push status/date
         vfx_col = QWidget()
+        vfx_col.setMinimumWidth(0)
         vfx_lay = QVBoxLayout(vfx_col)
         vfx_lay.setContentsMargins(6, 6, 6, 6)
         vfx_hdr = QLabel("VFX work order")
         vfx_hdr.setObjectName("page_subtitle")
         vfx_hdr.setStyleSheet("border: none;")
+        vfx_scroll = QScrollArea()
+        vfx_scroll.setWidgetResizable(True)
+        vfx_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        vfx_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        vfx_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        vfx_scroll.setMaximumHeight(_THUMB_H - 22)
         vfx_val = QLabel(vfx_wo if vfx_wo else "—")
         vfx_val.setWordWrap(True)
+        vfx_val.setMinimumWidth(0)
         vfx_val.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         vfx_val.setStyleSheet(f"color: {theme.TEXT}; border: none;")
+        vfx_scroll.setWidget(vfx_val)
         vfx_lay.addWidget(vfx_hdr)
-        vfx_lay.addWidget(vfx_val)
+        vfx_lay.addWidget(vfx_scroll)
         vfx_lay.addStretch()
         lay.addWidget(vfx_col, 2)
 
@@ -313,6 +366,7 @@ class MyTasksTab(QWidget):
         self._version_req_seq: int = 0
         self._splitter_halves_done: bool = False
         self._splitter_equalize_attempts: int = 0
+        self._selected_shot_card: Optional[_ShotCard] = None
 
         self._user_timer = QTimer(self)
         self._user_timer.setSingleShot(True)
@@ -417,16 +471,16 @@ class MyTasksTab(QWidget):
         shot_hdr.addStretch()
         shot_lay.addLayout(shot_hdr)
 
-        card_area = QScrollArea()
-        card_area.setWidgetResizable(True)
-        card_area.setFrameShape(QFrame.Shape.NoFrame)
+        self._card_area = QScrollArea()
+        self._card_area.setWidgetResizable(True)
+        self._card_area.setFrameShape(QFrame.Shape.NoFrame)
         self._card_host = QWidget()
         self._card_layout = QVBoxLayout(self._card_host)
         self._card_layout.setContentsMargins(0, 0, 0, 0)
         self._card_layout.setSpacing(8)
         self._card_layout.addStretch()
-        card_area.setWidget(self._card_host)
-        shot_lay.addWidget(card_area, 1)
+        self._card_area.setWidget(self._card_host)
+        shot_lay.addWidget(self._card_area, 1)
 
         self._splitter.addWidget(shot_panel)
 
@@ -688,10 +742,38 @@ class MyTasksTab(QWidget):
             self._add_note_placeholder("조회된 샷이 없습니다.")
 
     def _clear_cards(self) -> None:
+        if self._selected_shot_card is not None:
+            self._selected_shot_card.set_selected(False)
+            self._selected_shot_card = None
         for card in self._cards:
             self._card_layout.removeWidget(card)
             card.deleteLater()
         self._cards.clear()
+
+    def _on_note_navigate_to_shot(self, shot_ids: List[int]) -> None:
+        ids_set: Set[int] = set()
+        for x in shot_ids:
+            try:
+                ids_set.add(int(x))
+            except (TypeError, ValueError):
+                continue
+        if not ids_set:
+            return
+        if self._selected_shot_card is not None:
+            self._selected_shot_card.set_selected(False)
+            self._selected_shot_card = None
+        for card in self._cards:
+            sid = card.task_data.get("shot_id")
+            if sid is None:
+                continue
+            try:
+                if int(sid) in ids_set:
+                    card.set_selected(True)
+                    self._selected_shot_card = card
+                    self._card_area.ensureWidgetVisible(card)
+                    return
+            except (TypeError, ValueError):
+                continue
 
     # ── Thumbnail loading ───────────────────────────────────────────
 
@@ -795,8 +877,14 @@ class MyTasksTab(QWidget):
             self._note_widgets.append(card)
 
     def _make_note_card(self, rec: Dict[str, Any]) -> QFrame:
-        card = QFrame()
-        card.setObjectName("card")
+        raw_ids = rec.get("shot_ids") or []
+        shot_ids: List[int] = []
+        for x in raw_ids:
+            try:
+                shot_ids.append(int(x))
+            except (TypeError, ValueError):
+                pass
+        card = _NoteCardFrame(shot_ids, self._on_note_navigate_to_shot)
         lay = QVBoxLayout(card)
         lay.setContentsMargins(12, 8, 12, 8)
         lay.setSpacing(4)
@@ -818,7 +906,62 @@ class MyTasksTab(QWidget):
         body_label.setStyleSheet(f"color: {theme.TEXT}; border: none;")
         lay.addWidget(body_label)
 
+        note_id = rec.get("note_id")
+        if note_id is not None:
+            self._load_note_attachments(int(note_id), card, lay, self._notes_req_seq)
+
+        card.wire_click_filters()
         return card
+
+    def _load_note_attachments(
+        self, note_id: int, card: _NoteCardFrame, card_lay: QVBoxLayout, seq: int
+    ) -> None:
+        def _fetch() -> List[Optional[bytes]]:
+            sg = get_default_sg()
+            metas = get_note_attachments(sg, note_id)
+            out: List[Optional[bytes]] = []
+            for m in metas:
+                out.append(download_attachment_bytes(sg, m))
+            return out
+
+        def _on_done(result: object) -> None:
+            if seq != self._notes_req_seq:
+                return
+            if not isinstance(result, list):
+                return
+            valid: List[bytes] = [d for d in result if isinstance(d, bytes)]
+            if not valid:
+                return
+
+            img_host = QWidget(card)
+            img_host.setSizePolicy(
+                QSizePolicy.Policy.Maximum,
+                QSizePolicy.Policy.Fixed,
+            )
+            img_row = QHBoxLayout(img_host)
+            img_row.setContentsMargins(0, 4, 0, 0)
+            img_row.setSpacing(6)
+            clickables: List[ClickableImage] = []
+            for data in valid:
+                ci = ClickableImage(img_host)
+                ci.set_image_bytes(data)
+                clickables.append(ci)
+                img_row.addWidget(ci)
+            pms: List[QPixmap] = []
+            for ci in clickables:
+                op = ci.original_pixmap()
+                if op is not None and not op.isNull():
+                    pms.append(op)
+            if len(pms) > 1 and len(pms) == len(clickables):
+                for i, ci in enumerate(clickables):
+                    ci.set_siblings(pms, i)
+            card_lay.addWidget(img_host)
+            card.wire_click_filters()
+
+        w = ShotGridWorker(_fetch)
+        w.finished.connect(_on_done)
+        w.start()
+        self._workers.append(w)
 
     # ── Right panel toggle ────────────────────────────────────────────
 

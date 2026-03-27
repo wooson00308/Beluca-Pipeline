@@ -59,6 +59,8 @@ class TestListNotesForShots:
         assert result[0]["author"] == "Alice"
         assert result[0]["project_name"] == "ProjectA"
         assert result[0]["timestamp"] == "2026-03-20 12:00"
+        assert result[0]["shot_ids"] == [10]
+        assert result[1]["shot_ids"] == [20]
 
     def test_missing_fields_default(self) -> None:
         sg = MockShotgun()
@@ -83,6 +85,7 @@ class TestListNotesForShots:
         assert note["author"] == "—"
         assert note["context"] == "—"
         assert note["project_name"] == "—"
+        assert note["shot_ids"] == []
 
     def test_no_days_back_returns_all(self) -> None:
         sg = MockShotgun()
@@ -107,3 +110,38 @@ class TestListNotesForShots:
 
         with pytest.raises(ShotGridError, match="노트 조회 실패"):
             list_notes_for_shots(BrokenSG(), [1], days_back=0)
+
+
+class TestGetNoteAttachments:
+    def test_returns_image_attachments_for_note(self) -> None:
+        from bpe.shotgrid.notes import get_note_attachments
+
+        sg = MockShotgun()
+        sg._add_entity(
+            "Attachment",
+            {
+                "id": 10,
+                "filename": "frame.png",
+                "this_file": {"url": "https://example.com/frame.png", "name": "frame.png"},
+                "attachment_links": [{"type": "Note", "id": 7, "name": "Note7"}],
+            },
+        )
+        result = get_note_attachments(sg, 7)
+        assert len(result) == 1
+        assert result[0]["att_id"] == 10
+        assert result[0]["url"] == "https://example.com/frame.png"
+
+    def test_filters_non_image_attachments(self) -> None:
+        from bpe.shotgrid.notes import get_note_attachments
+
+        sg = MockShotgun()
+        sg._add_entity(
+            "Attachment",
+            {
+                "id": 11,
+                "filename": "brief.pdf",
+                "this_file": {"url": "https://example.com/brief.pdf"},
+                "attachment_links": [{"type": "Note", "id": 8, "name": "N8"}],
+            },
+        )
+        assert get_note_attachments(sg, 8) == []

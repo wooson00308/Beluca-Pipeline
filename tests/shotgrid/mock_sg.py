@@ -129,7 +129,15 @@ def _match_filters(entity: Dict[str, Any], filters: Any) -> bool:
         ev = entity.get(field)
         op_lower = str(op).lower()
         if op_lower == "is":
-            if isinstance(value, dict) and isinstance(ev, dict):
+            if field == "attachment_links" and isinstance(value, dict):
+                if not isinstance(ev, list):
+                    return False
+                wt, wid = value.get("type"), value.get("id")
+                if not any(
+                    isinstance(x, dict) and x.get("type") == wt and x.get("id") == wid for x in ev
+                ):
+                    return False
+            elif isinstance(value, dict) and isinstance(ev, dict):
                 if ev.get("type") != value.get("type") or ev.get("id") != value.get("id"):
                     return False
             elif ev != value:

@@ -426,6 +426,13 @@ def build_stylesheet() -> str:
     #card:hover {{
         border-color: {TEXT_DIM};
     }}
+    #card[selected="true"] {{
+        border: 2px solid {ACCENT};
+        background-color: rgba(240, 138, 36, 0.08);
+    }}
+    #card[selected="true"]:hover {{
+        border-color: {ACCENT_HOVER};
+    }}
 
     /* ── Update toast ── */
     #update_toast {{
