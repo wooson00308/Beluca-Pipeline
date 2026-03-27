@@ -104,7 +104,8 @@ class _ShotCard(QFrame):
         if not shot_code or not project_code:
             return
 
-        server_root = find_server_root_auto(project_code) or (os.environ.get("BPE_SERVER_ROOT") or "").strip()
+        env_root = (os.environ.get("BPE_SERVER_ROOT") or "").strip()
+        server_root = find_server_root_auto(project_code) or env_root
         if not server_root:
             logger.warning(
                 "NK 열기: 서버 루트를 찾을 수 없음 (드라이브:\\vfx\\project_연도\\%s)",

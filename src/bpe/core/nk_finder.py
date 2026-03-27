@@ -58,7 +58,7 @@ def _path_is_likely_network(path: Path) -> bool:
     if s.startswith("\\\\"):
         return True
     try:
-        import ctypes  # noqa: local import — Windows 전용
+        import ctypes  # Windows 전용 (순환/플랫폼 의존 지연 import)
 
         drive = os.path.splitdrive(s)[0]
         if drive and len(drive) == 2 and drive[1] == ":":
