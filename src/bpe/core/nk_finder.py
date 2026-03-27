@@ -466,6 +466,29 @@ def _nk_search_roots_from_shot_root(shot_root: Path) -> List[Path]:
 # ---------------------------------------------------------------------------
 
 
+def _version_ints_from_nk_path(p: Path) -> List[int]:
+    """파일명과 직계 부모 폴더명에서 ``v###`` 숫자 목록 (``find_latest_nk_path`` 정렬과 동일)."""
+    name_nums = [int(m.group(1)) for m in _NK_VERSION_RE.finditer(p.name)]
+    parent_nums = [int(m.group(1)) for m in _NK_VERSION_RE.finditer(p.parent.name)]
+    return name_nums + parent_nums
+
+
+def find_latest_comp_version_display(
+    shot_name: str, project_code: str, server_root: str
+) -> Optional[str]:
+    """``find_latest_nk_path``와 동일한 NK를 기준으로 표시용 ``v###`` 문자열을 반환한다.
+
+    NK가 없거나 파일/부모에 ``v###``가 없으면 ``None`` (UI는 ``—`` 유지).
+    """
+    p = find_latest_nk_path(shot_name, project_code, server_root)
+    if p is None:
+        return None
+    merged = _version_ints_from_nk_path(p)
+    if not merged:
+        return None
+    return f"v{max(merged):03d}"
+
+
 def find_latest_nk_path(shot_name: str, project_code: str, server_root: str) -> Optional[Path]:
     """샷 폴더 하위에서 최신 .nk 경로를 탐색한다.
 
@@ -526,9 +549,7 @@ def find_latest_nk_path(shot_name: str, project_code: str, server_root: str) -> 
 
     def _sort_key(p: Path) -> Tuple[int, float]:
         try:
-            name_nums = [int(m.group(1)) for m in _NK_VERSION_RE.finditer(p.name)]
-            parent_nums = [int(m.group(1)) for m in _NK_VERSION_RE.finditer(p.parent.name)]
-            merged = name_nums + parent_nums
+            merged = _version_ints_from_nk_path(p)
             vmax = max(merged) if merged else -1
             mt = os.path.getmtime(p)
         except OSError:

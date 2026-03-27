@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 
 from bpe.core.logging import get_logger
 from bpe.core.nk_finder import (
+    find_latest_comp_version_display,
     find_latest_nk_and_open,
     find_server_root_auto,
     find_shot_folder,
@@ -126,11 +127,10 @@ class _ShotCard(QFrame):
         status = d.get("task_status", "")
         delivery = _format_task_date(d.get("delivery_date"))
         vfx_wo = (d.get("vfx_work_order") or "").strip()
-        ver_raw = (d.get("latest_version_code") or "").strip()
 
         lay.addWidget(_vline())
 
-        # Shot name, task, version (thumbnail right)
+        # Shot name, task, version (thumbnail right; local NK는 백그라운드에서 채움)
         info = QVBoxLayout()
         info.setSpacing(4)
         info.setContentsMargins(8, 0, 8, 0)
@@ -141,10 +141,10 @@ class _ShotCard(QFrame):
         task_line.setObjectName("page_subtitle")
         task_line.setStyleSheet(f"border: none; color: {theme.TEXT};")
         info.addWidget(task_line)
-        version_line = QLabel(f"Version: {ver_raw}" if ver_raw else "Version: —")
-        version_line.setObjectName("page_subtitle")
-        version_line.setStyleSheet(f"border: none; color: {theme.TEXT};")
-        info.addWidget(version_line)
+        self._version_line = QLabel("Version: —")
+        self._version_line.setObjectName("page_subtitle")
+        self._version_line.setStyleSheet(f"border: none; color: {theme.TEXT};")
+        info.addWidget(self._version_line)
         info.addStretch()
         lay.addLayout(info, 1)
 
@@ -293,6 +293,10 @@ class _ShotCard(QFrame):
         self.thumb_label.setPixmap(cropped)
         self.thumb_label.setText("")
 
+    def set_comp_version_label(self, version_code: str) -> None:
+        v = (version_code or "").strip()
+        self._version_line.setText(f"Version: {v}" if v else "Version: —")
+
 
 class MyTasksTab(QWidget):
     """My Tasks tab: project/user filter → shot card list + notes."""
@@ -306,6 +310,7 @@ class MyTasksTab(QWidget):
         self._note_widgets: List[QFrame] = []
         self._last_shot_ids: List[int] = []
         self._notes_req_seq: int = 0
+        self._version_req_seq: int = 0
         self._splitter_halves_done: bool = False
         self._splitter_equalize_attempts: int = 0
 
@@ -406,7 +411,7 @@ class MyTasksTab(QWidget):
         shot_title = QLabel("샷 목록")
         shot_title.setObjectName("log_title")
         shot_hdr.addWidget(shot_title)
-        shot_sub = QLabel("배정 comp 태스크")
+        shot_sub = QLabel("배정 태스크")
         shot_sub.setObjectName("page_subtitle")
         shot_hdr.addWidget(shot_sub)
         shot_hdr.addStretch()
@@ -621,6 +626,7 @@ class MyTasksTab(QWidget):
                 project_id=project_id,
                 human_user_id=user_id,
                 status_filter=status,
+                task_content="",
             )
 
         w = ShotGridWorker(_fetch)
@@ -642,6 +648,35 @@ class MyTasksTab(QWidget):
         # Kick off thumbnail downloads
         for card in self._cards:
             self._load_thumbnail(card)
+
+        # Local comp NK 기준 Version 라벨 (백그라운드)
+        self._version_req_seq += 1
+        vseq = self._version_req_seq
+        env_root = (os.environ.get("BPE_SERVER_ROOT") or "").strip()
+
+        def _scan_versions() -> List[Optional[str]]:
+            out: List[Optional[str]] = []
+            for t in tasks:
+                shot = (t.get("shot_code") or "").strip()
+                proj = (t.get("project_code") or t.get("project_folder") or "").strip()
+                if not shot or not proj:
+                    out.append(None)
+                    continue
+                server_root = find_server_root_auto(proj) or env_root
+                if not server_root:
+                    out.append(None)
+                    continue
+                try:
+                    ver = find_latest_comp_version_display(shot, proj, server_root)
+                except Exception:
+                    ver = None
+                out.append(ver)
+            return out
+
+        vw = ShotGridWorker(_scan_versions)
+        vw.finished.connect(lambda result: self._apply_comp_version_labels(result, vseq))
+        vw.start()
+        self._workers.append(vw)
 
         # Kick off note loading
         shot_ids = [int(t.get("shot_id")) for t in tasks if t.get("shot_id") is not None]
@@ -686,6 +721,17 @@ class MyTasksTab(QWidget):
         pm.loadFromData(data)
         if not pm.isNull():
             card.set_thumbnail(pm)
+
+    def _apply_comp_version_labels(self, result: object, seq: int) -> None:
+        if seq != self._version_req_seq:
+            return
+        versions = result if isinstance(result, list) else []
+        for i, card in enumerate(self._cards):
+            if i >= len(versions):
+                break
+            raw = versions[i]
+            if isinstance(raw, str) and raw.strip():
+                card.set_comp_version_label(raw.strip())
 
     # ── Notes panel ──────────────────────────────────────────────────
 

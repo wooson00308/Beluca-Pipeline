@@ -12,6 +12,7 @@ from bpe.core.nk_finder import (
     _find_nukex_exe_under_roots,
     _find_server_root_from_drive_roots,
     _nk_is_junk_file,
+    find_latest_comp_version_display,
     find_latest_nk_path,
     find_nukex_exe,
     find_nukex_exe_and_args,
@@ -156,6 +157,54 @@ class TestFindLatestNkPath:
         assert result is not None
         assert "v003" in str(result).replace("\\", "/")
         assert "v003" in result.name
+
+
+# ── find_latest_comp_version_display ───────────────────────────────
+
+
+class TestFindLatestCompVersionDisplay:
+    """find_latest_nk_path와 동일한 기준의 표시 문자열."""
+
+    def _make_shot_tree(self, tmp_path: Path, shot_name: str) -> Path:
+        ep = shot_name.split("_")[0].upper()
+        shot_root = tmp_path / "PRJ" / "04_sq" / ep / shot_name.upper()
+        nuke_dir = shot_root / "comp" / "devl" / "nuke"
+        nuke_dir.mkdir(parents=True)
+        return shot_root
+
+    def test_returns_none_when_no_nk(self, tmp_path):
+        self._make_shot_tree(tmp_path, "E01_S01_004")
+        assert find_latest_comp_version_display("E01_S01_004", "PRJ", str(tmp_path)) is None
+
+    def test_returns_none_when_missing_args(self):
+        assert find_latest_comp_version_display("", "PRJ", "/x") is None
+        assert find_latest_comp_version_display("S", "PRJ", "") is None
+
+    def test_returns_latest_v_from_nk_files(self, tmp_path):
+        shot_root = self._make_shot_tree(tmp_path, "E01_S01_001")
+        nuke_dir = shot_root / "comp" / "devl" / "nuke"
+        (nuke_dir / "E01_S01_001_comp_v001.nk").write_text("v1")
+        (nuke_dir / "E01_S01_001_comp_v002.nk").write_text("v2")
+        (nuke_dir / "E01_S01_001_comp_v003.nk").write_text("v3")
+
+        assert find_latest_comp_version_display("E01_S01_001", "PRJ", str(tmp_path)) == "v003"
+
+    def test_returns_v_from_version_subfolder(self, tmp_path):
+        shot_root = self._make_shot_tree(tmp_path, "E102_S017_0120")
+        nuke_dir = shot_root / "comp" / "devl" / "nuke"
+        (nuke_dir / "v001" / "E102_S017_0120_comp_v001.nk").parent.mkdir(parents=True)
+        (nuke_dir / "v001" / "E102_S017_0120_comp_v001.nk").write_text("1")
+        (nuke_dir / "v003" / "E102_S017_0120_comp_v003.nk").parent.mkdir(parents=True)
+        (nuke_dir / "v003" / "E102_S017_0120_comp_v003.nk").write_text("3")
+
+        assert find_latest_comp_version_display("E102_S017_0120", "PRJ", str(tmp_path)) == "v003"
+
+    def test_returns_none_when_no_v_in_name_or_parent(self, tmp_path):
+        shot_root = self._make_shot_tree(tmp_path, "E01_S01_002")
+        nuke_dir = shot_root / "comp" / "devl" / "nuke"
+        (nuke_dir / "new.nk").write_text("new")
+
+        assert find_latest_comp_version_display("E01_S01_002", "PRJ", str(tmp_path)) is None
 
 
 # ── find_server_root_auto / drive scan ───────────────────────────
