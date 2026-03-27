@@ -255,8 +255,9 @@ class MyTasksTab(QWidget):
         self._loading_label.setObjectName("status_msg")
         root.addWidget(self._loading_label)
 
-        # ── Splitter: card list (top) + notes (bottom) ──────────────
-        splitter = QSplitter(Qt.Orientation.Vertical)
+        # ── Splitter: card list (left) + notes (right) ─────────────
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setChildrenCollapsible(False)
 
         # Card list inside QScrollArea
         card_area = QScrollArea()

@@ -25,10 +25,10 @@ from bpe.gui import theme
 logger = get_logger("main_window")
 
 TAB_DEFS: List[Dict[str, str]] = [
-    {"key": "presets", "label": "Preset Manager"},
-    {"key": "shot_builder", "label": "Shot Builder"},
     {"key": "my_tasks", "label": "My Tasks"},
+    {"key": "shot_builder", "label": "Shot Builder"},
     {"key": "publish", "label": "Publish"},
+    {"key": "presets", "label": "Preset Manager"},
     {"key": "tools", "label": "Tools"},
 ]
 
@@ -99,7 +99,7 @@ class MainWindow(QMainWindow):
         self._build_tabs()
         root.addWidget(self._stack, 1)
 
-        self._switch_tab("presets")
+        self._switch_tab("my_tasks")
 
         # ── Update check ──
         self._update_info: Any = None
@@ -231,14 +231,16 @@ class MainWindow(QMainWindow):
         from bpe.gui.tabs.shot_builder_tab import ShotBuilderTab
         from bpe.gui.tabs.tools_tab import ToolsTab
 
-        for key, cls in {
+        tab_classes: Dict[str, type] = {
             "presets": PresetTab,
             "shot_builder": ShotBuilderTab,
             "my_tasks": MyTasksTab,
             "publish": PublishTab,
             "tools": ToolsTab,
-        }.items():
-            page = cls()
+        }
+        for tab_def in TAB_DEFS:
+            key = tab_def["key"]
+            page = tab_classes[key]()
             self._tab_pages[key] = page
             self._stack.addWidget(page)
 
