@@ -398,8 +398,8 @@ def _find_shot_root_heuristic(
     return None
 
 
-def find_shot_folder(shot_name: str, project_code: str, server_root: str) -> Optional[Path]:
-    """샷 작업 폴더 경로: ``comp/devl/nuke`` 가 있으면 그 경로, 없으면 ``shot_root``."""
+def _resolve_shot_root(server_root: str, project_code: str, shot_name: str) -> Optional[Path]:
+    """``find_latest_nk_path`` / ``find_shot_folder``와 동일한 방식으로 샷 루트를 구한다."""
     sn = (shot_name or "").strip()
     pc = (project_code or "").strip()
     sr = (server_root or "").strip()
@@ -418,6 +418,18 @@ def find_shot_folder(shot_name: str, project_code: str, server_root: str) -> Opt
                 shot_root = None
     if shot_root is None:
         shot_root = _find_shot_root_heuristic(sr, pc, sn)
+    return shot_root
+
+
+def find_shot_folder(shot_name: str, project_code: str, server_root: str) -> Optional[Path]:
+    """샷 작업 폴더 경로: ``comp/devl/nuke`` 가 있으면 그 경로, 없으면 ``shot_root``."""
+    sn = (shot_name or "").strip()
+    pc = (project_code or "").strip()
+    sr = (server_root or "").strip()
+    if not sn or not sr:
+        return None
+
+    shot_root = _resolve_shot_root(sr, pc, sn)
     if shot_root is None:
         return None
 
@@ -502,18 +514,7 @@ def find_latest_nk_path(shot_name: str, project_code: str, server_root: str) -> 
     if not sn or not sr:
         return None
 
-    shot_root: Optional[Path] = None
-    if pc:
-        bp = build_shot_paths(sr, pc, sn)
-        if bp:
-            cand = bp["shot_root"]
-            try:
-                if cand.exists():
-                    shot_root = cand
-            except OSError:
-                shot_root = None
-    if shot_root is None:
-        shot_root = _find_shot_root_heuristic(sr, pc, sn)
+    shot_root = _resolve_shot_root(sr, pc, sn)
     if shot_root is None:
         return None
 
@@ -679,6 +680,101 @@ def open_plate_in_rv(shot_name: str, project_code: str, server_root: str) -> boo
             shot_name,
             project_code,
             server_root,
+        )
+        return False
+    rv_exe = _find_rv_exe()
+    if rv_exe is None:
+        logger.warning(
+            "RV 실행 파일을 찾지 못함 — PATH·Program Files 확인 (mov=%s)",
+            mov,
+        )
+        return False
+    try:
+        subprocess.Popen([rv_exe, str(mov)], close_fds=True)
+    except OSError as e:
+        logger.warning("RV 실행 실패: %s", e)
+        return False
+    return True
+
+
+def _version_ints_from_mov_filename(p: Path) -> List[int]:
+    """렌더 MOV 파일명에서 ``v###`` 숫자 목록."""
+    return [int(m.group(1)) for m in _NK_VERSION_RE.finditer(p.name)]
+
+
+def find_comp_render_mov(
+    shot_name: str,
+    project_code: str,
+    server_root: str,
+    *,
+    version_code: Optional[str] = None,
+) -> Optional[Path]:
+    """``comp/devl/renders`` 아래에서 렌더 MOV를 찾는다.
+
+    Parameters
+    ----------
+    version_code : str | None
+        ShotGrid Version 엔티티의 ``code`` 값 (예: ``"S100_0140_comp_v007"``).
+        지정하면 해당 버전 파일만 반환 — stem 완전 일치 우선, 포함 일치 폴백.
+        None이면 버전 번호 최대(동률 시 mtime) 파일을 반환.
+
+    샷 루트는 ``_resolve_shot_root`` (``build_shot_paths`` → BFS 휴리스틱)로 구한다.
+    """
+    shot_root = _resolve_shot_root(server_root, project_code, shot_name)
+    if shot_root is None:
+        return None
+    renders = shot_root / "comp" / "devl" / "renders"
+    if not renders.is_dir():
+        return None
+    try:
+        movs = [p for p in renders.glob("*.mov") if p.is_file()]
+    except OSError:
+        return None
+    if not movs:
+        return None
+
+    if version_code is not None:
+        vc_lower = version_code.strip().lower()
+        exact = [p for p in movs if p.stem.lower() == vc_lower]
+        if exact:
+            return exact[0]
+        contained = [p for p in movs if vc_lower in p.stem.lower()]
+        if contained:
+            return contained[0]
+        return None
+
+    def _sort_key(p: Path) -> Tuple[int, float]:
+        try:
+            merged = _version_ints_from_mov_filename(p)
+            vmax = max(merged) if merged else -1
+            mt = os.path.getmtime(p)
+        except OSError:
+            vmax, mt = -1, 0.0
+        return (vmax, mt)
+
+    return max(movs, key=_sort_key)
+
+
+def open_comp_render_in_rv(
+    shot_name: str,
+    project_code: str,
+    server_root: str,
+    *,
+    version_code: Optional[str] = None,
+) -> bool:
+    """comp 렌더 MOV를 RV로 실행. RV 없거나 MOV 없으면 False.
+
+    version_code 지정 시 해당 버전 파일만 열며, 파일이 없으면 False를 반환한다.
+    """
+    mov = find_comp_render_mov(shot_name, project_code, server_root, version_code=version_code)
+    if mov is None:
+        logger.warning(
+            "RV: comp/devl/renders 아래 .mov 없음 또는 샷 경로 없음 "
+            "(shot=%s project=%s root=%s version_code=%s)",
+            shot_name,
+            project_code,
+            server_root,
+            version_code,
         )
         return False
     rv_exe = _find_rv_exe()

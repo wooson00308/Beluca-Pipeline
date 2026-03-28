@@ -1,0 +1,30 @@
+---
+description: BPE 자체 업데이트 — BPELauncher 외부 바이너리 없이 동작 (Install 클릭 시 앱 내부 다운로드)
+alwaysApply: false
+---
+
+# 자체 업데이터 (Self-contained)
+
+## 원칙
+
+- **외부 `BPELauncher` 바이너리를 번들하거나 CI에서 별도 repo에서 받지 않는다.**
+- 업데이트 흐름은 `UpdateDownloadWorker` + `UpdateToast` + `bpe.core.update_checker` 로만 구현한다.
+- Windows: `extract_windows_exe()` 로 ZIP에서 `BPE.exe` 추출 후, 프로세스 종료 대기 → `Copy-Item` → 재실행하는 **임시 PowerShell 스크립트** (`bpe_updater.ps1`) 사용. 실행 중 exe는 덮어쓸 수 없기 때문이다.
+- macOS: `BPE-macOS.dmg` 다운로드 후 토스트에서 **폴더 열기**로 사용자가 DMG를 실행한다 (기존과 동일).
+
+## 관련 코드
+
+- [src/bpe/core/update_checker.py](src/bpe/core/update_checker.py) — `download_release_asset`, `extract_windows_exe`
+- [src/bpe/gui/workers/update_worker.py](src/bpe/gui/workers/update_worker.py) — `UpdateDownloadWorker`
+- [src/bpe/gui/main_window.py](src/bpe/gui/main_window.py) — `_on_install_requested`, `_apply_windows_update`
+- [installer/bpe.spec](installer/bpe.spec) — 런처 바이너리 항목 없음
+
+## 재발 방지
+
+- `release.yml`에 **Beluca-Launcher 다운로드 스텝을 다시 넣지 않는다.**
+- 로컬 PyInstaller 빌드도 동일 spec이므로 **로컬 exe에서도 Install 경로가 동작**해야 한다 (외부 exe 의존 금지).
+
+## 우려
+
+- Windows에서 temp PS1 실행이 보안 소프트웨어에 막힐 수 있음 → 실패 시 브라우저(릴리즈 페이지) 폴백 유지.
+- PS1은 BPE PID 대기 **최대 30초** 후 복사한다.

@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import ssl
 import sys
+import tempfile
 import urllib.request
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, Tuple
@@ -134,3 +136,32 @@ def download_release_asset(
                     progress_cb(downloaded / total)
 
     return dest
+
+
+def extract_windows_exe(zip_path: Path) -> Path:
+    """BPE-Windows.zip에서 ``BPE.exe``를 임시 폴더에 풀어 경로를 반환한다.
+
+    zip 루트 또는 하위 경로에 ``BPE.exe``가 있으면 첫 일치 항목을 사용한다.
+    없으면 ``FileNotFoundError``를 발생시킨다.
+    """
+    dest_dir = Path(tempfile.mkdtemp(prefix="bpe_update_"))
+    dest_exe = dest_dir / "BPE_new.exe"
+
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        member: Optional[str] = None
+        for name in zf.namelist():
+            norm = name.replace("\\", "/").rstrip("/")
+            if norm.endswith("BPE.exe") or norm == "BPE.exe":
+                member = name
+                break
+        if member is None:
+            raise FileNotFoundError("ZIP에 BPE.exe가 없습니다")
+
+        with zf.open(member) as src, open(dest_exe, "wb") as out:
+            while True:
+                chunk = src.read(_CHUNK_SIZE)
+                if not chunk:
+                    break
+                out.write(chunk)
+
+    return dest_exe

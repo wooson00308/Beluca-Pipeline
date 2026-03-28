@@ -95,19 +95,26 @@ def _fallback_or_query(
 def _format_note(n: Dict[str, Any]) -> Dict[str, Any]:
     links = n.get("note_links") or []
     shot_ids: List[int] = []
-    shot_names = []
+    shot_names: List[str] = []
+    version_code: Optional[str] = None
+
     for lk in links:
-        if (lk.get("type") or "").lower() != "shot":
-            continue
-        sid = lk.get("id")
-        if sid is not None:
-            try:
-                shot_ids.append(int(sid))
-            except (TypeError, ValueError):
-                pass
+        lk_type = (lk.get("type") or "").lower()
         name = lk.get("name") or lk.get("code") or ""
-        if name:
-            shot_names.append(str(name))
+        if lk_type == "shot":
+            sid = lk.get("id")
+            if sid is not None:
+                try:
+                    shot_ids.append(int(sid))
+                except (TypeError, ValueError):
+                    pass
+            if name:
+                shot_names.append(str(name))
+        elif lk_type == "version" and version_code is None:
+            # Note에 연결된 첫 번째 Version 엔티티의 code를 사용
+            if name:
+                version_code = str(name).strip() or None
+
     context = ", ".join(s for s in shot_names if s) or "—"
 
     proj = n.get("project") or {}
@@ -131,6 +138,8 @@ def _format_note(n: Dict[str, Any]) -> Dict[str, Any]:
         "context": context,
         "project_name": proj_name,
         "shot_ids": shot_ids,
+        "shot_names": shot_names,
+        "version_code": version_code,  # e.g. "S100_0140_comp_v007" — None이면 RV 버튼 비활성화
     }
 
 

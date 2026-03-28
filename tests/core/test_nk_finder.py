@@ -12,6 +12,7 @@ from bpe.core.nk_finder import (
     _find_nukex_exe_under_roots,
     _find_server_root_from_drive_roots,
     _nk_is_junk_file,
+    find_comp_render_mov,
     find_latest_comp_version_display,
     find_latest_nk_path,
     find_nukex_exe,
@@ -206,6 +207,65 @@ class TestFindLatestCompVersionDisplay:
         (nuke_dir / "new.nk").write_text("new")
 
         assert find_latest_comp_version_display("E01_S01_002", "PRJ", str(tmp_path)) is None
+
+
+# ── find_comp_render_mov ─────────────────────────────────────────
+
+
+class TestFindCompRenderMov:
+    def _make_renders_tree(self, tmp_path: Path, shot_name: str) -> Path:
+        ep = shot_name.split("_")[0].upper()
+        shot_root = tmp_path / "PRJ" / "04_sq" / ep / shot_name.upper()
+        renders = shot_root / "comp" / "devl" / "renders"
+        renders.mkdir(parents=True)
+        return shot_root
+
+    def test_picks_highest_version_suffix(self, tmp_path):
+        """version_code 없이 호출 시 최신 버전(폴백용)."""
+        self._make_renders_tree(tmp_path, "E01_S01_001")
+        rd = tmp_path / "PRJ" / "04_sq" / "E01" / "E01_S01_001" / "comp" / "devl" / "renders"
+        (rd / "E01_S01_001_comp_v001.mov").write_bytes(b"a")
+        (rd / "E01_S01_001_comp_v007.mov").write_bytes(b"b")
+        (rd / "E01_S01_001_comp_v003.mov").write_bytes(b"c")
+
+        result = find_comp_render_mov("E01_S01_001", "PRJ", str(tmp_path))
+        assert result is not None
+        assert "v007" in result.name
+
+    def test_picks_exact_version_code(self, tmp_path):
+        """version_code 지정 시 해당 버전 파일 반환."""
+        self._make_renders_tree(tmp_path, "E01_S01_001")
+        rd = tmp_path / "PRJ" / "04_sq" / "E01" / "E01_S01_001" / "comp" / "devl" / "renders"
+        (rd / "E01_S01_001_comp_v001.mov").write_bytes(b"a")
+        (rd / "E01_S01_001_comp_v007.mov").write_bytes(b"b")
+        (rd / "E01_S01_001_comp_v003.mov").write_bytes(b"c")
+
+        result = find_comp_render_mov(
+            "E01_S01_001", "PRJ", str(tmp_path), version_code="E01_S01_001_comp_v003"
+        )
+        assert result is not None
+        assert "v003" in result.name
+
+    def test_version_code_not_found_returns_none(self, tmp_path):
+        """version_code 지정했는데 해당 파일 없으면 None."""
+        self._make_renders_tree(tmp_path, "E01_S01_001")
+        rd = tmp_path / "PRJ" / "04_sq" / "E01" / "E01_S01_001" / "comp" / "devl" / "renders"
+        (rd / "E01_S01_001_comp_v001.mov").write_bytes(b"a")
+
+        result = find_comp_render_mov(
+            "E01_S01_001", "PRJ", str(tmp_path), version_code="E01_S01_001_comp_v099"
+        )
+        assert result is None
+
+    def test_returns_none_when_no_mov(self, tmp_path):
+        self._make_renders_tree(tmp_path, "E01_S01_002")
+        assert find_comp_render_mov("E01_S01_002", "PRJ", str(tmp_path)) is None
+
+    def test_returns_none_when_renders_missing(self, tmp_path):
+        ep = "E01_S01_003".split("_")[0].upper()
+        shot_root = tmp_path / "PRJ" / "04_sq" / ep / "E01_S01_003"
+        (shot_root / "comp" / "devl" / "nuke").mkdir(parents=True)
+        assert find_comp_render_mov("E01_S01_003", "PRJ", str(tmp_path)) is None
 
 
 # ── find_server_root_auto / drive scan ───────────────────────────

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from datetime import date, datetime
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from PySide6.QtCore import QEvent, QRect, Qt, QTimer, QUrl
@@ -30,6 +31,7 @@ from bpe.core.nk_finder import (
     find_latest_nk_and_open,
     find_server_root_auto,
     find_shot_folder,
+    open_comp_render_in_rv,
     open_plate_in_rv,
 )
 from bpe.gui import theme
@@ -46,6 +48,10 @@ logger = get_logger("gui.tabs.my_tasks_tab")
 _AUTOCOMPLETE_DELAY = 350
 _THUMB_W = 160
 _THUMB_H = 110
+
+# 상태 콤보 — Delivery는 SG 상태가 아니며 전체 조회 후 클라이언트 정렬
+STATUS_COMBO_ALL = "(전체)"
+STATUS_COMBO_DELIVERY = "Delivery"
 
 # Task status code -> (background hex, text hex) — ShotGrid-style palette
 _STATUS_COLORS: Dict[str, Tuple[str, str]] = {
@@ -89,6 +95,62 @@ def _format_task_date(val: Any) -> str:
     return s if s else "—"
 
 
+def parse_status_combo_for_fetch(status_raw: str) -> Tuple[Optional[str], bool]:
+    """(ShotGrid status_filter, apply_delivery_sort). Delivery는 전체 조회."""
+    if status_raw == STATUS_COMBO_DELIVERY:
+        return None, True
+    if status_raw == STATUS_COMBO_ALL:
+        return None, False
+    return status_raw, False
+
+
+def _parse_delivery_date_for_sort(val: Any) -> Optional[date]:
+    """delivery_date 원시값을 date로 변환. 실패·없음은 None."""
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return val.date()
+    if isinstance(val, date):
+        return val
+    if isinstance(val, dict):
+        inner = val.get("date") or val.get("name") or val.get("value")
+        if inner is None:
+            return None
+        return _parse_delivery_date_for_sort(inner)
+    s = str(val).strip()
+    if not s or s == "—":
+        return None
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(s[: len(fmt)], fmt).date()
+        except ValueError:
+            continue
+    try:
+        return datetime.strptime(s[:10], "%Y-%m-%d").date()
+    except ValueError:
+        pass
+    return None
+
+
+def _task_delivery_sort_key(t: Dict[str, Any]) -> Tuple[int, date, int, str]:
+    """촉박한 순: 유효 날짜 오름차순, 날짜 없음은 맨 뒤. 동률은 task_id → shot_code."""
+    d = _parse_delivery_date_for_sort(t.get("delivery_date"))
+    tid = t.get("task_id")
+    try:
+        tid_i = int(tid) if tid is not None else 0
+    except (TypeError, ValueError):
+        tid_i = 0
+    sc = (t.get("shot_code") or "").strip()
+    if d is None:
+        return (1, date.max, tid_i, sc)
+    return (0, d, tid_i, sc)
+
+
+def sort_tasks_by_delivery_urgency(tasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Delivery date 가까운 순(오름차순). 날짜 없는 항목은 뒤로."""
+    return sorted(tasks, key=_task_delivery_sort_key)
+
+
 def _vline() -> QFrame:
     line = QFrame()
     line.setFrameShape(QFrame.Shape.VLine)
@@ -115,14 +177,18 @@ class _NoteCardFrame(QFrame):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def wire_click_filters(self) -> None:
-        """Install filters after children are attached; ClickableImage is excluded."""
+        """Install filters after children are attached; ClickableImage / QPushButton 제외."""
         for w in self.findChildren(QWidget):
             if isinstance(w, ClickableImage):
+                continue
+            if isinstance(w, QPushButton):
                 continue
             w.installEventFilter(self)
 
     def eventFilter(self, obj: object, event: object) -> bool:
         if isinstance(obj, ClickableImage):
+            return False
+        if isinstance(obj, QPushButton):
             return False
         if event.type() == QEvent.Type.MouseButtonPress:
             if isinstance(event, QMouseEvent) and event.button() == Qt.MouseButton.LeftButton:
@@ -427,6 +493,8 @@ class MyTasksTab(QWidget):
         self._splitter_halves_done: bool = False
         self._splitter_equalize_attempts: int = 0
         self._selected_shot_card: Optional[_ShotCard] = None
+        self._last_fetch_delivery_sort: bool = False
+        self._current_project_code: Optional[str] = None
 
         self._user_timer = QTimer(self)
         self._user_timer.setSingleShot(True)
@@ -495,8 +563,10 @@ class MyTasksTab(QWidget):
         filter_row.addWidget(me_btn)
 
         self._status_filter = QComboBox()
-        self._status_filter.addItems(["(전체)", "wip", "retake", "wtg", "fin"])
-        self._status_filter.setFixedWidth(100)
+        self._status_filter.addItems(
+            ["(전체)", "wip", "retake", "wtg", "fin", STATUS_COMBO_DELIVERY]
+        )
+        self._status_filter.setMinimumWidth(120)
         filter_row.addWidget(self._status_filter)
 
         refresh_btn = QPushButton("  조회  ")
@@ -729,7 +799,8 @@ class MyTasksTab(QWidget):
         project_id = self._project_combo.currentData()
         user_id = self._user_id
         status_raw = self._status_filter.currentText()
-        status = None if status_raw == "(전체)" else status_raw
+        status, apply_delivery_sort = parse_status_combo_for_fetch(status_raw)
+        self._last_fetch_delivery_sort = apply_delivery_sort
 
         self._loading_label.setText("조회 중...")
         self._clear_cards()
@@ -752,6 +823,15 @@ class MyTasksTab(QWidget):
 
     def _on_tasks_loaded(self, result: object) -> None:
         tasks: List[Dict[str, Any]] = result if isinstance(result, list) else []
+        if not tasks:
+            self._current_project_code = None
+        else:
+            t0 = tasks[0]
+            self._current_project_code = (
+                t0.get("project_code") or t0.get("project_folder") or ""
+            ).strip() or None
+        if self._last_fetch_delivery_sort:
+            tasks = sort_tasks_by_delivery_urgency(tasks)
         self._loading_label.setText(f"{len(tasks)}개 Task 로드됨")
         self._clear_cards()
         for t in tasks:
@@ -835,6 +915,49 @@ class MyTasksTab(QWidget):
                     return
             except (TypeError, ValueError):
                 continue
+
+    def _open_note_render_in_rv(self, rec: Dict[str, Any]) -> None:
+        """Notes에서 연결된 ShotGrid Version 코드 기준 comp 렌더 MOV를 RV로 연다."""
+        version_code: Optional[str] = rec.get("version_code")
+        if not version_code:
+            logger.warning("RV 렌더: 노트에 연결된 ShotGrid Version 없음")
+            return
+        proj = self._current_project_code
+        if not proj:
+            logger.warning("RV 렌더: 현재 조회 프로젝트 코드 없음")
+            return
+        env_root = (os.environ.get("BPE_SERVER_ROOT") or "").strip()
+        server_root = find_server_root_auto(proj) or env_root
+        if not server_root:
+            logger.warning(
+                "RV 렌더: 서버 루트를 찾을 수 없음 (project=%s)",
+                proj,
+            )
+            return
+        raw_names = rec.get("shot_names")
+        shot_names: List[str] = []
+        if isinstance(raw_names, list):
+            for x in raw_names:
+                s = str(x).strip()
+                if s:
+                    shot_names.append(s)
+        if not shot_names:
+            logger.warning("RV 렌더: 노트에 연결된 샷 이름 없음")
+            return
+        for shot_code in shot_names:
+            if open_comp_render_in_rv(shot_code, proj, server_root, version_code=version_code):
+                logger.info(
+                    "RV 렌더 열기: shot=%s project=%s version=%s",
+                    shot_code,
+                    proj,
+                    version_code,
+                )
+                return
+        logger.warning(
+            "RV 렌더 열기 실패 (mov 없음 또는 RV 없음): shots=%s version=%s",
+            shot_names,
+            version_code,
+        )
 
     # ── Thumbnail loading ───────────────────────────────────────────
 
@@ -956,9 +1079,37 @@ class MyTasksTab(QWidget):
         ts = (rec.get("timestamp") or "—").strip()
         meta = f"{proj}  ·  {author}  ·  {context}  ·  {ts}"
 
+        meta_row = QHBoxLayout()
+        meta_row.setContentsMargins(0, 0, 0, 0)
+        meta_row.setSpacing(8)
         meta_label = QLabel(meta)
         meta_label.setStyleSheet(f"color: {theme.TEXT_DIM}; border: none;")
-        lay.addWidget(meta_label)
+        meta_label.setWordWrap(True)
+        meta_row.addWidget(meta_label, 1)
+        version_code: Optional[str] = rec.get("version_code")
+        rv_btn = QPushButton("\u25b6")
+        rv_btn.setFixedSize(22, 22)
+        if version_code:
+            rv_btn.setToolTip(f"렌더 MOV RV로 열기 ({version_code})")
+            rv_btn.setEnabled(True)
+            rv_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            rv_btn.setStyleSheet(
+                f"QPushButton {{ color: {theme.ACCENT}; background: transparent; "
+                f"border: 1px solid {theme.ACCENT}; border-radius: 4px; "
+                f"font-size: 9px; padding: 0; }}"
+                f"QPushButton:hover {{ background: rgba(240, 138, 36, 0.12); }}"
+            )
+        else:
+            rv_btn.setToolTip("연결된 ShotGrid Version 없음 — RV 열기 불가")
+            rv_btn.setEnabled(False)
+            rv_btn.setStyleSheet(
+                f"QPushButton {{ color: {theme.TEXT_DIM}; background: transparent; "
+                f"border: 1px solid {theme.BORDER}; border-radius: 4px; "
+                f"font-size: 9px; padding: 0; }}"
+            )
+        rv_btn.clicked.connect(lambda _checked=False, r=rec: self._open_note_render_in_rv(r))
+        meta_row.addWidget(rv_btn, 0, Qt.AlignmentFlag.AlignTop)
+        lay.addLayout(meta_row)
 
         raw = (rec.get("content") or rec.get("subject") or "—").strip()
         body = raw.replace("\n", " ").strip() or "—"

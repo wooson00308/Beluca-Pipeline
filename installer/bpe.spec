@@ -61,13 +61,7 @@ templates_dir = ROOT / "templates"
 if templates_dir.exists():
     datas.append((str(templates_dir), "templates"))
 
-# 런처 바이너리 (빌드 시 release.yml에서 다운로드)
-_launcher_name = "BPELauncher" if sys.platform == "darwin" else "BPELauncher.exe"
-_launcher_src = ROOT / "launcher-dl" / _launcher_name
 binaries = []
-
-if _launcher_src.exists():
-    binaries.append((str(_launcher_src), "."))
 
 # PySide6 — 바이너리·플러그인·데이터 전부 (미설치 시 빌드는 의미 없는 얇은 exe만 나옴)
 try:

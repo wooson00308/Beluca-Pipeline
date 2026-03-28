@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -14,6 +15,7 @@ from bpe.core.update_checker import (
     check_latest_release,
     compare_versions,
     download_release_asset,
+    extract_windows_exe,
 )
 
 # ── compare_versions ─────────────────────────────────────────────
@@ -218,3 +220,36 @@ def test_download_overwrites_existing(
 
     download_release_asset("https://example.com/asset", dest)
     assert dest.read_bytes() == new_content
+
+
+# ── extract_windows_exe ──────────────────────────────────────────
+
+
+def test_extract_windows_exe_root(tmp_path: Path) -> None:
+    zip_path = tmp_path / "BPE-Windows.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("BPE.exe", b"MZ fake exe")
+
+    out = extract_windows_exe(zip_path)
+
+    assert out.name == "BPE_new.exe"
+    assert out.read_bytes() == b"MZ fake exe"
+
+
+def test_extract_windows_exe_nested_path(tmp_path: Path) -> None:
+    zip_path = tmp_path / "BPE-Windows.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("dist/BPE.exe", b"nested")
+
+    out = extract_windows_exe(zip_path)
+
+    assert out.read_bytes() == b"nested"
+
+
+def test_extract_windows_exe_missing_raises(tmp_path: Path) -> None:
+    zip_path = tmp_path / "empty.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("readme.txt", b"no exe")
+
+    with pytest.raises(FileNotFoundError):
+        extract_windows_exe(zip_path)

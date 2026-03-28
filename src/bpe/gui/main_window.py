@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
@@ -19,6 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from bpe import __version__
+from bpe.core import update_checker
 from bpe.core.logging import get_logger
 from bpe.gui import theme
 
@@ -109,6 +114,26 @@ class MainWindow(QMainWindow):
         self._update_timer.timeout.connect(self._start_update_check)
         self._update_timer.start(4 * 60 * 60 * 1000)
 
+        QTimer.singleShot(0, self._apply_dark_titlebar)
+
+    def _apply_dark_titlebar(self) -> None:
+        """Windows 네이티브 타이틀 바를 다크 모드로 (Qt QSS로는 칠할 수 없음)."""
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+
+            DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+            value = ctypes.c_int(1)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(  # type: ignore[attr-defined]
+                int(self.winId()),
+                DWMWA_USE_IMMERSIVE_DARK_MODE,
+                ctypes.byref(value),
+                ctypes.sizeof(value),
+            )
+        except Exception:
+            pass
+
     def _init_update_toast(self) -> None:
         from bpe.gui.widgets.update_toast import UpdateToast
 
@@ -139,79 +164,108 @@ class MainWindow(QMainWindow):
         if info is None or not info.download_url:
             return
 
-        launcher = self._find_launcher()
-        if launcher is None:
+        suffix = ".dmg" if sys.platform == "darwin" else ".zip"
+        fd, dest_str = tempfile.mkstemp(suffix=suffix, prefix="bpe_dl_")
+        os.close(fd)
+        dest_path = Path(dest_str)
+
+        from bpe.gui.workers.update_worker import UpdateDownloadWorker
+
+        w = UpdateDownloadWorker(info.download_url, str(dest_path))
+        w.progress.connect(lambda v: self._toast.show_progress(int(v * 100)))
+        w.finished.connect(self._on_download_finished)
+        w.error.connect(self._on_download_error)
+        w.start()
+        self._workers.append(w)
+
+    def _on_download_error(self, _msg: str) -> None:
+        logger.warning("업데이트 다운로드 실패, 브라우저 폴백: %s", _msg)
+        info = self._update_info
+        if info is not None and getattr(info, "html_url", ""):
             QDesktopServices.openUrl(QUrl(info.html_url))
+
+    def _on_download_finished(self, path: str) -> None:
+        dl = Path(path)
+        if sys.platform == "darwin":
+            self._toast.show_done(path)
             return
-
-        import os
-        import shutil
-        import subprocess
-        import tempfile
-
-        try:
-            # _MEIPASS 안의 런처를 임시 경로로 복사 (BPE 종료 시 _MEIPASS 삭제되므로)
-            tmp_dir = tempfile.mkdtemp(prefix="bpe_launcher_")
-            tmp_launcher = Path(tmp_dir) / launcher.name
-            shutil.copy2(str(launcher), str(tmp_launcher))
-            if os.name != "nt":
-                os.chmod(str(tmp_launcher), 0o755)
-
-            subprocess.Popen(
-                [
-                    str(tmp_launcher),
-                    "--version",
-                    info.latest_version,
-                    "--download-url",
-                    info.download_url,
-                    "--app-path",
-                    self._get_app_path(),
-                ]
-            )
-            QApplication.instance().quit()
-        except Exception:
-            logger.warning("런처 실행 실패, 브라우저 폴백", exc_info=True)
+        if sys.platform == "win32":
+            try:
+                self._apply_windows_update(dl)
+            except Exception:
+                logger.warning("Windows 업데이트 적용 실패, 브라우저 폴백", exc_info=True)
+                self._on_download_error("")
+            return
+        info = self._update_info
+        if info is not None and getattr(info, "html_url", ""):
             QDesktopServices.openUrl(QUrl(info.html_url))
 
-    def _find_launcher(self) -> Optional[Path]:
-        """번들 내 런처 바이너리를 찾는다."""
-        import sys as _sys
+    def _apply_windows_update(self, zip_path: Path) -> None:
+        """ZIP 다운로드 후 새 BPE.exe를 풀고, 종료 뒤 교체하는 PS1을 실행한다."""
+        new_exe = update_checker.extract_windows_exe(zip_path)
+        current_exe = Path(self._get_app_path())
+        bpe_pid = os.getpid()
+        ps1_dir = new_exe.parent
+        ps1_path = ps1_dir / "bpe_updater.ps1"
 
-        if _sys.platform == "darwin":
-            name = "BPELauncher"
-        else:
-            name = "BPELauncher.exe"
+        ps1_body = """param(
+  [Parameter(Mandatory = $true)][int]$BpePid,
+  [Parameter(Mandatory = $true)][string]$NewExe,
+  [Parameter(Mandatory = $true)][string]$CurrentExe,
+  [Parameter(Mandatory = $true)][string]$Ps1Path
+)
+$ErrorActionPreference = 'Stop'
+$maxWait = 30
+$elapsed = 0
+while ($elapsed -lt $maxWait) {
+  if (-not (Get-Process -Id $BpePid -ErrorAction SilentlyContinue)) { break }
+  Start-Sleep -Seconds 1
+  $elapsed++
+}
+Copy-Item -LiteralPath $NewExe -Destination $CurrentExe -Force
+Start-Process -FilePath $CurrentExe
+Remove-Item -LiteralPath $Ps1Path -Force -ErrorAction SilentlyContinue
+"""
 
-        # PyInstaller 번들
-        meipass = getattr(_sys, "_MEIPASS", None)
-        if meipass:
-            p = Path(meipass) / name
-            if p.exists():
-                return p
-            # macOS .app 번들
-            p = Path(_sys.executable).parent / name
-            if p.exists():
-                return p
+        ps1_path.write_text(ps1_body, encoding="utf-8")
 
-        # 개발 모드: 프로젝트 루트의 launcher-dl/
-        dev_path = Path(__file__).resolve().parent.parent.parent.parent / "launcher-dl" / name
-        if dev_path.exists():
-            return dev_path
+        creationflags = 0
+        if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
+            creationflags = subprocess.CREATE_NO_WINDOW
 
-        return None
+        subprocess.Popen(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-WindowStyle",
+                "Hidden",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(ps1_path),
+                "-BpePid",
+                str(bpe_pid),
+                "-NewExe",
+                str(new_exe.resolve()),
+                "-CurrentExe",
+                str(current_exe.resolve()),
+                "-Ps1Path",
+                str(ps1_path.resolve()),
+            ],
+            close_fds=True,
+            creationflags=creationflags,
+        )
+        QApplication.instance().quit()
 
     def _get_app_path(self) -> str:
         """현재 앱의 실행 경로를 반환한다."""
-        import sys as _sys
-
-        if _sys.platform == "darwin":
-            exe = Path(_sys.executable)
+        if sys.platform == "darwin":
+            exe = Path(sys.executable)
             for parent in exe.parents:
                 if parent.suffix == ".app":
                     return str(parent)
             return str(exe)
-        else:
-            return _sys.executable
+        return sys.executable
 
     def _on_open_folder(self, path: str) -> None:
         folder = str(Path(path).parent)
