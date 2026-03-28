@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
@@ -43,6 +43,8 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(theme.MIN_WIDTH, theme.MIN_HEIGHT)
         self.resize(theme.DEFAULT_WIDTH, theme.DEFAULT_HEIGHT)
         self._workers: List[Any] = []
+        self._preset_unlocked = False
+        self._preset_stack: Optional[QStackedWidget] = None
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -280,23 +282,36 @@ Remove-Item -LiteralPath $Ps1Path -Force -ErrorAction SilentlyContinue
         from bpe.gui.tabs.my_tasks_tab import MyTasksTab
         from bpe.gui.tabs.preset_tab import PresetTab
         from bpe.gui.tabs.tools_tab import ToolsTab
+        from bpe.gui.widgets.lock_overlay import LockOverlay
 
-        tab_classes: Dict[str, type] = {
-            "presets": PresetTab,
-            "my_tasks": MyTasksTab,
-            "tools": ToolsTab,
-        }
+        preset_tab = PresetTab()
+        lock_overlay = LockOverlay()
+        lock_overlay.unlocked.connect(self._on_preset_unlocked)
+        preset_stack = QStackedWidget()
+        preset_stack.addWidget(lock_overlay)
+        preset_stack.addWidget(preset_tab)
+        self._preset_stack = preset_stack
+
+        self._tab_pages["my_tasks"] = MyTasksTab()
+        self._tab_pages["presets"] = preset_stack
+        self._tab_pages["tools"] = ToolsTab()
+
         for tab_def in TAB_DEFS:
             key = tab_def["key"]
-            page = tab_classes[key]()
-            self._tab_pages[key] = page
-            self._stack.addWidget(page)
+            self._stack.addWidget(self._tab_pages[key])
+
+    def _on_preset_unlocked(self) -> None:
+        self._preset_unlocked = True
+        if self._preset_stack is not None:
+            self._preset_stack.setCurrentIndex(1)
 
     def _switch_tab(self, key: str) -> None:
         page = self._tab_pages.get(key)
         if page is None:
             return
         self._stack.setCurrentWidget(page)
+        if key == "presets" and self._preset_stack is not None:
+            self._preset_stack.setCurrentIndex(1 if self._preset_unlocked else 0)
         for k, btn in self._tab_buttons.items():
             btn.setProperty("selected", k == key)
             btn.style().unpolish(btn)
