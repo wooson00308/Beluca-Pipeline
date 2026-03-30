@@ -15,7 +15,7 @@ W, H = 460, 280
 
 BG = QColor("#1c1c1e")
 BORDER = QColor("#3a3a3c")
-ACC = QColor("#f08a24")
+ACC = QColor("#2D8B7A")
 DIM = QColor("#86868b")
 TEXT_LIGHT = QColor("#f5f5f7")
 BAR_BG = QColor("#2c2c2e")

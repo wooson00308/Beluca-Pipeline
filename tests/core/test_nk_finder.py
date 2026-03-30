@@ -514,7 +514,7 @@ _OLD_MOV = (
 )
 _OLD_EXR = (
     r' file "\[string trim \[value root.name] nuke/\[file tail \[value root.name]]]'
-    r'/renders/\[string trim \[file tail \[value root.name]] .nk]'
+    r"/renders/\[string trim \[file tail \[value root.name]] .nk]"
     r'/\[string trim \[file tail \[value root.name]] .nk].%04d.exr"'
 )
 _NEW_MOV = (
@@ -523,7 +523,7 @@ _NEW_MOV = (
 )
 _NEW_EXR = (
     r' file "\[file dirname \[file dirname \[file dirname \[value root.name]]]]'
-    r'/renders/\[file rootname \[file tail \[value root.name]]]'
+    r"/renders/\[file rootname \[file tail \[value root.name]]]"
     r'/\[file rootname \[file tail \[value root.name]]].%04d.exr"'
 )
 
@@ -554,8 +554,7 @@ class TestPatchNkStringTrimInPlace:
 
     def test_patches_both_write_nodes(self, tmp_path):
         content = (
-            f"Write {{\n{_OLD_MOV}\n name eo7Write1\n}}\n"
-            f"Write {{\n{_OLD_EXR}\n name Write2\n}}\n"
+            f"Write {{\n{_OLD_MOV}\n name eo7Write1\n}}\nWrite {{\n{_OLD_EXR}\n name Write2\n}}\n"
         )
         nk = self._make_nk(tmp_path, content)
         assert patch_nk_string_trim_in_place(nk) is True

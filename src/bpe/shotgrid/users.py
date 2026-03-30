@@ -73,3 +73,117 @@ def guess_human_user_for_me(sg: Any, *, limit: int = 8) -> Optional[Dict[str, An
         except Exception:
             continue
     return None
+
+
+def list_project_assignees(sg: Any, project_id: int) -> List[Dict[str, Any]]:
+    """HumanUsers who have at least one Task on the given Project (deduped, name sort).
+
+    Tries ShotGrid relation filter first; falls back to scanning Tasks if needed.
+    """
+    pid = int(project_id)
+    proj_ref = {"type": "Project", "id": pid}
+    fields = ["id", "name", "login", "email"]
+    users: List[Dict[str, Any]] = []
+    try:
+        users = list(
+            sg.find(
+                "HumanUser",
+                [["tasks.Task.project", "is", proj_ref]],
+                fields,
+                order=[{"field_name": "name", "direction": "asc"}],
+                limit=500,
+            )
+            or []
+        )
+    except Exception as exc:
+        logger.debug("list_project_assignees relation filter failed: %s", exc)
+        users = []
+    if users:
+        return _dedupe_users_by_id(users)
+
+    seen: Dict[int, Dict[str, Any]] = {}
+    try:
+        tasks = list(
+            sg.find(
+                "Task",
+                [["project", "is", proj_ref]],
+                ["task_assignees"],
+                limit=2000,
+            )
+            or []
+        )
+    except Exception as exc:
+        logger.warning("list_project_assignees task scan failed: %s", exc)
+        return []
+
+    for t in tasks:
+        raw = t.get("task_assignees") or []
+        if not isinstance(raw, list):
+            continue
+        for ent in raw:
+            if not isinstance(ent, dict):
+                continue
+            if (ent.get("type") or "").lower() != "humanuser":
+                continue
+            uid = ent.get("id")
+            if uid is None:
+                continue
+            try:
+                iid = int(uid)
+            except (TypeError, ValueError):
+                continue
+            if iid not in seen:
+                seen[iid] = {
+                    "id": iid,
+                    "name": (ent.get("name") or "").strip(),
+                    "login": (ent.get("login") or "").strip(),
+                    "email": (ent.get("email") or "").strip(),
+                }
+
+    out = list(seen.values())
+    out.sort(key=lambda u: ((u.get("name") or "").lower(), (u.get("login") or "").lower()))
+    if not out:
+        return []
+
+    # Fill missing fields from SG
+    try:
+        ids = [u["id"] for u in out]
+        chunk = ids[:100]
+        rows = list(
+            sg.find(
+                "HumanUser",
+                [["id", "in", chunk]],
+                fields,
+                limit=len(chunk),
+            )
+            or []
+        )
+        by_id = {int(r["id"]): r for r in rows if r.get("id") is not None}
+        for u in out:
+            rid = int(u["id"])
+            row = by_id.get(rid)
+            if row:
+                u["name"] = (row.get("name") or u.get("name") or "").strip()
+                u["login"] = (row.get("login") or u.get("login") or "").strip()
+                u["email"] = (row.get("email") or u.get("email") or "").strip()
+    except Exception as exc:
+        logger.debug("list_project_assignees hydrate users failed: %s", exc)
+
+    return out
+
+
+def _dedupe_users_by_id(users: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    seen: Dict[int, Dict[str, Any]] = {}
+    for u in users:
+        uid = u.get("id")
+        if uid is None:
+            continue
+        try:
+            iid = int(uid)
+        except (TypeError, ValueError):
+            continue
+        if iid not in seen:
+            seen[iid] = u
+    out = list(seen.values())
+    out.sort(key=lambda x: ((x.get("name") or "").lower(), (x.get("login") or "").lower()))
+    return out

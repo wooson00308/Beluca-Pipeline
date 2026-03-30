@@ -33,8 +33,8 @@ def _make_master(size: int = 1024) -> Image.Image:
         fill=bg_color,
     )
 
-    # 'B' 글자 (오렌지 #f08a24)
-    accent = (240, 138, 36, 255)
+    # 'B' 글자 (Beluca teal #2D8B7A)
+    accent = (45, 139, 122, 255)
     font_size = int(size * 0.55)
 
     # 시스템 폰트 시도
@@ -68,8 +68,13 @@ def _make_master(size: int = 1024) -> Image.Image:
 
 
 def _save_ico(master: Image.Image, out: Path) -> None:
-    """멀티 사이즈 .ico 저장."""
-    sizes = [16, 24, 32, 48, 64, 128, 256]
+    """멀티 사이즈 .ico 저장.
+
+    모든 크기는 동일 마스터에서 리사이즈(틸 B). 순서는 큰 해상도 우선 — Windows exe·탐색기가
+    자세히 보기 등에서 쓰는 16·32px도 동일 팔레트로 포함됨.
+    예전 아이콘만 보이면 탐색기 아이콘 캐시 또는 exe 재빌드 여부를 확인할 것.
+    """
+    sizes = [256, 128, 64, 48, 32, 24, 16]
     imgs = [master.resize((s, s), Image.Resampling.LANCZOS) for s in sizes]
     imgs[0].save(str(out), format="ICO", sizes=[(s, s) for s in sizes], append_images=imgs[1:])
 

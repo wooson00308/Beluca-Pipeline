@@ -9,7 +9,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from bpe.core.logging import get_logger
 from bpe.shotgrid.errors import ShotGridError
@@ -111,6 +111,59 @@ def create_version(
         data["sg_status_list"] = sg_status.strip()
 
     return sg.create("Version", data)
+
+
+def list_versions_for_shot(
+    sg: Any,
+    shot_id: int,
+    *,
+    limit: int = 80,
+) -> List[Dict[str, Any]]:
+    """Versions linked to a Shot, newest first (code, artist, status, created_at)."""
+    sid = int(shot_id)
+    filters = [["entity", "is", {"type": "Shot", "id": sid}]]
+    fields = ["id", "code", "user", "sg_status_list", "created_at", "image"]
+    order = [{"field_name": "created_at", "direction": "desc"}]
+    try:
+        raw = list(sg.find("Version", filters, fields, limit=int(limit), order=order) or [])
+    except Exception as exc:
+        logger.warning("list_versions_for_shot find failed: %s", exc)
+        return []
+    out: List[Dict[str, Any]] = []
+    for row in raw:
+        user_ent = row.get("user") or {}
+        artist_name = ""
+        if isinstance(user_ent, dict):
+            artist_name = (user_ent.get("name") or "").strip()
+        code = (row.get("code") or "").strip()
+        status = (row.get("sg_status_list") or "").strip()
+        created = row.get("created_at")
+        if hasattr(created, "strftime"):
+            ts_str = created.strftime("%Y-%m-%d %H:%M")
+        else:
+            ts_str = str(created or "—")
+        vid = row.get("id")
+        try:
+            vid_i = int(vid) if vid is not None else 0
+        except (TypeError, ValueError):
+            vid_i = 0
+        thumb_url = ""
+        img = row.get("image")
+        if isinstance(img, str):
+            thumb_url = img.strip()
+        elif isinstance(img, dict):
+            thumb_url = (img.get("url") or "").strip()
+        out.append(
+            {
+                "version_id": vid_i,
+                "code": code,
+                "artist": artist_name or "—",
+                "status": status,
+                "created_at_display": ts_str,
+                "thumb_url": thumb_url,
+            }
+        )
+    return out
 
 
 # ── movie upload ─────────────────────────────────────────────────────

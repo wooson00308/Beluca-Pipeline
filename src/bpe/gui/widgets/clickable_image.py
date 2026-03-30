@@ -95,7 +95,7 @@ class _ImageViewerDialog(QDialog):
                 border-color: {theme.TEXT_DIM};
             }}
             QPushButton:pressed {{
-                background-color: rgba(240, 138, 36, 0.45);
+                background-color: rgba(45, 139, 122, 0.45);
                 border-color: {theme.ACCENT};
             }}
             QPushButton:disabled {{

@@ -9,15 +9,15 @@ BG = "#1a1a1d"
 SIDEBAR_BG = "#111114"
 PANEL_BG = "#222225"
 INPUT_BG = "#2a2a2d"
-ACCENT = "#f08a24"
-ACCENT_HOVER = "#e07d1a"
-ACCENT_PRESSED = "#c06a12"
-ACCENT_TEXT = "#f08a24"
+ACCENT = "#2D8B7A"
+ACCENT_HOVER = "#26796D"
+ACCENT_PRESSED = "#1E6158"
+ACCENT_TEXT = "#2D8B7A"
 TEXT = "#e8e8eb"
 TEXT_DIM = "#78787e"
 TEXT_LABEL = "#9a9a9f"
 BORDER = "#333336"
-BORDER_FOCUS = "#f08a24"
+BORDER_FOCUS = "#2D8B7A"
 ERROR = "#ff453a"
 SUCCESS = "#34c759"
 SUCCESS_DIM = "#2a9d4a"
@@ -204,6 +204,24 @@ def build_stylesheet() -> str:
         padding: 4px;
     }}
 
+    /* My Tasks filter: Assigned To — 콤보박스와 동일한 느낌(우측 ▼) */
+    QPushButton#filter_combo_like_btn {{
+        background-color: {INPUT_BG};
+        color: {TEXT};
+        border: 1px solid {BORDER};
+        border-radius: {INPUT_RADIUS}px;
+        padding: 4px 12px 4px 12px;
+        min-height: {INPUT_HEIGHT - 10}px;
+        min-width: 120px;
+        font-size: {FONT_SIZE}px;
+    }}
+    QPushButton#filter_combo_like_btn:hover {{
+        border-color: {BORDER_FOCUS};
+    }}
+    QPushButton#filter_combo_like_btn:pressed {{
+        background-color: {BORDER};
+    }}
+
     /* ── Buttons ── */
     QPushButton {{
         background-color: {PANEL_BG};
@@ -237,15 +255,40 @@ def build_stylesheet() -> str:
         font-weight: 600;
     }}
     QPushButton[primary="true"]:hover {{
-        background-color: rgba(240, 138, 36, 0.12);
+        background-color: rgba(45, 139, 122, 0.12);
         border-color: {ACCENT_HOVER};
     }}
     QPushButton[primary="true"]:pressed {{
-        background-color: rgba(240, 138, 36, 0.25);
+        background-color: rgba(45, 139, 122, 0.25);
     }}
     QPushButton[primary="true"]:disabled {{
         color: {TEXT_DIM};
         border-color: {BORDER};
+    }}
+
+    /* My Tasks right panel: Notes | Versions toggle */
+    QPushButton#panel_tab_btn {{
+        background-color: {INPUT_BG};
+        color: {TEXT_DIM};
+        border: 1px solid {BORDER};
+        border-radius: 6px;
+        padding: 4px 14px;
+        min-height: 0;
+        min-width: 64px;
+        font-weight: 400;
+    }}
+    QPushButton#panel_tab_btn[selected="true"] {{
+        background-color: {ACCENT};
+        color: #ffffff;
+        border-color: {ACCENT};
+        font-weight: 600;
+    }}
+    QPushButton#panel_tab_btn:hover {{
+        border-color: {ACCENT};
+        color: {TEXT};
+    }}
+    QPushButton#panel_tab_btn[selected="true"]:hover {{
+        color: #ffffff;
     }}
 
     /* ── Labels ── */
@@ -292,6 +335,34 @@ def build_stylesheet() -> str:
     QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal,
     QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
         width: 0; background: transparent;
+    }}
+
+    /* My Tasks: 샷 목록 QScrollArea만 세로 스크롤 굵게 */
+    #shot_list_scroll QScrollBar:vertical {{
+        width: 11px;
+        margin: 2px;
+    }}
+    #shot_list_scroll QScrollBar::handle:vertical {{
+        background-color: {BORDER};
+        border-radius: 5px;
+        min-height: 28px;
+    }}
+    #shot_list_scroll QScrollBar::handle:vertical:hover {{
+        background-color: {TEXT_DIM};
+    }}
+
+    /* My Tasks: Notes 목록 — 샷 목록과 동일한 세로 스크롤 굵기 */
+    #note_list_scroll QScrollBar:vertical {{
+        width: 11px;
+        margin: 2px;
+    }}
+    #note_list_scroll QScrollBar::handle:vertical {{
+        background-color: {BORDER};
+        border-radius: 5px;
+        min-height: 28px;
+    }}
+    #note_list_scroll QScrollBar::handle:vertical:hover {{
+        background-color: {TEXT_DIM};
     }}
 
     /* ── Progress bar ── */
@@ -409,7 +480,7 @@ def build_stylesheet() -> str:
     }}
     #drop_zone[dragover="true"] {{
         border-color: {ACCENT};
-        background-color: rgba(240, 138, 36, 0.06);
+        background-color: rgba(45, 139, 122, 0.06);
     }}
     #drop_zone[has_file="true"] {{
         border-style: solid;
@@ -429,7 +500,7 @@ def build_stylesheet() -> str:
     }}
     #card[selected="true"] {{
         border: 2px solid {ACCENT};
-        background-color: rgba(240, 138, 36, 0.08);
+        background-color: rgba(45, 139, 122, 0.08);
     }}
     #card[selected="true"]:hover {{
         border-color: {ACCENT_HOVER};

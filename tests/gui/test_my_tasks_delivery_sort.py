@@ -1,25 +1,14 @@
-"""Tests for My Tasks status combo Delivery + delivery-date sort helpers."""
+"""Tests for My Tasks delivery-date sort helpers and natural shot sort."""
 
 from __future__ import annotations
 
 from bpe.gui.tabs.my_tasks_tab import (
-    STATUS_COMBO_ALL,
-    STATUS_COMBO_DELIVERY,
-    parse_status_combo_for_fetch,
+    _SORT_MODE_DELIVERY,
+    _SORT_MODE_SHOT,
+    _natural_sort_key,
+    _sort_tasks_by_mode,
     sort_tasks_by_delivery_urgency,
 )
-
-
-def test_parse_delivery_sort() -> None:
-    assert parse_status_combo_for_fetch(STATUS_COMBO_DELIVERY) == (None, True)
-
-
-def test_parse_all_no_sort() -> None:
-    assert parse_status_combo_for_fetch(STATUS_COMBO_ALL) == (None, False)
-
-
-def test_parse_wip() -> None:
-    assert parse_status_combo_for_fetch("wip") == ("wip", False)
 
 
 def test_sort_empty() -> None:
@@ -74,3 +63,26 @@ def test_sort_parse_failure_last() -> None:
     out = sort_tasks_by_delivery_urgency(tasks)
     assert out[0]["task_id"] == 2
     assert out[1]["task_id"] == 1
+
+
+def test_natural_sort_key_numeric_order() -> None:
+    assert _natural_sort_key("shot_2") < _natural_sort_key("shot_10")
+
+
+def test_sort_tasks_by_mode_shot_ascending() -> None:
+    tasks = [
+        {"task_id": 1, "shot_code": "CID_010", "task_status": "wip"},
+        {"task_id": 2, "shot_code": "CID_002", "task_status": "wip"},
+    ]
+    out = _sort_tasks_by_mode(tasks, _SORT_MODE_SHOT, ascending=True)
+    assert [t["task_id"] for t in out] == [2, 1]
+
+
+def test_sort_tasks_by_mode_delivery_matches_urgency() -> None:
+    tasks = [
+        {"task_id": 1, "shot_code": "C", "delivery_date": "2025-06-01"},
+        {"task_id": 2, "shot_code": "A", "delivery_date": "2025-03-15"},
+    ]
+    out_mode = _sort_tasks_by_mode(tasks, _SORT_MODE_DELIVERY, ascending=True)
+    out_legacy = sort_tasks_by_delivery_urgency(tasks)
+    assert [t["task_id"] for t in out_mode] == [t["task_id"] for t in out_legacy]
