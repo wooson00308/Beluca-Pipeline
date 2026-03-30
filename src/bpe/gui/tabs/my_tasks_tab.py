@@ -1189,20 +1189,23 @@ class MyTasksTab(QWidget):
     def _open_publish_dialog(self, task_data: Dict[str, Any]) -> None:
         from bpe.gui.tabs.publish_tab import PublishTab
 
+        if self._user_id is None:
+            from PySide6.QtWidgets import QMessageBox
+
+            QMessageBox.warning(self, "담당자 미선택", "담당자를 먼저 선택하세요.")
+            return
+
+        user_name = self._user_edit.text().strip()
+
         dlg = QDialog(self)
         dlg.setWindowTitle("퍼블리쉬")
-        dlg.setMinimumSize(720, 640)
-        dlg.resize(820, 720)
+        dlg.setMinimumSize(900, 780)
+        dlg.resize(1000, 850)
 
         lay = QVBoxLayout(dlg)
         lay.setContentsMargins(0, 0, 0, 0)
 
-        pub = PublishTab()
+        pub = PublishTab(task_data, self._user_id, user_name=user_name)
         lay.addWidget(pub)
-
-        shot_code = task_data.get("shot_code", "")
-        if shot_code:
-            pub._shot_edit.setText(shot_code)
-            pub._lookup_shot(shot_code)
 
         dlg.exec()

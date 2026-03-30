@@ -9,6 +9,7 @@ import nuke
 import nukescripts
 
 import bpe.core.config as cfg
+from bpe.core.nuke_render_paths import write_file_paths_from_nk_root_name
 from bpe.core.presets import load_presets
 from bpe.core.settings import get_tools_settings
 
@@ -717,6 +718,59 @@ def bpe_post_render_load():
 
 
 # ══════════════════════════════════════════════════════════════════════
+# WRITE 경로 보정 (UNC + 잘못된 Tcl string trim 대응)
+# ══════════════════════════════════════════════════════════════════════
+
+
+def bpe_fix_write_paths_on_save() -> None:
+    """onScriptSave — `string trim` 기반 Write file 표현식을 절대경로로 덮어쓴다.
+
+    BPE가 NK를 ``//server/share/...`` UNC로 열면 Nuke는 ``root.name``을 ``//`` 로
+    정규화한다. 기존 템플릿의 ``string trim`` 은 ``/`` 를 trim 문자 집합에 넣어
+    선행 ``//`` 를 제거해 무효 경로가 된다. ``file dirname`` 템플릿으로 바꾼 뒤에도
+    서버에 남아 있는 구 NK는 저장 시 여기서 한 번 보정한다.
+    """
+    try:
+        root_name = nuke.root()["name"].value()
+        if not root_name:
+            return
+
+        paths = write_file_paths_from_nk_root_name(root_name)
+        if paths is None:
+            return
+        _renders_dir, exr_path, mov_path = paths
+
+        for node in nuke.allNodes("Write"):
+            name = node.name()
+            if name not in ("Write2", "eo7Write1"):
+                continue
+            file_knob = node.knob("file")
+            if file_knob is None:
+                continue
+            try:
+                script_text = file_knob.toScript()
+            except Exception:
+                script_text = ""
+            if "string trim" not in script_text:
+                continue
+            if name == "Write2":
+                new_path = exr_path
+            else:
+                new_path = mov_path
+            try:
+                file_knob.setValue(new_path)
+            except Exception:
+                try:
+                    file_knob.setExpression("")
+                except Exception:
+                    pass
+                file_knob.setValue(new_path)
+            nuke.tprint(f"[BPE] Write 경로 보정: {name} -> {new_path}")
+    except Exception as e:
+        nuke.tprint(f"[BPE] Write 경로 보정 실패: {e}")
+
+
+# ══════════════════════════════════════════════════════════════════════
 # TOOL HOOKS 관리
 # ══════════════════════════════════════════════════════════════════════
 
@@ -747,9 +801,20 @@ def reload_tool_hooks() -> None:
     if prv_enabled:
         nuke.addAfterRender(bpe_post_render_load)
 
+    # Write 경로 보정 (항상 활성 — UNC + string trim 버그 대응)
+    try:
+        nuke.removeOnScriptSave(bpe_fix_write_paths_on_save)
+    except Exception:
+        pass
+    try:
+        nuke.addOnScriptSave(bpe_fix_write_paths_on_save)
+    except Exception as e:
+        nuke.tprint(f"[BPE Tools] addOnScriptSave(Write 경로 보정) 등록 실패: {e}")
+
     nuke.tprint(
         "[BPE Tools] Reload 완료 — "
         f"QC Checker: {'ON' if qc_enabled else 'OFF'}  |  "
         f"Post-Render Viewer: {'ON' if prv_enabled else 'OFF'}  |  "
+        f"Write 경로 보정(onSave): ON  |  "
         f"settings: {cfg.SETTINGS_FILE}"
     )

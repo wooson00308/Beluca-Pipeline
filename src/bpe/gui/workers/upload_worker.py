@@ -13,7 +13,7 @@ class UploadWorker(QThread):
     finished = Signal()
     error = Signal(str)
     progress = Signal(float)
-    status = Signal(str)  # status text updates
+    status = Signal(str)
 
     def __init__(
         self,

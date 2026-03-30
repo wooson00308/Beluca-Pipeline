@@ -566,14 +566,72 @@ def find_latest_nk_path(shot_name: str, project_code: str, server_root: str) -> 
 # ---------------------------------------------------------------------------
 
 
+_NK_STRING_TRIM_MOV = (
+    r"\[string trim \[value root.name] nuke/\[file tail \[value root.name]]]"
+    r"/renders/\[string trim \[file tail \[value root.name]] .nk].mov"
+)
+_NK_STRING_TRIM_EXR = (
+    r"\[string trim \[value root.name] nuke/\[file tail \[value root.name]]]"
+    r"/renders/\[string trim \[file tail \[value root.name]] .nk]"
+    r"/\[string trim \[file tail \[value root.name]] .nk].%04d.exr"
+)
+_NK_DIRNAME_MOV = (
+    r"\[file dirname \[file dirname \[file dirname \[value root.name]]]]"
+    r"/renders/\[file rootname \[file tail \[value root.name]]].mov"
+)
+_NK_DIRNAME_EXR = (
+    r"\[file dirname \[file dirname \[file dirname \[value root.name]]]]"
+    r"/renders/\[file rootname \[file tail \[value root.name]]]"
+    r"/\[file rootname \[file tail \[value root.name]]].%04d.exr"
+)
+
+
+def patch_nk_string_trim_in_place(path: Path) -> bool:
+    """NK 파일의 `string trim` 렌더 경로 식을 `file dirname` 식으로 교체한다.
+
+    기존 ``string trim`` 방식은 UNC 경로(``//server/...``)에서 선행 ``//`` 를
+    지워 렌더 결과가 이상한 위치에 저장되는 버그가 있다.
+    열기 전에 서버 NK 파일을 직접 수정해 EXE 배포만으로 수정이 완결되게 한다.
+
+    수정이 발생하면 ``True``, 이미 최신이거나 실패하면 ``False`` 를 반환한다.
+    """
+    try:
+        original = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        logger.warning("NK 패치: 파일 읽기 실패 %s — %s", path, e)
+        return False
+
+    patched = original
+    patched = patched.replace(_NK_STRING_TRIM_MOV, _NK_DIRNAME_MOV)
+    patched = patched.replace(_NK_STRING_TRIM_EXR, _NK_DIRNAME_EXR)
+
+    if patched == original:
+        return False
+
+    try:
+        path.write_text(patched, encoding="utf-8")
+        logger.info("NK 렌더 경로 패치 완료: %s", path)
+        return True
+    except OSError as e:
+        logger.warning("NK 패치: 파일 쓰기 실패 %s — %s", path, e)
+        return False
+
+
 def find_latest_nk_and_open(shot_name: str, project_code: str, server_root: str) -> Optional[Path]:
     """최신 NK를 찾아 연다.
+
+    열기 전에 ``string trim`` 기반 렌더 경로 식을 ``file dirname`` 기반으로
+    자동 교체한다 (UNC 경로 버그 대응). EXE 재배포만으로 기존 서버 NK에 수정이
+    반영된다.
 
     Windows: NukeX 실행 파일로만 연다. 일반 Nuke나 파일 연결 프로그램으로는 열지 않는다.
     """
     path = find_latest_nk_path(shot_name, project_code, server_root)
     if path is None:
         return None
+
+    patch_nk_string_trim_in_place(path)
+
     try:
         if sys.platform == "darwin":
             subprocess.run(["open", str(path)], check=False)

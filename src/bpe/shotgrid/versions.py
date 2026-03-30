@@ -194,10 +194,6 @@ def upload_movie_to_version(
             try:
                 logger.debug("sg.upload attempt %d/%d", attempt_idx, upload_rounds)
                 _up_ret = sg.upload("Version", int(version_id), upload_src, "sg_uploaded_movie")
-                try:
-                    attach_id = int(_up_ret) if _up_ret is not None else None
-                except (TypeError, ValueError):
-                    attach_id = None
                 break
             except Exception as round_e:
                 msg = str(round_e)
@@ -223,26 +219,63 @@ def upload_movie_to_version(
                 logger.info("업로드 재시도 대기 %.0f초 (%d/%d)", _wait, attempt_idx, upload_rounds)
                 time.sleep(_wait)
 
+        # ── 검증 1: sg.upload() 반환값 ────────────────────────────
+        if _up_ret is None:
+            raise ShotGridError(
+                "sg.upload()가 None을 반환했습니다. "
+                "파일이 ShotGrid에 전송되지 않았습니다.\n"
+                f"version_id={version_id}, file={Path(upload_src).name}"
+            )
+        try:
+            attach_id = int(_up_ret)
+        except (TypeError, ValueError):
+            raise ShotGridError(
+                f"sg.upload()가 비정상 값을 반환했습니다: {_up_ret!r}\n"
+                f"version_id={version_id}, file={Path(upload_src).name}"
+            )
+        logger.debug("sg.upload returned attach_id=%d", attach_id)
+
         _overall(0.92)
 
-        # verify upload attached
-        vf: Optional[Dict[str, Any]] = None
-        try:
-            vf = sg.find_one(
+        # ── 검증 2: 즉시 find_one으로 sg_uploaded_movie 확인 ─────
+        vf = sg.find_one(
+            "Version",
+            [["id", "is", int(version_id)]],
+            ["id", "sg_uploaded_movie"],
+        )
+        if vf is None:
+            raise ShotGridError(
+                f"업로드 후 Version #{version_id}을 조회할 수 없습니다.\n"
+                "ShotGrid 연결 상태를 확인하세요."
+            )
+        mov_field = vf.get("sg_uploaded_movie")
+
+        # ── 검증 3: 필드가 비어있으면 2초 대기 후 재확인 ──────────
+        if mov_field is None:
+            logger.info(
+                "sg_uploaded_movie 비어있음 (attach_id=%d) — 2초 대기 후 재확인...",
+                attach_id,
+            )
+            time.sleep(2.0)
+            vf2 = sg.find_one(
                 "Version",
                 [["id", "is", int(version_id)]],
                 ["id", "sg_uploaded_movie"],
             )
-        except Exception as ve:
-            logger.debug("post-upload verify failed: %s", ve)
-        mov_field = (vf or {}).get("sg_uploaded_movie")
-        if vf is not None and mov_field is None:
-            raise ShotGridError(
-                "ShotGrid API가 업로드 성공을 반환했지만, "
-                "Version의 sg_uploaded_movie 필드가 비어 있습니다.\n"
-                "ShotGrid 관리자에게 문의하거나 수동으로 MOV를 재업로드하세요."
-            )
-        logger.debug("upload ok: version_id=%d attach_id=%s", version_id, attach_id)
+            mov_field = (vf2 or {}).get("sg_uploaded_movie")
+            if mov_field is None:
+                raise ShotGridError(
+                    f"ShotGrid API가 업로드 성공을 반환했지만(attach_id={attach_id}), "
+                    "Version의 sg_uploaded_movie 필드가 비어 있습니다.\n"
+                    "ShotGrid 관리자에게 문의하거나 수동으로 MOV를 재업로드하세요."
+                )
+
+        logger.info(
+            "upload verified: version_id=%d attach_id=%d movie=%s",
+            version_id,
+            attach_id,
+            mov_field.get("name", "") if isinstance(mov_field, dict) else mov_field,
+        )
         _overall(1.0)
 
     except Exception as e:

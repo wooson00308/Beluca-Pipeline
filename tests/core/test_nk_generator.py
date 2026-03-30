@@ -11,6 +11,7 @@ from bpe.core.nk_generator import (
     _nk_escape_quotes,
     _patch_read_colorspace,
     _patch_viewer_fps,
+    _patch_write2_from_preset,
     _preset_datatype_string,
     _preset_first_part,
     _replace_knob_in_block,
@@ -150,6 +151,47 @@ class TestPatchViewerFps:
         result = _patch_viewer_fps(body, "30")
         assert "fps 30" in result
         assert "fps 24" not in result
+
+
+class TestPatchWrite2DirnameTcl:
+    """shot_node_template Write2 — file dirname Tcl 식과 _patch_write2_from_preset 호환."""
+
+    def test_preserves_dirname_tcl_not_string_trim(self):
+        _file_knob = (
+            r' file "\[file dirname \[file dirname \[file dirname \[value root.name]]]]'
+            r"/renders/\[file rootname \[file tail \[value root.name]]]/"
+            r'\[file rootname \[file tail \[value root.name]]].%04d.exr"\n'
+        )
+        body = (
+            "Write {\n"
+            + _file_knob
+            + " file_type exr\n"
+            + " autocrop true\n"
+            + ' compression "PIZ Wavelet (32 scanlines)"\n'
+            + ' metadata "all metadata"\n'
+            + " first_part rgba\n"
+            + ' colorspace "ACES - ACES2065-1"\n'
+            + " version 17\n"
+            + ' ocioColorspace "ACES - ACEScg"\n'
+            + " display ACES\n"
+            + " view Rec.709\n"
+            + " name Write2\n"
+            + "}\n"
+        )
+        preset = {
+            "write_compression": "PIZ Wavelet (32 scanlines)",
+            "write_metadata": "all metadata",
+            "write_channels": "all",
+            "write_transform_type": "colorspace",
+            "write_out_colorspace": "ACES - ACES2065-1",
+            "write_output_display": "ACES",
+            "write_output_view": "Rec.709",
+        }
+        new_body, ok = _patch_write2_from_preset(body, preset)
+        assert ok
+        assert "string trim" not in new_body
+        assert r"\[file dirname \[file dirname \[file dirname \[value root.name]]]]" in new_body
+        assert "name Write2" in new_body
 
 
 # ---------------------------------------------------------------------------

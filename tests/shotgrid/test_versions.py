@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from typing import Any
 
 import pytest
 
@@ -67,19 +68,85 @@ class TestUploadMovie:
         sg = MockShotgun()
         sg._add_entity("Version", {"id": 10, "sg_uploaded_movie": None})
 
-        # Create a small temp file
         fd, path = tempfile.mkstemp(suffix=".mov")
         try:
             os.write(fd, b"fake movie data")
             os.close(fd)
 
-            # After upload, mock marks the field
             upload_movie_to_version(sg, 10, path)
 
-            # Verify the mock received the upload
             ver = sg.find_one("Version", [["id", "is", 10]], ["id", "sg_uploaded_movie"])
             assert ver is not None
             assert ver.get("sg_uploaded_movie") is not None
+        finally:
+            if os.path.isfile(path):
+                os.unlink(path)
+
+    def test_upload_returns_none_raises(self) -> None:
+        """sg.upload() returning None must trigger ShotGridError."""
+
+        class _NoneUploadSG(MockShotgun):
+            def upload(self, *args: Any, **kwargs: Any) -> None:
+                return None
+
+        sg = _NoneUploadSG()
+        sg._add_entity("Version", {"id": 20, "sg_uploaded_movie": None})
+
+        fd, path = tempfile.mkstemp(suffix=".mov")
+        try:
+            os.write(fd, b"fake data")
+            os.close(fd)
+            with pytest.raises(ShotGridError, match="None을 반환"):
+                upload_movie_to_version(sg, 20, path)
+        finally:
+            if os.path.isfile(path):
+                os.unlink(path)
+
+    def test_upload_field_empty_after_upload_raises(self) -> None:
+        """sg.upload() returns an id but sg_uploaded_movie stays None."""
+
+        class _NoFieldSG(MockShotgun):
+            def upload(
+                self,
+                entity_type: str,
+                entity_id: int,
+                path: str,
+                field_name: str = "sg_uploaded_movie",
+                **kwargs: Any,
+            ) -> int:
+                return 999
+
+        sg = _NoFieldSG()
+        sg._add_entity("Version", {"id": 30, "sg_uploaded_movie": None})
+
+        fd, path = tempfile.mkstemp(suffix=".mov")
+        try:
+            os.write(fd, b"fake data")
+            os.close(fd)
+            with pytest.raises(ShotGridError, match="sg_uploaded_movie 필드가 비어"):
+                upload_movie_to_version(sg, 30, path)
+        finally:
+            if os.path.isfile(path):
+                os.unlink(path)
+
+    def test_upload_success_with_verification(self) -> None:
+        """Full upload + verification passes when mock sets the field."""
+        sg = MockShotgun()
+        sg._add_entity("Version", {"id": 40, "sg_uploaded_movie": None})
+
+        fd, path = tempfile.mkstemp(suffix=".mov")
+        try:
+            os.write(fd, b"real movie bytes")
+            os.close(fd)
+
+            upload_movie_to_version(sg, 40, path)
+
+            ver = sg.find_one("Version", [["id", "is", 40]], ["id", "sg_uploaded_movie"])
+            assert ver is not None
+            mov = ver.get("sg_uploaded_movie")
+            assert mov is not None
+            assert isinstance(mov, dict)
+            assert "url" in mov
         finally:
             if os.path.isfile(path):
                 os.unlink(path)

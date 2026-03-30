@@ -21,6 +21,7 @@ from bpe.core.nk_finder import (
     find_plate_mov,
     find_server_root_auto,
     find_shot_folder,
+    patch_nk_string_trim_in_place,
 )
 
 # ── _nk_is_junk_file ────────────────────────────────────────────
@@ -502,3 +503,63 @@ class TestFindPlateMov:
         shot_root.mkdir(parents=True)
 
         assert find_plate_mov("E01_S01_013", "PRJ", str(tmp_path)) is None
+
+
+# ── patch_nk_string_trim_in_place ────────────────────────────────
+
+
+_OLD_MOV = (
+    r' file "\[string trim \[value root.name] nuke/\[file tail \[value root.name]]]'
+    r'/renders/\[string trim \[file tail \[value root.name]] .nk].mov"'
+)
+_OLD_EXR = (
+    r' file "\[string trim \[value root.name] nuke/\[file tail \[value root.name]]]'
+    r'/renders/\[string trim \[file tail \[value root.name]] .nk]'
+    r'/\[string trim \[file tail \[value root.name]] .nk].%04d.exr"'
+)
+_NEW_MOV = (
+    r' file "\[file dirname \[file dirname \[file dirname \[value root.name]]]]'
+    r'/renders/\[file rootname \[file tail \[value root.name]]].mov"'
+)
+_NEW_EXR = (
+    r' file "\[file dirname \[file dirname \[file dirname \[value root.name]]]]'
+    r'/renders/\[file rootname \[file tail \[value root.name]]]'
+    r'/\[file rootname \[file tail \[value root.name]]].%04d.exr"'
+)
+
+
+class TestPatchNkStringTrimInPlace:
+    def _make_nk(self, tmp_path: Path, content: str) -> Path:
+        nk = tmp_path / "shot.nk"
+        nk.write_text(content, encoding="utf-8")
+        return nk
+
+    def test_patches_mov_write(self, tmp_path):
+        nk = self._make_nk(tmp_path, f"Write {{\n{_OLD_MOV}\n name eo7Write1\n}}\n")
+        assert patch_nk_string_trim_in_place(nk) is True
+        content = nk.read_text(encoding="utf-8")
+        assert "string trim" not in content
+        assert "file dirname" in content
+
+    def test_patches_exr_write(self, tmp_path):
+        nk = self._make_nk(tmp_path, f"Write {{\n{_OLD_EXR}\n name Write2\n}}\n")
+        assert patch_nk_string_trim_in_place(nk) is True
+        content = nk.read_text(encoding="utf-8")
+        assert "string trim" not in content
+        assert ".%04d.exr" in content
+
+    def test_no_change_when_already_patched(self, tmp_path):
+        nk = self._make_nk(tmp_path, f"Write {{\n{_NEW_MOV}\n name eo7Write1\n}}\n")
+        assert patch_nk_string_trim_in_place(nk) is False
+
+    def test_patches_both_write_nodes(self, tmp_path):
+        content = (
+            f"Write {{\n{_OLD_MOV}\n name eo7Write1\n}}\n"
+            f"Write {{\n{_OLD_EXR}\n name Write2\n}}\n"
+        )
+        nk = self._make_nk(tmp_path, content)
+        assert patch_nk_string_trim_in_place(nk) is True
+        patched = nk.read_text(encoding="utf-8")
+        assert "string trim" not in patched
+        assert ".mov" in patched
+        assert ".%04d.exr" in patched

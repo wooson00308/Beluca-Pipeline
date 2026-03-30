@@ -207,7 +207,7 @@ OCIODisplay {
  disable true
 }
 Write {
- file "\[string trim \[value root.name] nuke/\[file tail \[value root.name]]]/renders/\[string trim \[file tail \[value root.name]] .nk].mov"
+ file "\[file dirname \[file dirname \[file dirname \[value root.name]]]]/renders/\[file rootname \[file tail \[value root.name]]].mov"
  file_type mov
  mov64_format "mov (QuickTime / MOV)"
  mov64_codec appr
@@ -1700,7 +1700,7 @@ Reformat {
  disable true
 }
 Write {
- file "\[string trim \[value root.name] nuke/\[file tail \[value root.name]]]/renders/\[string trim \[file tail \[value root.name]] .nk]/\[string trim \[file tail \[value root.name]] .nk].%04d.exr"
+ file "\[file dirname \[file dirname \[file dirname \[value root.name]]]]/renders/\[file rootname \[file tail \[value root.name]]]/\[file rootname \[file tail \[value root.name]]].%04d.exr"
  file_type exr
  autocrop true
  compression "PIZ Wavelet (32 scanlines)"
