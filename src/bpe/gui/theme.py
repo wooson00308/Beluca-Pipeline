@@ -140,6 +140,38 @@ def build_stylesheet() -> str:
         padding-left: {FORM_LABEL_WIDTH + 12}px;
     }}
 
+    /* My Tasks: 프로젝트·담당자 한 덩어리 필드 */
+    QFrame#filter_field_frame {{
+        background-color: {INPUT_BG};
+        border: 1px solid {BORDER};
+        border-radius: {INPUT_RADIUS}px;
+    }}
+    QLabel#filter_field_chip_label {{
+        background: transparent;
+        color: {TEXT_LABEL};
+        font-size: {FONT_SIZE_SMALL}px;
+        padding: 2px 4px 2px 8px;
+        border: none;
+        min-width: 0;
+        max-width: none;
+    }}
+    QFrame#filter_field_frame QComboBox,
+    QFrame#filter_field_frame QLineEdit {{
+        background-color: transparent;
+        border: none;
+        border-radius: 0;
+        padding: 4px 8px 4px 4px;
+        min-height: {INPUT_HEIGHT - 10}px;
+    }}
+    QFrame#filter_field_frame QComboBox:focus,
+    QFrame#filter_field_frame QLineEdit:focus {{
+        border: none;
+    }}
+    QFrame#filter_field_frame QComboBox::drop-down {{
+        border: none;
+        width: 24px;
+    }}
+
     /* ── Input fields ── */
     QLineEdit {{
         background-color: {INPUT_BG};
@@ -202,6 +234,22 @@ def build_stylesheet() -> str:
         selection-background-color: {ACCENT};
         selection-color: #ffffff;
         padding: 4px;
+    }}
+
+    /* My Tasks: 담당자 자동완성 — 본체는 숨기고 팝업 목록만 표시 */
+    QComboBox#user_autocomplete_combo {{
+        border: none;
+        background: transparent;
+        min-height: 0px;
+        max-height: 0px;
+        padding: 0px;
+        margin: 0px;
+        color: transparent;
+    }}
+    QComboBox#user_autocomplete_combo::drop-down {{
+        width: 0px;
+        height: 0px;
+        border: none;
     }}
 
     /* My Tasks filter: Assigned To — 콤보박스와 동일한 느낌(우측 ▼) */

@@ -21,7 +21,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QFrame,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLayout,
@@ -61,6 +60,8 @@ from bpe.shotgrid.versions import list_versions_for_shot
 logger = get_logger("gui.tabs.my_tasks_tab")
 
 _AUTOCOMPLETE_DELAY = 350
+# 담당자 입력란: 기본 너비 + ~1.5cm @ 96dpi (대략 57px)
+_ASSIGNEE_EDIT_WIDTH = 200 + int(round(96 / 2.54 * 1.5))
 _THUMB_W = 160
 _THUMB_H = 110
 _VERSION_THUMB_W = 56
@@ -116,6 +117,42 @@ _STATUS_COLORS: Dict[str, Tuple[str, str]] = {
     "rev": ("#00AA77", "#FFFFFF"),
     "tm": ("#88CC88", "#111111"),
 }
+
+
+def _format_human_user_display(u: Dict[str, Any]) -> str:
+    """담당자 표시: '이름 로그인 (이메일)' (ShotGrid HumanUser dict)."""
+    name = (u.get("name") or "").strip()
+    login = (u.get("login") or "").strip()
+    email = (u.get("email") or "").strip()
+    if name and login and email:
+        return f"{name} {login} ({email})"
+    if name and login:
+        return f"{name} {login}"
+    if name and email:
+        return f"{name} ({email})"
+    if login and email:
+        return f"{login} ({email})"
+    return name or login or email or ""
+
+
+def _pick_user_for_enter_resolve(
+    users: List[Dict[str, Any]], query: str
+) -> Optional[Dict[str, Any]]:
+    """엔터 확정: 유일 후보이거나 이름/로그인이 검색어와 정확히 일치하는 한 명만 자동 선택."""
+    q = (query or "").strip().lower()
+    if not users:
+        return None
+    if len(users) == 1:
+        return users[0]
+    exact: List[Dict[str, Any]] = []
+    for u in users:
+        name = (u.get("name") or "").strip().lower()
+        login = (u.get("login") or "").strip().lower()
+        if q and (name == q or login == q):
+            exact.append(u)
+    if len(exact) == 1:
+        return exact[0]
+    return None
 
 
 def _status_cell_colors(status_code: str) -> Tuple[str, str]:
@@ -696,6 +733,7 @@ class MyTasksTab(QWidget):
         super().__init__(parent)
         self._projects: List[Dict[str, Any]] = []
         self._user_id: Optional[int] = None
+        self._user_search_seq: int = 0
         self._cards: List[_ShotCard] = []
         self._workers: List[ShotGridWorker] = []
         self._note_widgets: List[QFrame] = []
@@ -750,53 +788,58 @@ class MyTasksTab(QWidget):
         root.addLayout(hdr)
         root.addSpacing(16)
 
-        # ── Filter bar (grid: row0=한 줄 정렬, row1=담당자 ID만 아래) ─────────────
-        filter_grid = QGridLayout()
-        filter_grid.setHorizontalSpacing(12)
-        filter_grid.setVerticalSpacing(4)
-        filter_grid.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
+        # ── Filter bar ────────────────────────────────────────────────────
+        filter_bar = QHBoxLayout()
+        filter_bar.setSpacing(6)
+        filter_bar.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
 
+        _lbl_style = (
+            f"color: {theme.TEXT_LABEL}; font-size: {theme.FONT_SIZE}px; "
+            f"background: transparent; border: none;"
+        )
         proj_label = QLabel("프로젝트")
-        proj_label.setObjectName("form_label")
-        proj_label.setMinimumWidth(50)
-        proj_label.setMaximumWidth(60)
-        filter_grid.addWidget(proj_label, 0, 0, Qt.AlignmentFlag.AlignVCenter)
+        proj_label.setStyleSheet(_lbl_style)
+        filter_bar.addWidget(proj_label, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self._project_combo = QComboBox()
-        self._project_combo.setMinimumWidth(100)
-        self._project_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._project_combo.setFixedWidth(130)
         self._project_combo.addItem("-- 로딩 중 --")
         self._project_combo.currentIndexChanged.connect(self._on_project_combo_changed)
-        filter_grid.addWidget(self._project_combo, 0, 1, Qt.AlignmentFlag.AlignVCenter)
+        filter_bar.addWidget(self._project_combo, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        filter_bar.addSpacing(14)
 
         user_label = QLabel("담당자")
-        user_label.setObjectName("form_label")
-        user_label.setFixedWidth(50)
-        filter_grid.addWidget(user_label, 0, 2, Qt.AlignmentFlag.AlignVCenter)
+        user_label.setStyleSheet(_lbl_style)
+        filter_bar.addWidget(user_label, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self._user_edit = QLineEdit()
-        self._user_edit.setPlaceholderText("이름 입력 후 선택")
-        self._user_edit.setMinimumWidth(200)
-        self._user_edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._user_edit.setPlaceholderText("이름 입력 후 Enter 또는 목록 선택")
+        self._user_edit.setFixedWidth(_ASSIGNEE_EDIT_WIDTH)
         self._user_edit.textChanged.connect(lambda: self._user_timer.start(_AUTOCOMPLETE_DELAY))
-        filter_grid.addWidget(self._user_edit, 0, 3, Qt.AlignmentFlag.AlignVCenter)
+        self._user_edit.returnPressed.connect(self._on_user_search_immediate)
+        filter_bar.addWidget(self._user_edit, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        self._user_info = QLabel("")
+        # user_info: 담당자 입력 아래에 뜨는 플로팅 레이블 (레이아웃 높이 영향 없음)
+        self._user_info = QLabel("", self)
         self._user_info.setObjectName("user_id_badge")
         self._user_info.setVisible(False)
         self._user_info.setStyleSheet(
-            f"color: {theme.SUCCESS}; font-size: 11px; padding: 0; margin: 0;"
+            f"color: {theme.SUCCESS}; font-size: 11px; "
+            f"padding: 0; margin: 0; background: transparent;"
         )
-        filter_grid.addWidget(
-            self._user_info, 1, 3, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
-        )
+        self._user_info.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
-        # 검색 결과: 레이아웃에 넣지 않고 담당자 입력 아래에만 뜨는 드롭다운 (중복 줄 제거)
+        # 검색 결과: 팝업 목록만 보이게 함(닫힌 콤보 한 줄이 잠깐 보이지 않도록 본체 높이 0·투명)
         self._user_combo = QComboBox(self)
+        self._user_combo.setObjectName("user_autocomplete_combo")
         self._user_combo.setVisible(False)
         self._user_combo.setEditable(False)
         self._user_combo.setMaxVisibleItems(12)
+        self._user_combo.setFixedHeight(0)
         self._user_combo.currentIndexChanged.connect(self._on_user_selected)
+
+        filter_bar.addSpacing(14)
 
         self._user_list_btn = QPushButton(f"Assigned To  {chr(0x25BE)}")
         self._user_list_btn.setObjectName("filter_combo_like_btn")
@@ -804,44 +847,20 @@ class MyTasksTab(QWidget):
         self._user_list_btn.setToolTip("프로젝트에 배정된 담당자 목록")
         self._user_list_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._user_list_btn.clicked.connect(self._toggle_user_assignee_popup)
-        filter_grid.addWidget(self._user_list_btn, 0, 4, Qt.AlignmentFlag.AlignVCenter)
+        filter_bar.addWidget(self._user_list_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self._me_btn = QPushButton("My Tasks")
         self._me_btn.setFixedWidth(80)
         self._me_btn.clicked.connect(self._guess_me)
-        filter_grid.addWidget(self._me_btn, 0, 5, Qt.AlignmentFlag.AlignVCenter)
-
-        self._sort_combo = QComboBox()
-        self._sort_combo.addItem("Shot Name", _SORT_MODE_SHOT)
-        self._sort_combo.addItem("Delivery Date", _SORT_MODE_DELIVERY)
-        self._sort_combo.setMinimumWidth(100)
-        self._sort_combo.currentIndexChanged.connect(self._on_sort_combo_changed)
-        filter_grid.addWidget(self._sort_combo, 0, 6, Qt.AlignmentFlag.AlignVCenter)
-
-        self._sort_dir_btn = QPushButton("\u25b2")
-        self._sort_dir_btn.setFixedSize(40, 40)
-        self._sort_dir_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._sort_dir_btn.clicked.connect(self._toggle_sort_direction)
-        self._sort_dir_btn.setStyleSheet(
-            f"QPushButton {{ background-color: {theme.INPUT_BG}; color: {theme.TEXT}; "
-            f"border: 1px solid {theme.BORDER}; border-radius: 4px; "
-            f"font-size: 14px; padding: 0px; min-width: 0; min-height: 0; }}"
-            f"QPushButton:hover {{ background-color: {theme.PANEL_BG}; "
-            f"border-color: {theme.ACCENT}; color: {theme.ACCENT}; }}"
-            f"QPushButton:pressed {{ background-color: {theme.BORDER}; }}"
-        )
-        filter_grid.addWidget(self._sort_dir_btn, 0, 7, Qt.AlignmentFlag.AlignVCenter)
-        self._update_sort_dir_button()
+        filter_bar.addWidget(self._me_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
         refresh_btn = QPushButton("  조회  ")
         refresh_btn.setProperty("primary", True)
         refresh_btn.clicked.connect(self._refresh)
-        filter_grid.addWidget(refresh_btn, 0, 8, Qt.AlignmentFlag.AlignVCenter)
+        filter_bar.addWidget(refresh_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        filter_grid.setColumnStretch(1, 3)
-        filter_grid.setColumnStretch(3, 4)
-        filter_grid.setColumnStretch(9, 1)
-        root.addLayout(filter_grid)
+        filter_bar.addStretch()
+        root.addLayout(filter_bar)
 
         # Loading indicator
         self._loading_label = QLabel("")
@@ -858,6 +877,7 @@ class MyTasksTab(QWidget):
         shot_lay.setContentsMargins(8, 8, 8, 8)
 
         shot_hdr = QHBoxLayout()
+        shot_hdr.setSpacing(8)
         shot_title = QLabel("샷 목록")
         shot_title.setObjectName("log_title")
         shot_hdr.addWidget(shot_title)
@@ -865,6 +885,30 @@ class MyTasksTab(QWidget):
         shot_sub.setObjectName("page_subtitle")
         shot_hdr.addWidget(shot_sub)
         shot_hdr.addStretch()
+        _sort_lbl = QLabel("샷 정렬")
+        _sort_lbl.setObjectName("page_subtitle")
+        shot_hdr.addWidget(_sort_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._sort_combo = QComboBox()
+        self._sort_combo.addItem("Shot Name", _SORT_MODE_SHOT)
+        self._sort_combo.addItem("Delivery Date", _SORT_MODE_DELIVERY)
+        self._sort_combo.setMinimumWidth(100)
+        self._sort_combo.setMaximumWidth(140)
+        self._sort_combo.currentIndexChanged.connect(self._on_sort_combo_changed)
+        shot_hdr.addWidget(self._sort_combo, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._sort_dir_btn = QPushButton("\u25b2")
+        self._sort_dir_btn.setFixedSize(34, 34)
+        self._sort_dir_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._sort_dir_btn.clicked.connect(self._toggle_sort_direction)
+        self._sort_dir_btn.setStyleSheet(
+            f"QPushButton {{ background-color: {theme.INPUT_BG}; color: {theme.TEXT}; "
+            f"border: 1px solid {theme.BORDER}; border-radius: 4px; "
+            f"font-size: 14px; padding: 0px; min-width: 0; min-height: 0; }}"
+            f"QPushButton:hover {{ background-color: {theme.PANEL_BG}; "
+            f"border-color: {theme.ACCENT}; color: {theme.ACCENT}; }}"
+            f"QPushButton:pressed {{ background-color: {theme.BORDER}; }}"
+        )
+        shot_hdr.addWidget(self._sort_dir_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._update_sort_dir_button()
         shot_lay.addLayout(shot_hdr)
 
         self._status_scroll = QScrollArea()
@@ -1013,6 +1057,8 @@ class MyTasksTab(QWidget):
         super().resizeEvent(event)
         if self._user_combo.isVisible():
             self._position_user_results_combo()
+        if self._user_info.isVisible():
+            self._position_user_info()
 
     def _on_spinner_tick(self) -> None:
         if not self._spinner_labels:
@@ -1126,15 +1172,9 @@ class MyTasksTab(QWidget):
     def _on_guess_me_result(self, result: object) -> None:
         user = result  # type: ignore[assignment]
         if not user or not isinstance(user, dict):
-            self._user_info.setText("자동 감지 실패")
-            self._user_info.setVisible(True)
+            self._show_user_id_badge("자동 감지 실패", success=False)
             return
-        self._user_id = user.get("id")
-        name = user.get("name") or user.get("login") or ""
-        self._user_edit.setText(str(name))
-        self._user_edit.setCursorPosition(0)
-        self._user_info.setText(f"✓ #{self._user_id}")
-        self._user_info.setVisible(True)
+        self._apply_user_from_dict(user)
 
     def _position_user_results_combo(self) -> None:
         """담당자 자동완성 콤보를 입력란 바로 아래에만 표시 (필터 줄 중복 위젯 없음)."""
@@ -1144,7 +1184,42 @@ class MyTasksTab(QWidget):
         self._user_combo.move(top_left.x(), top_left.y())
         self._user_combo.raise_()
 
-    def _do_user_search(self) -> None:
+    def _position_user_info(self) -> None:
+        """user_info 플로팅 레이블을 담당자 입력란 바로 아래에 위치시킨다."""
+        if not self._user_info.isVisible():
+            return
+        self._user_info.adjustSize()
+        p = self._user_edit.mapTo(self, QPoint(0, self._user_edit.height() + 2))
+        self._user_info.move(p.x(), p.y())
+        self._user_info.raise_()
+
+    def _show_user_id_badge(self, text: str, *, success: bool = True) -> None:
+        """user_info 레이블 텍스트를 설정하고 담당자 입력란 아래에 표시한다."""
+        self._user_info.setText(text)
+        self._user_info.setVisible(bool(text))
+        color = theme.SUCCESS if success else theme.ERROR
+        self._user_info.setStyleSheet(
+            f"color: {color}; font-size: 11px; padding: 0; margin: 0; background: transparent;"
+        )
+        QTimer.singleShot(0, self._position_user_info)
+
+    def _apply_user_from_dict(self, u: Dict[str, Any]) -> None:
+        uid = u.get("id")
+        if uid is None:
+            return
+        self._user_id = int(uid)
+        self._user_edit.setText(_format_human_user_display(u))
+        self._user_edit.setCursorPosition(0)
+        self._show_user_id_badge(f"✓ #{self._user_id}")
+
+    def _on_user_search_immediate(self) -> None:
+        """엔터 시 디바운스 없이 즉시 검색(아래 빈 콤보 줄 깜빡임 완화에도 도움)."""
+        self._user_timer.stop()
+        self._do_user_search(resolve_on_enter=True)
+
+    def _do_user_search(self, resolve_on_enter: bool = False) -> None:
+        self._user_search_seq += 1
+        seq = self._user_search_seq
         query = self._user_edit.text().strip()
         if len(query) < 2:
             self._user_combo.setVisible(False)
@@ -1155,20 +1230,44 @@ class MyTasksTab(QWidget):
             return search_human_users(sg, query)
 
         w = ShotGridWorker(_search)
-        w.finished.connect(self._on_user_results)
+        w.finished.connect(lambda r: self._on_user_results(r, seq, resolve_on_enter, query))
         w.error.connect(lambda _: None)
         w.start()
         self._workers.append(w)
 
-    def _on_user_results(self, result: object) -> None:
+    def _on_user_results(
+        self,
+        result: object,
+        seq: int,
+        resolve_on_enter: bool,
+        frozen_query: str,
+    ) -> None:
+        if seq != self._user_search_seq:
+            return
         users: List[Dict[str, Any]] = result if isinstance(result, list) else []
         self._user_combo.blockSignals(True)
         self._user_combo.clear()
+        for u in users:
+            label = _format_human_user_display(u)
+            self._user_combo.addItem(label, u)
         self._user_combo.blockSignals(False)
+
+        if resolve_on_enter:
+            if not users:
+                self._user_combo.setVisible(False)
+                self._show_user_id_badge("검색 결과 없음", success=False)
+                return
+            chosen = _pick_user_for_enter_resolve(users, frozen_query)
+            if chosen is not None:
+                self._apply_user_from_dict(chosen)
+                self._user_combo.setVisible(False)
+                self._user_combo.blockSignals(True)
+                self._user_combo.clear()
+                self._user_combo.blockSignals(False)
+                return
+            # 후보가 여러 명이면 목록만 펼침(클릭으로 선택)
+
         if users:
-            for u in users:
-                label = f"{u.get('name', '')} ({u.get('login', '')})"
-                self._user_combo.addItem(label, u.get("id"))
             self._user_combo.setVisible(True)
             self._position_user_results_combo()
             QTimer.singleShot(0, self._position_user_results_combo)
@@ -1179,15 +1278,10 @@ class MyTasksTab(QWidget):
     def _on_user_selected(self, idx: int) -> None:
         if idx < 0:
             return
-        uid = self._user_combo.itemData(idx)
-        if uid is None:
+        u = self._user_combo.itemData(idx)
+        if not isinstance(u, dict):
             return
-        text = self._user_combo.itemText(idx)
-        self._user_id = int(uid)
-        self._user_info.setText(f"✓ #{self._user_id}")
-        self._user_info.setVisible(True)
-        self._user_edit.setText(text)
-        self._user_edit.setCursorPosition(0)
+        self._apply_user_from_dict(u)
         self._user_combo.blockSignals(True)
         self._user_combo.hide()
         self._user_combo.clear()
@@ -1249,9 +1343,9 @@ class MyTasksTab(QWidget):
                 name = (u.get("name") or "").strip()
                 login = (u.get("login") or "").strip()
                 email = (u.get("email") or "").strip()
-                line = f"{name} ({login})" if login else name
-                if email:
-                    line = f"{line} ({email})"
+                line = _format_human_user_display(u)
+                if not line:
+                    line = str(u.get("id", ""))
                 if q and q not in name.lower() and q not in login.lower():
                     if email and q not in email.lower():
                         continue
@@ -1266,21 +1360,9 @@ class MyTasksTab(QWidget):
             u = item.data(Qt.ItemDataRole.UserRole)
             if not isinstance(u, dict):
                 return
-            uid = u.get("id")
-            if uid is None:
+            if u.get("id") is None:
                 return
-            self._user_id = int(uid)
-            name = (u.get("name") or "").strip()
-            login = (u.get("login") or "").strip()
-            if name and login:
-                self._user_edit.setText(f"{name} ({login})")
-            elif name:
-                self._user_edit.setText(name)
-            else:
-                self._user_edit.setText(login or str(uid))
-            self._user_edit.setCursorPosition(0)
-            self._user_info.setText(f"✓ #{self._user_id}")
-            self._user_info.setVisible(True)
+            self._apply_user_from_dict(u)
             popup.hide()
 
         lst.itemClicked.connect(_on_item_clicked)
