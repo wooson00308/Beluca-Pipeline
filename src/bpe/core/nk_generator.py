@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from bpe.core.nk_parser import _get_knob
 from bpe.core.presets import load_preset_template
 
 # Template sample values used for path/name substitution
@@ -472,10 +473,28 @@ def _patch_read_colorspace(body: str, colorspace: str) -> str:
     return result
 
 
+def _write2_inner_is_exr_delivery_target(inner: str) -> bool:
+    """
+    Whether the Write2 block should receive EXR preset patching.
+
+    If ``file_type`` is absent or blank, treat as EXR (stock / legacy templates).
+    Values are parsed like ``nk_parser._get_knob`` (quoted, braced, or bare).
+    """
+    raw = _get_knob(inner, "file_type")
+    if raw is None or not str(raw).strip():
+        return True
+    norm = str(raw).strip().lower()
+    return norm in ("exr", "openexr")
+
+
 def _patch_write2_from_preset(body: str, preset_data: Dict[str, Any]) -> Tuple[str, bool]:
     """
-    Patch the main EXR Write2 node with preset compression/metadata/datatype/
-    channels/OCIO settings.
+    Patch the Write2 node with preset compression/metadata/datatype/channels/OCIO
+    when its ``file_type`` is EXR (or unspecified).
+
+    MOV/MP4/DPX/etc. Write2 blocks are left unchanged so per-preset NK templates
+    are preserved. Skips return ``(body, True)`` so shot build does not show a
+    false \"patch failed\" warning.
 
     Returns ``(new_body, success)``.
     """
@@ -527,6 +546,9 @@ def _patch_write2_from_preset(body: str, preset_data: Dict[str, Any]) -> Tuple[s
 
     if write2 is not None:
         blk_start, blk_end, inner = write2
+
+        if not _write2_inner_is_exr_delivery_target(inner):
+            return body, True
 
         file_m = re.search(r'(?m)^( file (?:"[^"]*"|\{[^}]*\}|\S+))', inner)
         file_line = (file_m.group(1) + "\n") if file_m else " file placeholder.####.exr\n"

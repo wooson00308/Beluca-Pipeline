@@ -22,6 +22,7 @@ from bpe.core.nk_generator import (
     _scan_plate_frame_range,
     _template_sample_path_warnings,
     _to_nk_path,
+    _write2_inner_is_exr_delivery_target,
     generate_nk_content,
     strip_eo7_mov_problem_knobs_from_nk_body,
 )
@@ -199,6 +200,66 @@ class TestPatchWrite2DirnameTcl:
         assert "string trim" not in new_body
         assert r"\[file dirname \[file dirname \[file dirname \[value root.name]]]]" in new_body
         assert "name Write2" in new_body
+
+
+class TestWrite2NonExrPresetPreserved:
+    """MOV (etc.) Write2 must not be rebuilt as EXR — preset NK stays faithful."""
+
+    _preset = {
+        "write_compression": "DWAA (lossy)",
+        "write_metadata": "no metadata",
+        "write_channels": "rgb",
+        "write_transform_type": "colorspace",
+        "write_out_colorspace": "ACES - ACEScg",
+        "write_output_display": "ACES",
+        "write_output_view": "Rec.709",
+    }
+
+    def test_mov_write2_unchanged_returns_ok_true(self):
+        body = (
+            'Write {\n file "X:/proj/renders/foo.mov"\n file_type mov\n'
+            " mov64_codec appr\n name Write2\n}\n"
+        )
+        new_body, ok = _patch_write2_from_preset(body, dict(self._preset))
+        assert ok is True
+        assert new_body == body
+
+    def test_quoted_exr_write2_still_patched(self):
+        body = (
+            'Write {\n file "X:/r/foo.%04d.exr"\n file_type "exr"\n autocrop true\n'
+            ' compression "PIZ Wavelet (32 scanlines)"\n'
+            ' metadata "all metadata"\n first_part rgba\n'
+            ' colorspace "ACES - ACES2065-1"\n version 3\n'
+            ' ocioColorspace "ACES - ACEScg"\n display ACES\n view Rec.709\n name Write2\n}\n'
+        )
+        new_body, ok = _patch_write2_from_preset(body, dict(self._preset))
+        assert ok is True
+        assert 'compression "DWAA (lossy)"' in new_body
+        assert 'metadata "no metadata"' in new_body
+
+    def test_braced_exr_write2_still_patched(self):
+        body = (
+            "Write {\n file X:/r/foo.%04d.exr\n file_type {exr}\n autocrop true\n"
+            ' compression "PIZ Wavelet (32 scanlines)"\n'
+            ' metadata "all metadata"\n first_part rgba\n'
+            ' colorspace "ACES - ACES2065-1"\n version 3\n'
+            ' ocioColorspace "ACES - ACEScg"\n display ACES\n view Rec.709\n name Write2\n}\n'
+        )
+        new_body, ok = _patch_write2_from_preset(body, dict(self._preset))
+        assert ok is True
+        assert 'compression "DWAA (lossy)"' in new_body
+
+
+class TestWrite2InnerIsExrDeliveryTarget:
+    def test_defaults(self):
+        assert _write2_inner_is_exr_delivery_target("") is True
+        assert _write2_inner_is_exr_delivery_target("\n name Write2\n") is True
+
+    def test_mov_not_exr_target(self):
+        assert _write2_inner_is_exr_delivery_target(" file_type mov\n") is False
+
+    def test_openexr_alias(self):
+        assert _write2_inner_is_exr_delivery_target(" file_type openexr\n") is True
 
 
 # ---------------------------------------------------------------------------
