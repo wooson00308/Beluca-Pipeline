@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from bpe.core.logging import get_logger
+from bpe.core.nuke_render_paths import normalize_path_str
 from bpe.core.shot_builder import build_shot_paths
 
 logger = get_logger("nk_finder")
@@ -116,7 +117,7 @@ def _find_server_root_from_drive_roots(
                     continue
                 if year > best_year:
                     best_year = year
-                    best = str(child.resolve())
+                    best = normalize_path_str(child.resolve())
         except OSError:
             continue
 
@@ -436,13 +437,13 @@ def find_shot_folder(shot_name: str, project_code: str, server_root: str) -> Opt
     nuke_dir = shot_root / "comp" / "devl" / "nuke"
     try:
         if nuke_dir.is_dir():
-            return nuke_dir.resolve()
+            return Path(normalize_path_str(nuke_dir.resolve()))
     except OSError:
         pass
     try:
-        return shot_root.resolve()
+        return Path(normalize_path_str(shot_root.resolve()))
     except OSError:
-        return shot_root
+        return Path(normalize_path_str(shot_root))
 
 
 # ---------------------------------------------------------------------------
@@ -461,14 +462,14 @@ def _nk_search_roots_from_shot_root(shot_root: Path) -> List[Path]:
         shot_root / "scripts",
     ):
         try:
-            p = Path(rel).resolve()
+            p = Path(normalize_path_str(Path(rel).resolve()))
             if p.is_dir():
                 roots.append(p)
         except OSError:
             continue
     if not roots:
         try:
-            roots = [shot_root.resolve()]
+            roots = [Path(normalize_path_str(shot_root.resolve()))]
         except OSError:
             pass
     return roots
@@ -558,7 +559,7 @@ def find_latest_nk_path(shot_name: str, project_code: str, server_root: str) -> 
             vmax, mt = -1, 0.0
         return (vmax, mt)
 
-    return max(pool, key=_sort_key)
+    return Path(normalize_path_str(max(pool, key=_sort_key)))
 
 
 # ---------------------------------------------------------------------------
@@ -585,6 +586,88 @@ _NK_DIRNAME_EXR = (
     r"/\[file rootname \[file tail \[value root.name]]].%04d.exr"
 )
 
+# ── 확장자·프레임 패턴 무관 regex (DPX, TIFF, EXR, MOV …) ───────────────
+
+_ST_BASE_ESC = re.escape(r"\[string trim \[value root.name] nuke/\[file tail \[value root.name]]]")
+_ST_TAIL_ESC = re.escape(r"\[string trim \[file tail \[value root.name]] .nk]")
+_FD_BASE_ESC = r"\[file dirname \[file dirname \[file dirname \[value root.name]]]]"
+_FD_TAIL_ESC = r"\[file rootname \[file tail \[value root.name]]]"
+
+_RE_ST_SEQUENCE_ESC = re.compile(
+    _ST_BASE_ESC + r"/renders/" + _ST_TAIL_ESC + r"/" + _ST_TAIL_ESC + r"\.(#+|%\d*d)\.(\w+)"
+)
+_RE_ST_SINGLE_ESC = re.compile(_ST_BASE_ESC + r"/renders/" + _ST_TAIL_ESC + r"\.(\w+)")
+
+
+def _repl_sequence_esc(m: re.Match) -> str:
+    frame_pat, ext = m.group(1), m.group(2)
+    return f"{_FD_BASE_ESC}/renders/{_FD_TAIL_ESC}/{_FD_TAIL_ESC}.{frame_pat}.{ext}"
+
+
+def _repl_single_esc(m: re.Match) -> str:
+    return f"{_FD_BASE_ESC}/renders/{_FD_TAIL_ESC}.{m.group(1)}"
+
+
+def _patch_string_trim_all_extensions(body: str) -> str:
+    """NK 본문에서 ``string trim`` 렌더 식을 ``file dirname`` 식으로 치환한다.
+
+    시퀀스 패턴을 먼저 치환한 뒤 단일 파일 패턴을 치환한다.
+    """
+    body = _RE_ST_SEQUENCE_ESC.sub(_repl_sequence_esc, body)
+    body = _RE_ST_SINGLE_ESC.sub(_repl_single_esc, body)
+    return body
+
+
+# Nuke ``file`` knob ``toScript()`` — 백슬래시 없는 Tcl ``[`` 형태
+
+_ST_BASE_EXPR = re.escape("[string trim [value root.name] nuke/[file tail [value root.name]]]")
+_ST_TAIL_EXPR = re.escape("[string trim [file tail [value root.name]] .nk]")
+_FD_BASE_EXPR = "[file dirname [file dirname [file dirname [value root.name]]]]"
+_FD_TAIL_EXPR = "[file rootname [file tail [value root.name]]]"
+
+_RE_ST_SEQUENCE_EXPR = re.compile(
+    _ST_BASE_EXPR + r"/renders/" + _ST_TAIL_EXPR + r"/" + _ST_TAIL_EXPR + r"\.(#+|%\d*d)\.(\w+)"
+)
+_RE_ST_SINGLE_EXPR = re.compile(_ST_BASE_EXPR + r"/renders/" + _ST_TAIL_EXPR + r"\.(\w+)")
+
+
+def _repl_sequence_expr(m: re.Match) -> str:
+    return f"{_FD_BASE_EXPR}/renders/{_FD_TAIL_EXPR}/{_FD_TAIL_EXPR}.{m.group(1)}.{m.group(2)}"
+
+
+def _repl_single_expr(m: re.Match) -> str:
+    return f"{_FD_BASE_EXPR}/renders/{_FD_TAIL_EXPR}.{m.group(1)}"
+
+
+def patch_string_trim_tcl_source(s: str) -> str:
+    """Nuke Write ``file`` knob Tcl 문자열에서 ``string trim`` 을 ``file dirname`` 으로 치환."""
+    if not s:
+        return s
+    out = _RE_ST_SEQUENCE_EXPR.sub(_repl_sequence_expr, s)
+    out = _RE_ST_SINGLE_EXPR.sub(_repl_single_expr, out)
+    return out
+
+
+def patch_string_trim_file_knob_script(script_text: str) -> str:
+    """``toScript()`` 결과 — 일반 Tcl 형태와 NK 이스케이프(``\\[``) 형태 모두 시도."""
+    if not script_text:
+        return script_text
+    out = patch_string_trim_tcl_source(script_text)
+    if out != script_text:
+        return out
+    if "\\[string trim" in script_text:
+        return _patch_string_trim_all_extensions(script_text)
+    return script_text
+
+
+def patch_string_trim_in_nk_text(body: str) -> str:
+    """NK 전체 텍스트에 레거시 치환 + 확장자 무관 regex 를 적용한다."""
+    patched = body
+    patched = patched.replace(_NK_STRING_TRIM_MOV, _NK_DIRNAME_MOV)
+    patched = patched.replace(_NK_STRING_TRIM_EXR, _NK_DIRNAME_EXR)
+    patched = _patch_string_trim_all_extensions(patched)
+    return patched
+
 
 def patch_nk_string_trim_in_place(path: Path) -> bool:
     """NK 파일의 `string trim` 렌더 경로 식을 `file dirname` 식으로 교체한다.
@@ -601,9 +684,7 @@ def patch_nk_string_trim_in_place(path: Path) -> bool:
         logger.warning("NK 패치: 파일 읽기 실패 %s — %s", path, e)
         return False
 
-    patched = original
-    patched = patched.replace(_NK_STRING_TRIM_MOV, _NK_DIRNAME_MOV)
-    patched = patched.replace(_NK_STRING_TRIM_EXR, _NK_DIRNAME_EXR)
+    patched = patch_string_trim_in_nk_text(original)
 
     if patched == original:
         return False
@@ -632,23 +713,24 @@ def find_latest_nk_and_open(shot_name: str, project_code: str, server_root: str)
 
     patch_nk_string_trim_in_place(path)
 
+    launch = normalize_path_str(path)
     try:
         if sys.platform == "darwin":
-            subprocess.run(["open", str(path)], check=False)
+            subprocess.run(["open", launch], check=False)
         elif sys.platform == "win32":
             exe, extra_args = find_nukex_exe_and_args()
             if exe is not None:
-                subprocess.Popen([str(exe), *extra_args, str(path)], close_fds=True)
+                subprocess.Popen([str(exe), *extra_args, launch], close_fds=True)
             else:
                 logger.warning(
                     "NukeX 실행 파일을 찾지 못해 NK를 열지 않음: %s",
                     path,
                 )
         else:
-            subprocess.run(["xdg-open", str(path)], check=False)
+            subprocess.run(["xdg-open", launch], check=False)
     except Exception:
         logger.warning("NK 파일 열기 실패: %s", path)
-    return path
+    return Path(launch)
 
 
 # ---------------------------------------------------------------------------
@@ -748,7 +830,7 @@ def open_plate_in_rv(shot_name: str, project_code: str, server_root: str) -> boo
         )
         return False
     try:
-        subprocess.Popen([rv_exe, str(mov)], close_fds=True)
+        subprocess.Popen([rv_exe, normalize_path_str(mov)], close_fds=True)
     except OSError as e:
         logger.warning("RV 실행 실패: %s", e)
         return False
@@ -843,7 +925,7 @@ def open_comp_render_in_rv(
         )
         return False
     try:
-        subprocess.Popen([rv_exe, str(mov)], close_fds=True)
+        subprocess.Popen([rv_exe, normalize_path_str(mov)], close_fds=True)
     except OSError as e:
         logger.warning("RV 실행 실패: %s", e)
         return False

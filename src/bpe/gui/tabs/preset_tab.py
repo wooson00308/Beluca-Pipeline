@@ -1,15 +1,15 @@
-"""Preset Manager tab — project settings form + preset list."""
+"""Preset Manager tab — 4-zone layout: preset list, node tree, NK analysis, create."""
 
 from __future__ import annotations
 
 import os
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
-    QComboBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -17,67 +17,70 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
     QSplitter,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from bpe.core.cache import load_colorspaces_cache, load_datatypes_cache, load_nuke_formats_cache
-from bpe.core.nk_parser import parse_nk_for_preset
-from bpe.core.presets import delete_preset, load_presets, upsert_preset
+from bpe.core.nk_parser import (
+    merge_nodetree_content,
+    merge_parsed_into_preset,
+    parse_nk_file,
+)
+from bpe.core.nuke_render_paths import normalize_path_str
+from bpe.core.presets import (
+    delete_preset,
+    get_preset_template_path,
+    load_preset_template,
+    load_presets,
+    save_preset_template,
+    upsert_preset,
+)
+from bpe.core.settings import get_presets_dir, set_presets_dir
 from bpe.gui import theme
-from bpe.gui.widgets.search_combo import SearchComboBox
+from bpe.gui.widgets.drop_zone import DropZone
+from bpe.gui.widgets.preset_review_dialog import PresetDetailPanel
 
 
-def _form_row(label_text: str, widget: QWidget) -> QHBoxLayout:
-    row = QHBoxLayout()
-    row.setSpacing(12)
-    lbl = QLabel(label_text)
-    lbl.setObjectName("form_label")
-    lbl.setFixedWidth(theme.FORM_LABEL_WIDTH)
-    lbl.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-    row.addWidget(lbl)
-    row.addWidget(widget, 1)
-    return row
-
-
-def _section_label(text: str) -> QLabel:
-    lbl = QLabel(text)
-    lbl.setStyleSheet(
-        f"color: {theme.TEXT}; font-size: 14px; font-weight: 600; "
-        f"padding-top: 8px; padding-bottom: 2px;"
-    )
-    return lbl
+def _truncate_path(path: str, max_len: int = 48) -> str:
+    if len(path) <= max_len:
+        return path
+    return "…" + path[-(max_len - 1) :]
 
 
 class PresetTab(QWidget):
-    """Preset Manager — left form + right preset list."""
+    """Preset Manager — green: list, yellow: node tree, blue: detail, red: create."""
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
-        self._inputs: Dict[str, Any] = {}
+        self._nk_last_dir: str = ""
+        self._nk_merged: Optional[Dict[str, Any]] = None
+        self._nk_parsed_raw: Optional[Dict[str, Any]] = None
+        self._nk_node_stats: Optional[Dict[str, Any]] = None
+        self._nk_raw_content: Optional[str] = None
+        self._nk_source_path: str = ""
+        self._preset_detail_panel: Optional[PresetDetailPanel] = None
         self._build_ui()
         self._refresh_preset_list()
-
-    # ------------------------------------------------------------------
-    # UI construction
-    # ------------------------------------------------------------------
+        self._update_presets_dir_label()
+        self._sync_selection_state()
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # Page header
         hdr = QHBoxLayout()
         hdr.setContentsMargins(theme.CONTENT_MARGIN, 24, theme.CONTENT_MARGIN, 0)
         hdr.setSpacing(12)
         title = QLabel("Preset Manager")
         title.setObjectName("page_title")
-        subtitle = QLabel("프리셋 저장 · 로드 · NK 설정 관리")
+        subtitle = QLabel("NK 드래그앤드롭으로 프리셋 생성 · 관리")
         subtitle.setObjectName("page_subtitle")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignBottom)
         hdr.addWidget(title)
@@ -85,240 +88,324 @@ class PresetTab(QWidget):
         hdr.addStretch()
         root.addLayout(hdr)
 
-        # Splitter: form | preset list
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setContentsMargins(
+        main_split = QSplitter(Qt.Orientation.Horizontal)
+        main_split.setContentsMargins(
             theme.CONTENT_MARGIN, 16, theme.CONTENT_MARGIN, theme.CONTENT_MARGIN
         )
+        main_split.addWidget(self._build_left_split())
+        main_split.addWidget(self._build_right_column())
+        main_split.setStretchFactor(0, 2)
+        main_split.setStretchFactor(1, 3)
 
-        splitter.addWidget(self._build_form_column())
-        splitter.addWidget(self._build_list_column())
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
+        root.addWidget(main_split, 1)
 
-        root.addWidget(splitter, 1)
+    def _build_left_split(self) -> QWidget:
+        wrap = QWidget()
+        outer = QVBoxLayout(wrap)
+        outer.setContentsMargins(0, 0, 12, 0)
+        outer.setSpacing(0)
 
-    # --- left column: form ---
+        v_split = QSplitter(Qt.Orientation.Vertical)
+        v_split.addWidget(self._build_green_zone())
+        v_split.addWidget(self._build_yellow_zone())
+        v_split.setStretchFactor(0, 1)
+        v_split.setStretchFactor(1, 2)
+        v_split.setSizes([220, 320])
 
-    def _build_form_column(self) -> QWidget:
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(scroll.Shape.NoFrame)
+        outer.addWidget(v_split, 1)
+        return wrap
 
-        container = QWidget()
-        layout = QVBoxLayout(container)
-        layout.setContentsMargins(0, 0, 12, 8)
-        layout.setSpacing(theme.FORM_SPACING)
-
-        # -- 프로젝트 정보 --
-        layout.addWidget(_section_label("프로젝트 정보"))
-
-        self._inputs["project_type"] = QComboBox()
-        self._inputs["project_type"].addItems(["드라마(OTT)", "영화", "광고", "기타"])
-        layout.addLayout(_form_row("프로젝트 타입", self._inputs["project_type"]))
-
-        self._inputs["project_code"] = QLineEdit()
-        self._inputs["project_code"].setPlaceholderText("예: BLC_2026")
-        layout.addLayout(_form_row("프로젝트 코드", self._inputs["project_code"]))
-
-        self._inputs["fps"] = QComboBox()
-        self._inputs["fps"].addItems(["23.976", "24", "25", "29.97", "30"])
-        layout.addLayout(_form_row("FPS", self._inputs["fps"]))
-
-        self._inputs["plate_width"] = QLineEdit()
-        self._inputs["plate_width"].setPlaceholderText("예: 4096")
-        self._inputs["plate_height"] = QLineEdit()
-        self._inputs["plate_height"].setPlaceholderText("예: 2160")
-        res_row = QHBoxLayout()
-        res_row.setSpacing(8)
-        res_row.addWidget(self._inputs["plate_width"], 1)
-        x_lbl = QLabel("x")
-        x_lbl.setFixedWidth(12)
-        x_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        res_row.addWidget(x_lbl)
-        res_row.addWidget(self._inputs["plate_height"], 1)
-        res_container = QWidget()
-        res_container.setLayout(res_row)
-        res_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        layout.addLayout(_form_row("플레이트 해상도", res_container))
-
-        # -- OCIO --
-        layout.addWidget(_section_label("OCIO"))
-
-        ocio_row = QHBoxLayout()
-        ocio_row.setSpacing(8)
-        self._inputs["ocio_path"] = QLineEdit()
-        self._inputs["ocio_path"].setPlaceholderText("OCIO config 경로")
-        browse_btn = QPushButton("찾아보기")
-        browse_btn.setFixedWidth(100)
-        browse_btn.clicked.connect(self._browse_ocio)
-        ocio_row.addWidget(self._inputs["ocio_path"], 1)
-        ocio_row.addWidget(browse_btn)
-        ocio_container = QWidget()
-        ocio_container.setLayout(ocio_row)
-        ocio_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        layout.addLayout(_form_row("Config 경로", ocio_container))
-
-        # -- Read --
-        layout.addWidget(_section_label("Read"))
-
-        self._inputs["read_input_transform"] = SearchComboBox()
-        colorspaces = load_colorspaces_cache()
-        if colorspaces:
-            self._inputs["read_input_transform"].set_items(colorspaces)
-        layout.addLayout(_form_row("Input Transform", self._inputs["read_input_transform"]))
-
-        # -- Write --
-        layout.addWidget(_section_label("Write"))
-
-        formats = load_nuke_formats_cache()
-        datatypes = load_datatypes_cache()
-
-        self._inputs["delivery_format"] = QComboBox()
-        if isinstance(formats, dict):
-            self._inputs["delivery_format"].addItems(list(formats.keys()))
-        layout.addLayout(_form_row("납품 포맷", self._inputs["delivery_format"]))
-
-        self._inputs["write_channels"] = QComboBox()
-        self._inputs["write_channels"].addItems(["rgb", "rgba", "all"])
-        layout.addLayout(_form_row("Channels", self._inputs["write_channels"]))
-
-        self._inputs["write_datatype"] = QComboBox()
-        if datatypes:
-            self._inputs["write_datatype"].addItems(datatypes)
-        layout.addLayout(_form_row("Datatype", self._inputs["write_datatype"]))
-
-        self._inputs["write_compression"] = QComboBox()
-        self._inputs["write_compression"].addItems(
-            ["none", "Zip (1 scanline)", "Zip (16 scanlines)", "PIZ", "DWAA", "DWAB"]
-        )
-        layout.addLayout(_form_row("Compression", self._inputs["write_compression"]))
-
-        self._inputs["write_metadata"] = QComboBox()
-        self._inputs["write_metadata"].addItems(["no metadata", "default metadata", "all metadata"])
-        layout.addLayout(_form_row("Metadata", self._inputs["write_metadata"]))
-
-        self._inputs["write_transform_type"] = QComboBox()
-        self._inputs["write_transform_type"].addItems(["Colorspace", "Display/View"])
-        layout.addLayout(_form_row("Transform Type", self._inputs["write_transform_type"]))
-
-        colorspaces_w = load_colorspaces_cache()
-
-        self._inputs["write_out_colorspace"] = SearchComboBox()
-        if colorspaces_w:
-            self._inputs["write_out_colorspace"].set_items(colorspaces_w)
-        layout.addLayout(_form_row("Output Colorspace", self._inputs["write_out_colorspace"]))
-
-        self._inputs["write_output_display"] = QComboBox()
-        layout.addLayout(_form_row("Output Display", self._inputs["write_output_display"]))
-
-        self._inputs["write_output_view"] = QComboBox()
-        layout.addLayout(_form_row("Output View", self._inputs["write_output_view"]))
-
-        layout.addStretch()
-
-        scroll.setWidget(container)
-        return scroll
-
-    # --- right column: preset list ---
-
-    def _build_list_column(self) -> QWidget:
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(scroll.Shape.NoFrame)
-
+    def _build_green_zone(self) -> QWidget:
         col = QWidget()
+        col.setMinimumHeight(160)
         layout = QVBoxLayout(col)
-        layout.setContentsMargins(12, 0, 0, 8)
-        layout.setSpacing(12)
+        layout.setContentsMargins(0, 0, 0, 8)
+        layout.setSpacing(8)
 
         lbl = QLabel("저장된 프리셋")
         lbl.setStyleSheet(f"color: {theme.TEXT}; font-size: 14px; font-weight: 600;")
         layout.addWidget(lbl)
 
+        dir_row = QHBoxLayout()
+        dir_row.setSpacing(8)
+        self._presets_dir_lbl = QLabel("")
+        self._presets_dir_lbl.setWordWrap(True)
+        self._presets_dir_lbl.setStyleSheet(
+            f"color: {theme.TEXT_DIM}; font-size: {theme.FONT_SIZE_SMALL}px;"
+        )
+        ch_dir_btn = QPushButton("변경")
+        ch_dir_btn.setFixedWidth(72)
+        ch_dir_btn.clicked.connect(self._browse_presets_dir)
+        dir_row.addWidget(self._presets_dir_lbl, 1)
+        dir_row.addWidget(ch_dir_btn)
+        layout.addLayout(dir_row)
+
         self._preset_list = QListWidget()
         self._preset_list.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._preset_list.setStyleSheet(
+            f"QListWidget::item {{ min-height: 34px; padding: 6px 8px; "
+            f"font-size: {theme.FONT_SIZE_SMALL + 1}px; }}"
+        )
+        self._preset_list.currentItemChanged.connect(self._on_preset_list_changed)
         layout.addWidget(self._preset_list, 1)
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
-        load_btn = QPushButton("불러오기")
-        load_btn.clicked.connect(self._load_selected)
-        del_btn = QPushButton("삭제")
-        del_btn.clicked.connect(self._delete_selected)
-        save_btn = QPushButton("저장")
-        save_btn.setProperty("primary", True)
-        save_btn.clicked.connect(self._save_preset)
-        btn_row.addWidget(load_btn)
-        btn_row.addWidget(del_btn)
+        self._analyze_btn = QPushButton("세부 설정 보기")
+        self._analyze_btn.setToolTip(
+            "선택한 프리셋의 세부 세팅(FPS, OCIO, Write 등)을 오른쪽 패널에 표시합니다"
+        )
+        self._analyze_btn.clicked.connect(self._show_selected_preset_detail)
+        self._delete_btn = QPushButton("삭제")
+        self._delete_btn.clicked.connect(self._delete_selected)
         btn_row.addStretch()
-        btn_row.addWidget(save_btn)
+        btn_row.addWidget(self._analyze_btn)
+        btn_row.addWidget(self._delete_btn)
         layout.addLayout(btn_row)
 
-        # NK Import section
-        self._build_nk_import_section(layout)
-
-        layout.addStretch()
-
-        scroll.setWidget(col)
-        return scroll
-
-    # ------------------------------------------------------------------
-    # Actions
-    # ------------------------------------------------------------------
-
-    def _browse_ocio(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "OCIO Config 선택", "", "OCIO Config (*.ocio);;All Files (*)"
+        analyze_hint = QLabel("선택한 프리셋의 세부 세팅 내용을 확인하려면 위 버튼을 누르세요.")
+        analyze_hint.setWordWrap(True)
+        analyze_hint.setStyleSheet(
+            f"color: {theme.TEXT_DIM}; font-size: {theme.FONT_SIZE_SMALL}px;"
         )
+        layout.addWidget(analyze_hint)
+
+        return col
+
+    def _build_yellow_zone(self) -> QWidget:
+        box = QWidget()
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(0, 8, 0, 0)
+        lay.setSpacing(8)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet(f"color: {theme.BORDER};")
+        lay.addWidget(sep)
+
+        ttl = QLabel("노드트리 수정")
+        ttl.setStyleSheet(f"color: {theme.TEXT}; font-size: 14px; font-weight: 600;")
+        lay.addWidget(ttl)
+
+        hint = QLabel(".txt / .nk 파일을 드래그하거나, 아래 칸에 포커스 후 Ctrl+V로 붙여넣으세요.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: {theme.FONT_SIZE_SMALL}px;")
+        lay.addWidget(hint)
+
+        self._nt_drop = DropZone(
+            placeholder=".txt / .nk 파일을 여기에 드래그",
+            allowed_extensions=[".txt", ".nk"],
+        )
+        self._nt_drop.file_dropped.connect(self._on_nt_file_dropped)
+        self._nt_drop.paste_text.connect(self._on_nt_paste)
+        lay.addWidget(self._nt_drop)
+
+        self._nt_edit = QPlainTextEdit()
+        self._nt_edit.setObjectName("log_area")
+        self._nt_edit.setPlaceholderText("Nuke 노드 창에서 복사한 텍스트를 붙여넣으세요…")
+        self._nt_edit.setMinimumHeight(120)
+        lay.addWidget(self._nt_edit, 1)
+
+        nt_row = QHBoxLayout()
+        clear_btn = QPushButton("지우기")
+        clear_btn.clicked.connect(self._nt_edit.clear)
+        self._nt_apply_btn = QPushButton("노드트리 수정하기")
+        self._nt_apply_btn.setProperty("primary", True)
+        self._nt_apply_btn.clicked.connect(self._on_apply_nodetree)
+        nt_row.addWidget(clear_btn)
+        nt_row.addStretch()
+        nt_row.addWidget(self._nt_apply_btn)
+        lay.addLayout(nt_row)
+
+        self._nt_status = QLabel("")
+        self._nt_status.setWordWrap(True)
+        self._nt_status.setObjectName("status_msg")
+        self._nt_status.setStyleSheet(
+            f"color: {theme.TEXT_DIM}; font-size: {theme.FONT_SIZE_SMALL}px;"
+        )
+        lay.addWidget(self._nt_status)
+
+        self._yellow_frame = box
+        return box
+
+    def _build_right_column(self) -> QWidget:
+        col = QWidget()
+        layout = QVBoxLayout(col)
+        layout.setContentsMargins(12, 0, 0, 8)
+        layout.setSpacing(10)
+
+        self._right_stack = QStackedWidget()
+        self._right_stack.addWidget(self._build_nk_import_page())
+        self._right_stack.addWidget(self._build_preset_view_page())
+        layout.addWidget(self._right_stack, 1)
+
+        red = QFrame()
+        red.setProperty("class", "card")
+        red_lay = QVBoxLayout(red)
+        red_lay.setSpacing(6)
+
+        name_row = QHBoxLayout()
+        name_row.addWidget(QLabel("프리셋 이름"))
+        self._preset_name_edit = QLineEdit()
+        self._preset_name_edit.setPlaceholderText("예) SBS_030")
+        self._preset_name_edit.textChanged.connect(self._on_name_changed)
+        name_row.addWidget(self._preset_name_edit, 1)
+        red_lay.addLayout(name_row)
+
+        self._hint_lbl = QLabel("영문·숫자·_ 만 사용 (저장 시 대문자로 통일)")
+        self._hint_lbl.setStyleSheet(
+            f"color: {theme.TEXT_DIM}; font-size: {theme.FONT_SIZE_SMALL}px;"
+        )
+        red_lay.addWidget(self._hint_lbl)
+
+        self._dup_lbl = QLabel("")
+        self._dup_lbl.setWordWrap(True)
+        self._dup_lbl.setVisible(False)
+        self._dup_lbl.setStyleSheet(f"color: #ffb74d; font-size: {theme.FONT_SIZE_SMALL}px;")
+        red_lay.addWidget(self._dup_lbl)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        self._cancel_create_btn = QPushButton("취소")
+        self._cancel_create_btn.clicked.connect(self._on_cancel_create_flow)
+        self._create_preset_btn = QPushButton("프리셋 생성")
+        self._create_preset_btn.setProperty("primary", True)
+        self._create_preset_btn.clicked.connect(self._on_create_preset)
+        self._create_preset_btn.setEnabled(False)
+        btn_row.addWidget(self._cancel_create_btn)
+        btn_row.addWidget(self._create_preset_btn)
+        red_lay.addLayout(btn_row)
+
+        layout.addWidget(red)
+        self._on_name_changed()
+        return col
+
+    def _build_nk_import_page(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setSpacing(10)
+
+        lbl = QLabel("NK 파일에서 가져오기")
+        lbl.setStyleSheet(f"color: {theme.TEXT}; font-size: 14px; font-weight: 600;")
+        lay.addWidget(lbl)
+
+        self._nk_drop_zone = DropZone(
+            placeholder=".nk 파일을 드래그하거나 아래에서 선택하세요",
+            allowed_extensions=[".nk"],
+        )
+        self._nk_drop_zone.file_dropped.connect(self._on_nk_dropped)
+        lay.addWidget(self._nk_drop_zone)
+
+        nk_row = QHBoxLayout()
+        nk_row.setSpacing(8)
+        self._nk_path_edit = QLineEdit()
+        self._nk_path_edit.setPlaceholderText("NK 파일 경로를 입력하거나 찾아보기...")
+        nk_browse_btn = QPushButton("찾아보기")
+        nk_browse_btn.setFixedWidth(100)
+        nk_browse_btn.clicked.connect(self._browse_nk_import)
+        nk_row.addWidget(self._nk_path_edit, 1)
+        nk_row.addWidget(nk_browse_btn)
+        lay.addLayout(nk_row)
+
+        nk_analyze_btn = QPushButton("NK 분석하기")
+        nk_analyze_btn.setProperty("primary", True)
+        nk_analyze_btn.clicked.connect(self._analyze_nk)
+        lay.addWidget(nk_analyze_btn)
+
+        self._nk_feedback_lbl = QLabel("")
+        self._nk_feedback_lbl.setWordWrap(True)
+        self._nk_feedback_lbl.setStyleSheet(
+            f"color: {theme.TEXT_DIM}; font-size: {theme.FONT_SIZE_SMALL}px;"
+        )
+        lay.addWidget(self._nk_feedback_lbl)
+
+        self._nk_result_container = QWidget()
+        self._nk_result_layout = QVBoxLayout(self._nk_result_container)
+        self._nk_result_layout.setContentsMargins(0, 0, 0, 0)
+        self._nk_placeholder_text = "NK 분석하기를 누르면 여기에 분석 결과가 표시됩니다."
+        self._nk_placeholder = self._make_dim_placeholder(self._nk_placeholder_text)
+        self._nk_result_layout.addWidget(self._nk_placeholder)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setWidget(self._nk_result_container)
+        lay.addWidget(scroll, 1)
+
+        return page
+
+    def _build_preset_view_page(self) -> QWidget:
+        page = QWidget()
+        lay = QVBoxLayout(page)
+        lay.setSpacing(8)
+
+        top = QHBoxLayout()
+        back_btn = QPushButton("← NK 임포트")
+        back_btn.clicked.connect(self._go_nk_import_page)
+        open_tpl_btn = QPushButton("템플릿 파일 열기")
+        open_tpl_btn.clicked.connect(self._open_preset_template_file)
+        top.addWidget(back_btn)
+        top.addStretch()
+        top.addWidget(open_tpl_btn)
+        lay.addLayout(top)
+
+        self._preset_view_host = QWidget()
+        self._preset_view_layout = QVBoxLayout(self._preset_view_host)
+        self._preset_view_layout.setContentsMargins(0, 0, 0, 0)
+        ph = QLabel("저장된 프리셋을 선택한 뒤 왼쪽에서 분석하기를 누르세요.")
+        ph.setWordWrap(True)
+        ph.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: {theme.FONT_SIZE_SMALL}px;")
+        self._preset_view_layout.addWidget(ph)
+        self._preset_view_placeholder = ph
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setWidget(self._preset_view_host)
+        lay.addWidget(scroll, 1)
+
+        return page
+
+    def _go_nk_import_page(self) -> None:
+        self._right_stack.setCurrentIndex(0)
+
+    def _make_dim_placeholder(self, text: str) -> QLabel:
+        ph = QLabel(text)
+        ph.setWordWrap(True)
+        ph.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: {theme.FONT_SIZE_SMALL}px;")
+        return ph
+
+    def _set_nk_result_widget(self, widget: Optional[QWidget]) -> None:
+        while self._nk_result_layout.count():
+            item = self._nk_result_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        if widget is None:
+            self._nk_placeholder = self._make_dim_placeholder(self._nk_placeholder_text)
+            self._nk_result_layout.addWidget(self._nk_placeholder)
+        else:
+            self._nk_result_layout.addWidget(widget, 1)
+
+    def _update_presets_dir_label(self) -> None:
+        p = normalize_path_str(get_presets_dir())
+        self._presets_dir_lbl.setText(f"저장 위치: {_truncate_path(p, 52)}")
+        self._presets_dir_lbl.setToolTip(p)
+
+    def _browse_presets_dir(self) -> None:
+        cur = str(get_presets_dir())
+        path = QFileDialog.getExistingDirectory(self, "프리셋 저장 폴더 선택", cur)
         if path:
-            self._inputs["ocio_path"].setText(path)
+            set_presets_dir(path)
+            self._update_presets_dir_label()
+            self._refresh_preset_list()
+            self._on_preset_list_changed()
 
     def _refresh_preset_list(self) -> None:
         self._preset_list.clear()
         presets = load_presets()
         for name in sorted(presets.keys()):
             self._preset_list.addItem(name)
-
-    def _collect_form(self) -> Dict[str, Any]:
-        data: Dict[str, Any] = {}
-        for key, widget in self._inputs.items():
-            if isinstance(widget, (QComboBox, SearchComboBox)):
-                data[key] = widget.currentText()
-            elif isinstance(widget, QLineEdit):
-                data[key] = widget.text()
-        return data
-
-    def _apply_form(self, data: Dict[str, Any]) -> None:
-        for key, value in data.items():
-            widget = self._inputs.get(key)
-            if widget is None:
-                continue
-            if isinstance(widget, SearchComboBox):
-                widget.set_current(str(value))
-            elif isinstance(widget, QComboBox):
-                idx = widget.findText(str(value))
-                if idx >= 0:
-                    widget.setCurrentIndex(idx)
-            elif isinstance(widget, QLineEdit):
-                widget.setText(str(value))
-
-    def _save_preset(self) -> None:
-        code = self._inputs["project_code"].text().strip()
-        if not code:
-            QMessageBox.warning(self, "저장 실패", "프로젝트 코드를 입력하세요.")
-            return
-        upsert_preset(code, self._collect_form())
-        self._refresh_preset_list()
-
-    def _load_selected(self) -> None:
-        item = self._preset_list.currentItem()
-        if item is None:
-            return
-        presets = load_presets()
-        data = presets.get(item.text())
-        if isinstance(data, dict):
-            self._apply_form(data)
 
     def _delete_selected(self) -> None:
         item = self._preset_list.currentItem()
@@ -334,132 +421,151 @@ class PresetTab(QWidget):
         if reply == QMessageBox.StandardButton.Yes:
             delete_preset(name)
             self._refresh_preset_list()
+            self._clear_preset_view_page()
 
-    # ------------------------------------------------------------------
-    # NK Import
-    # ------------------------------------------------------------------
+    def _on_preset_list_changed(self) -> None:
+        self._sync_selection_state()
 
-    def _build_nk_import_section(self, parent_layout: QVBoxLayout) -> None:
-        """Build the NK Import UI block inside the right column."""
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet(f"color: {theme.BORDER};")
-        parent_layout.addWidget(sep)
+    def _sync_selection_state(self) -> None:
+        item = self._preset_list.currentItem()
+        has_sel = item is not None
+        self._analyze_btn.setEnabled(has_sel)
+        self._delete_btn.setEnabled(has_sel)
+        self._yellow_frame.setEnabled(has_sel)
+        if not has_sel:
+            self._nt_status.setText("")
 
-        lbl = QLabel("NK 파일에서 가져오기")
-        lbl.setStyleSheet(f"color: {theme.TEXT}; font-size: 14px; font-weight: 600;")
-        parent_layout.addWidget(lbl)
+    def _show_selected_preset_detail(self) -> None:
+        item = self._preset_list.currentItem()
+        if item is None:
+            return
+        name = item.text()
+        presets = load_presets()
+        data = presets.get(name)
+        if not isinstance(data, dict):
+            QMessageBox.warning(self, "오류", "프리셋 데이터를 읽을 수 없습니다.")
+            return
+        node_stats: Dict[str, Any] = {}
+        tpl = get_preset_template_path(name)
+        if tpl.exists():
+            try:
+                p = parse_nk_file(str(tpl))
+                node_stats = p.pop("_node_stats", {})
+            except ValueError:
+                pass
 
-        # File path row
-        nk_row = QHBoxLayout()
-        nk_row.setSpacing(8)
-        self._nk_path_edit = QLineEdit()
-        self._nk_path_edit.setPlaceholderText("NK 파일 경로를 입력하거나 찾아보기...")
-        nk_browse_btn = QPushButton("찾아보기")
-        nk_browse_btn.setFixedWidth(100)
-        nk_browse_btn.clicked.connect(self._browse_nk_import)
-        nk_row.addWidget(self._nk_path_edit, 1)
-        nk_row.addWidget(nk_browse_btn)
-        parent_layout.addLayout(nk_row)
+        while self._preset_view_layout.count():
+            it = self._preset_view_layout.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.deleteLater()
 
-        nk_analyze_btn = QPushButton("NK 분석하기")
-        nk_analyze_btn.setProperty("primary", True)
-        nk_analyze_btn.clicked.connect(self._analyze_nk)
-        parent_layout.addWidget(nk_analyze_btn)
+        panel = PresetDetailPanel(
+            mode="preset_view",
+            merged=data,
+            parsed_raw=data,
+            node_stats=node_stats,
+            preset_name=name,
+            parent=self._preset_view_host,
+        )
+        self._preset_view_layout.addWidget(panel, 1)
+        self._preset_detail_panel = panel
+        self._right_stack.setCurrentIndex(1)
 
-        # Feedback label
-        self._nk_feedback_lbl = QLabel("")
-        self._nk_feedback_lbl.setWordWrap(True)
-        self._nk_feedback_lbl.setStyleSheet(
+    def _clear_preset_view_page(self) -> None:
+        while self._preset_view_layout.count():
+            it = self._preset_view_layout.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.deleteLater()
+        ph = QLabel("저장된 프리셋을 선택한 뒤 왼쪽에서 분석하기를 누르세요.")
+        ph.setWordWrap(True)
+        ph.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: {theme.FONT_SIZE_SMALL}px;")
+        self._preset_view_layout.addWidget(ph)
+        self._preset_view_placeholder = ph
+        self._preset_detail_panel = None
+
+    def _open_preset_template_file(self) -> None:
+        item = self._preset_list.currentItem()
+        if item is None:
+            return
+        name = item.text()
+        tpl_path = get_preset_template_path(name)
+        if not tpl_path.exists():
+            QMessageBox.warning(
+                self,
+                "템플릿 없음",
+                f"'{name}' 프리셋에 저장된 NK 템플릿이 없습니다.\n"
+                "NK 임포트로 프리셋을 만들면 템플릿이 생성됩니다.",
+            )
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(normalize_path_str(tpl_path.resolve())))
+
+    def _on_nt_file_dropped(self, path: str) -> None:
+        try:
+            text = Path(path).read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            self._nt_status.setText(f"읽기 실패: {e}")
+            self._nt_status.setStyleSheet(
+                f"color: {theme.ERROR}; font-size: {theme.FONT_SIZE_SMALL}px;"
+            )
+            return
+        self._nt_edit.setPlainText(text)
+        self._nt_status.setText("파일 내용을 편집 영역에 불러왔습니다.")
+        self._nt_status.setStyleSheet(
             f"color: {theme.TEXT_DIM}; font-size: {theme.FONT_SIZE_SMALL}px;"
         )
-        parent_layout.addWidget(self._nk_feedback_lbl)
 
-        # Review panel (hidden initially)
-        self._nk_review_widget = QWidget()
-        self._nk_review_widget.setVisible(False)
-        review_layout = QVBoxLayout(self._nk_review_widget)
-        review_layout.setContentsMargins(0, 0, 0, 0)
-        review_layout.setSpacing(8)
-
-        review_title = QLabel("NK 분석 결과")
-        review_title.setStyleSheet(f"color: {theme.ACCENT}; font-size: 14px; font-weight: 600;")
-        review_layout.addWidget(review_title)
-
-        self._nk_review_file_lbl = QLabel("")
-        self._nk_review_file_lbl.setStyleSheet(
+    def _on_nt_paste(self, text: str) -> None:
+        self._nt_edit.setPlainText(text)
+        self._nt_status.setText("클립보드 내용을 붙여넣었습니다.")
+        self._nt_status.setStyleSheet(
             f"color: {theme.TEXT_DIM}; font-size: {theme.FONT_SIZE_SMALL}px;"
         )
-        review_layout.addWidget(self._nk_review_file_lbl)
 
-        # Review rows container
-        self._nk_review_rows_widget = QWidget()
-        self._nk_review_rows_layout = QVBoxLayout(self._nk_review_rows_widget)
-        self._nk_review_rows_layout.setContentsMargins(0, 0, 0, 0)
-        self._nk_review_rows_layout.setSpacing(2)
-        review_layout.addWidget(self._nk_review_rows_widget)
-
-        # Separator
-        sep2 = QFrame()
-        sep2.setFrameShape(QFrame.Shape.HLine)
-        sep2.setStyleSheet(f"color: {theme.BORDER};")
-        review_layout.addWidget(sep2)
-
-        # Preset name input
-        name_lbl = QLabel("프리셋 이름")
-        name_lbl.setStyleSheet(
-            f"color: {theme.TEXT}; font-size: {theme.FONT_SIZE}px; font-weight: 600;"
+    def _on_apply_nodetree(self) -> None:
+        item = self._preset_list.currentItem()
+        if item is None:
+            return
+        name = item.text()
+        old = load_preset_template(name)
+        if not old:
+            self._nt_status.setText(
+                "저장된 NK 템플릿이 없습니다. NK 임포트로 프리셋을 먼저 저장하세요."
+            )
+            self._nt_status.setStyleSheet(
+                f"color: {theme.ERROR}; font-size: {theme.FONT_SIZE_SMALL}px;"
+            )
+            return
+        text = self._nt_edit.toPlainText().strip()
+        if not text:
+            self._nt_status.setText("노드 내용을 붙여넣거나 파일을 드롭하세요.")
+            self._nt_status.setStyleSheet(
+                f"color: {theme.ERROR}; font-size: {theme.FONT_SIZE_SMALL}px;"
+            )
+            return
+        try:
+            merged = merge_nodetree_content(old, text)
+        except ValueError as e:
+            self._nt_status.setText(f"적용 실패: {e}")
+            self._nt_status.setStyleSheet(
+                f"color: {theme.ERROR}; font-size: {theme.FONT_SIZE_SMALL}px;"
+            )
+            return
+        save_preset_template(name, merged)
+        self._nt_edit.clear()
+        self._nt_status.setText(f"'{name}' 템플릿 노드트리가 갱신되었습니다.")
+        self._nt_status.setStyleSheet(
+            f"color: {theme.SUCCESS}; font-size: {theme.FONT_SIZE_SMALL}px;"
         )
-        review_layout.addWidget(name_lbl)
 
-        self._nk_name_edit = QLineEdit()
-        self._nk_name_edit.setPlaceholderText("예) SBS_030")
-        self._nk_name_edit.textChanged.connect(self._on_nk_name_changed)
-        self._nk_name_edit.returnPressed.connect(self._on_nk_name_return)
-        review_layout.addWidget(self._nk_name_edit)
-
-        self._nk_name_hint_lbl = QLabel("프리셋 코드를 입력하세요 (예: SBS_030)")
-        self._nk_name_hint_lbl.setStyleSheet(
-            f"color: {theme.TEXT_DIM}; font-size: {theme.FONT_SIZE_SMALL}px;"
-        )
-        review_layout.addWidget(self._nk_name_hint_lbl)
-
-        self._nk_duplicate_lbl = QLabel("")
-        self._nk_duplicate_lbl.setWordWrap(True)
-        self._nk_duplicate_lbl.setStyleSheet(
-            f"color: #ffb74d; font-size: {theme.FONT_SIZE_SMALL}px;"
-        )
-        self._nk_duplicate_lbl.setVisible(False)
-        review_layout.addWidget(self._nk_duplicate_lbl)
-
-        note_lbl = QLabel(
-            "미감지 항목은 기본값으로 채워집니다. "
-            "왼쪽 폼에서 확인/수정 후 필요 시 저장으로 다시 기록하세요."
-        )
-        note_lbl.setWordWrap(True)
-        note_lbl.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: {theme.FONT_SIZE_SMALL}px;")
-        review_layout.addWidget(note_lbl)
-
-        # Buttons
-        btn_row = QHBoxLayout()
-        btn_row.setSpacing(8)
-        hide_btn = QPushButton("분석 숨기기")
-        hide_btn.setFixedWidth(100)
-        hide_btn.clicked.connect(self._hide_nk_review)
-        btn_row.addWidget(hide_btn)
-        btn_row.addStretch()
-        self._nk_create_btn = QPushButton("프리셋 생성")
-        self._nk_create_btn.setProperty("primary", True)
-        self._nk_create_btn.setEnabled(False)
-        self._nk_create_btn.clicked.connect(self._confirm_nk_import)
-        btn_row.addWidget(self._nk_create_btn)
-        review_layout.addLayout(btn_row)
-
-        parent_layout.addWidget(self._nk_review_widget)
-
-        # Internal state
-        self._nk_pending_parsed: Optional[Dict[str, Any]] = None
-        self._nk_last_dir = ""
+    def _on_nk_dropped(self, path: str) -> None:
+        norm = normalize_path_str(os.path.normpath(path))
+        if not norm.lower().endswith(".nk"):
+            self._nk_feedback("NK(.nk) 파일만 지원합니다.", theme.ERROR)
+            return
+        self._nk_path_edit.setText(norm)
+        self._nk_last_dir = os.path.dirname(norm)
 
     def _browse_nk_import(self) -> None:
         init_dir = self._nk_last_dir
@@ -473,8 +579,12 @@ class PresetTab(QWidget):
             "Nuke Script (*.nk);;All Files (*)",
         )
         if path:
-            norm = os.path.normpath(path)
+            norm = normalize_path_str(os.path.normpath(path))
             self._nk_path_edit.setText(norm)
+            self._nk_drop_zone.setText(norm)
+            self._nk_drop_zone.setProperty("has_file", True)
+            self._nk_drop_zone.style().unpolish(self._nk_drop_zone)
+            self._nk_drop_zone.style().polish(self._nk_drop_zone)
             self._nk_last_dir = os.path.dirname(norm)
 
     def _nk_feedback(self, text: str, color: str = "") -> None:
@@ -489,128 +599,100 @@ class PresetTab(QWidget):
             self._nk_path_edit.setFocus()
             return
         nk_path = os.path.normpath(nk_path)
+        if not nk_path.lower().endswith(".nk"):
+            self._nk_feedback("NK(.nk) 파일만 지원합니다.", theme.ERROR)
+            return
         if not os.path.isfile(nk_path):
             self._nk_feedback(f"파일을 찾을 수 없습니다: {nk_path}", theme.ERROR)
             return
         try:
-            data = parse_nk_for_preset(nk_path)
+            raw = parse_nk_file(nk_path)
+            node_stats = raw.pop("_node_stats", {})
+            parsed_flat = dict(raw)
+            merged = merge_parsed_into_preset(dict(raw))
+            try:
+                nk_raw_content = Path(nk_path).read_text(encoding="utf-8", errors="replace")
+            except OSError as e:
+                self._nk_feedback(f"NK 읽기 실패: {e}", theme.ERROR)
+                return
         except ValueError as e:
             self._nk_feedback(f"NK 분석 실패: {e}", theme.ERROR)
             return
-        self._show_nk_review(nk_path, data)
 
-    def _show_nk_review(self, nk_path: str, parsed: Dict[str, Any]) -> None:
-        self._nk_pending_parsed = parsed
-        self._nk_review_file_lbl.setText(f"파일: {Path(nk_path).name}")
-        self._populate_nk_review_rows(parsed)
-        self._nk_name_edit.clear()
-        self._nk_review_widget.setVisible(True)
-        self._nk_feedback("분석 완료 — 이름 입력 후 프리셋 생성", theme.ACCENT)
-        self._nk_name_edit.setFocus()
-        self._update_nk_create_btn_state()
+        self._nk_merged = merged
+        self._nk_parsed_raw = parsed_flat
+        self._nk_node_stats = node_stats
+        self._nk_raw_content = nk_raw_content
+        self._nk_source_path = nk_path
 
-    def _hide_nk_review(self) -> None:
-        self._nk_review_widget.setVisible(False)
-        self._nk_pending_parsed = None
-        self._nk_name_edit.clear()
-        self._nk_feedback("")
+        panel = PresetDetailPanel(
+            mode="nk_import",
+            merged=merged,
+            parsed_raw=parsed_flat,
+            node_stats=node_stats,
+            parent=self._nk_result_container,
+        )
+        self._set_nk_result_widget(panel)
+        self._go_nk_import_page()
+        self._nk_feedback("분석 완료 — 아래에 이름을 입력하고 프리셋을 저장하세요.", theme.SUCCESS)
+        self._on_name_changed()
 
-    def _populate_nk_review_rows(self, d: Dict[str, Any]) -> None:
-        # Clear existing rows
-        while self._nk_review_rows_layout.count():
-            item = self._nk_review_rows_layout.takeAt(0)
-            w = item.widget() if item else None
-            if w:
-                w.deleteLater()
-
-        rows: List[Tuple[str, str]] = [
-            ("FPS", d.get("fps") or "미감지"),
-            (
-                "해상도",
-                f"{d.get('plate_width', '?')} x {d.get('plate_height', '?')}"
-                if d.get("plate_width") and d.get("plate_height")
-                else "미감지",
-            ),
-            ("OCIO Config", Path(d["ocio_path"]).name if d.get("ocio_path") else "미감지"),
-            ("Read Input Transform", d.get("read_input_transform") or "미감지"),
-            ("납품 포맷", d.get("delivery_format") or "미감지"),
-            ("Channels", d.get("write_channels") or "미감지"),
-            ("Datatype", d.get("write_datatype") or "미감지"),
-            ("Compression", d.get("write_compression") or "미감지"),
-            ("Metadata", d.get("write_metadata") or "미감지"),
-            ("Transform Type", d.get("write_transform_type") or "미감지"),
-            ("Output Transform", d.get("write_out_colorspace") or "미감지"),
-            ("Display", d.get("write_output_display") or "미감지"),
-            ("View", d.get("write_output_view") or "미감지"),
-        ]
-        for label, value in rows:
-            detected = value != "미감지"
-            row = QHBoxLayout()
-            row.setSpacing(8)
-            key_lbl = QLabel(label)
-            key_lbl.setFixedWidth(140)
-            key_lbl.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: {theme.FONT_SIZE_SMALL}px;")
-            val_color = theme.ACCENT if detected else theme.TEXT_DIM
-            val_lbl = QLabel(str(value))
-            val_lbl.setStyleSheet(f"color: {val_color}; font-size: {theme.FONT_SIZE_SMALL}px;")
-            row.addWidget(key_lbl)
-            row.addWidget(val_lbl, 1)
-            container = QWidget()
-            container.setLayout(row)
-            self._nk_review_rows_layout.addWidget(container)
-
-    def _on_nk_name_changed(self) -> None:
-        self._update_nk_create_btn_state()
-
-    def _update_nk_create_btn_state(self) -> None:
-        raw = self._nk_name_edit.text().strip()
+    def _on_name_changed(self) -> None:
+        raw = self._preset_name_edit.text().strip()
         up = raw.upper()
         valid = bool(raw) and bool(re.fullmatch(r"[A-Za-z0-9_]+", raw))
         presets = load_presets()
         dup = valid and up in presets
-
-        self._nk_create_btn.setEnabled(valid)
+        nk_ready = self._nk_merged is not None and self._nk_raw_content is not None
+        self._create_preset_btn.setEnabled(valid and nk_ready)
         if dup:
-            self._nk_duplicate_lbl.setText(
-                f"'{up}' 프리셋이 이미 있습니다. 생성 시 기존 데이터가 교체됩니다."
-            )
-            self._nk_duplicate_lbl.setVisible(True)
-            self._nk_create_btn.setText("기존 프리셋 덮어쓰기")
+            self._dup_lbl.setText(f"'{up}' 프리셋이 이미 있습니다. 덮어씁니다.")
+            self._dup_lbl.setVisible(True)
+            self._create_preset_btn.setText("기존 프리셋 덮어쓰기")
         else:
-            self._nk_duplicate_lbl.setVisible(False)
-            self._nk_create_btn.setText("프리셋 생성")
-
+            self._dup_lbl.setVisible(False)
+            self._create_preset_btn.setText("프리셋 생성")
         if valid:
-            hint = f"'{up}' 로 저장됩니다"
-            if dup:
-                hint += " — 기존 프리셋을 덮어씁니다"
             color = "#ffb74d" if dup else theme.SUCCESS
-            self._nk_name_hint_lbl.setText(hint)
-            self._nk_name_hint_lbl.setStyleSheet(
-                f"color: {color}; font-size: {theme.FONT_SIZE_SMALL}px;"
-            )
+            self._hint_lbl.setText(f"'{up}' 로 저장됩니다")
+            self._hint_lbl.setStyleSheet(f"color: {color}; font-size: {theme.FONT_SIZE_SMALL}px;")
         elif raw and not re.fullmatch(r"[A-Za-z0-9_]+", raw):
-            self._nk_name_hint_lbl.setText(
-                "영문/숫자/_ 만 사용 (대소문자 무관, 저장 시 대문자로 통일)"
-            )
-            self._nk_name_hint_lbl.setStyleSheet(
+            self._hint_lbl.setText("영문/숫자/_ 만 사용 (저장 시 대문자로 통일)")
+            self._hint_lbl.setStyleSheet(
                 f"color: {theme.ERROR}; font-size: {theme.FONT_SIZE_SMALL}px;"
             )
         else:
-            self._nk_name_hint_lbl.setText("프리셋 코드를 입력하세요 (예: SBS_030)")
-            self._nk_name_hint_lbl.setStyleSheet(
+            self._hint_lbl.setText("프리셋 이름을 입력하세요 (영문/숫자/_)")
+            self._hint_lbl.setStyleSheet(
                 f"color: {theme.TEXT_DIM}; font-size: {theme.FONT_SIZE_SMALL}px;"
             )
 
-    def _on_nk_name_return(self) -> None:
-        if self._nk_create_btn.isEnabled():
-            self._confirm_nk_import()
+    def _on_cancel_create_flow(self) -> None:
+        self._preset_name_edit.clear()
+        self._nk_merged = None
+        self._nk_parsed_raw = None
+        self._nk_node_stats = None
+        self._nk_raw_content = None
+        self._nk_source_path = ""
+        self._nk_path_edit.clear()
+        self._nk_drop_zone.setText(".nk 파일을 드래그하거나 아래에서 선택하세요")
+        self._nk_drop_zone.setProperty("has_file", False)
+        self._nk_drop_zone.style().unpolish(self._nk_drop_zone)
+        self._nk_drop_zone.style().polish(self._nk_drop_zone)
+        self._set_nk_result_widget(None)
+        self._nk_feedback("", theme.TEXT_DIM)
+        self._on_name_changed()
 
-    def _confirm_nk_import(self) -> None:
-        if not self._nk_pending_parsed:
+    def _on_create_preset(self) -> None:
+        if not self._nk_raw_content or self._nk_merged is None:
+            QMessageBox.warning(self, "오류", "NK를 먼저 분석하세요.")
             return
-        name = self._nk_name_edit.text().strip().upper()
+        name = self._preset_name_edit.text().strip().upper()
         if not name or not re.fullmatch(r"[A-Z0-9_]+", name):
+            return
+        cur = os.path.normpath(self._nk_source_path) if self._nk_source_path else ""
+        if cur and not os.path.isfile(cur):
+            QMessageBox.warning(self, "오류", "NK 파일을 찾을 수 없습니다.")
             return
 
         presets = load_presets()
@@ -618,20 +700,22 @@ class PresetTab(QWidget):
             reply = QMessageBox.question(
                 self,
                 "프리셋 덮어쓰기",
-                f"'{name}' 프리셋이 이미 있습니다.\n"
-                "기존 설정이 NK 기준으로 덮어써집니다. 진행하시겠습니까?",
+                f"'{name}' 프리셋이 이미 있습니다.\n덮어쓰시겠습니까?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             )
             if reply != QMessageBox.StandardButton.Yes:
                 return
 
-        data = dict(self._nk_pending_parsed)
+        data = dict(self._nk_merged)
         data["project_code"] = name
         upsert_preset(name, data)
+        save_preset_template(name, self._nk_raw_content)
         self._refresh_preset_list()
-        self._apply_form(data)
-        self._hide_nk_review()
+        items = self._preset_list.findItems(name, Qt.MatchFlag.MatchExactly)
+        if items:
+            self._preset_list.setCurrentItem(items[0])
         self._nk_feedback(
-            f"프리셋 '{name}' 저장됨 — 왼쪽 폼에서 값을 확인/수정할 수 있습니다.",
+            f"프리셋 '{name}' 저장됨 — 세팅 + 노드트리 템플릿({name}_template.nk)",
             theme.SUCCESS,
         )
+        self._on_cancel_create_flow()

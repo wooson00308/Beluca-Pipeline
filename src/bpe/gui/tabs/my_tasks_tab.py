@@ -47,6 +47,7 @@ from bpe.core.nk_finder import (
     open_comp_render_in_rv,
     open_plate_in_rv,
 )
+from bpe.core.nuke_render_paths import normalize_path_str
 from bpe.gui import theme
 from bpe.gui.widgets.clickable_image import ClickableImage
 from bpe.gui.workers.sg_worker import ShotGridWorker
@@ -628,8 +629,9 @@ class _ShotCard(QFrame):
         publish_btn.clicked.connect(self._on_publish)
         btn_col.addWidget(publish_btn)
 
-        sb_btn = QPushButton("샷 빌더")
+        sb_btn = QPushButton("Shot Build")
         sb_btn.setMinimumWidth(80)
+        sb_btn.setToolTip("Shot Builder — NK 생성")
         sb_btn.clicked.connect(self._on_shot_builder)
         btn_col.addWidget(sb_btn)
 
@@ -664,7 +666,7 @@ class _ShotCard(QFrame):
         if folder is None or not folder.is_dir():
             logger.warning("폴더 열기: 샷 폴더를 찾을 수 없음 (%s)", shot_code)
             return
-        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder.resolve())))
+        QDesktopServices.openUrl(QUrl.fromLocalFile(normalize_path_str(folder)))
 
     def _open_nk(self) -> None:
         d = self.task_data
@@ -2188,7 +2190,7 @@ class MyTasksTab(QWidget):
 
         dlg.exec()
 
-    def _open_shot_builder_dialog(self, _task_data: Dict[str, Any]) -> None:
+    def _open_shot_builder_dialog(self, task_data: Dict[str, Any]) -> None:
         from bpe.gui.tabs.shot_builder_tab import ShotBuilderTab
 
         dlg = QDialog(self)
@@ -2198,6 +2200,6 @@ class MyTasksTab(QWidget):
 
         lay = QVBoxLayout(dlg)
         lay.setContentsMargins(0, 0, 0, 0)
-        sb = ShotBuilderTab()
+        sb = ShotBuilderTab(task_data=task_data)
         lay.addWidget(sb)
         dlg.exec()

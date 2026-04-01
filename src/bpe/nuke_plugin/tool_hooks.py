@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import os
 import re
+from typing import Dict, Optional
 
 import nuke
 import nukescripts
 
 import bpe.core.config as cfg
-from bpe.core.nuke_render_paths import write_file_paths_from_nk_root_name
+from bpe.core.nuke_render_paths import (
+    normalize_path_str,
+    normalize_unc_to_drive,
+    renders_dir_from_nk_path_robust,
+)
 from bpe.core.presets import load_presets
-from bpe.core.settings import get_tools_settings
+from bpe.core.settings import get_tools_settings, get_unc_mappings
 
 # ══════════════════════════════════════════════════════════════════════
 # 공용 유틸리티
@@ -721,53 +726,196 @@ def bpe_post_render_load():
 # WRITE 경로 보정 (UNC + 잘못된 Tcl string trim 대응)
 # ══════════════════════════════════════════════════════════════════════
 
+_SINGLE_FILE_EXTS = frozenset({"mov", "mp4", "mxf", "avi"})
 
-def bpe_fix_write_paths_on_save() -> None:
-    """onScriptSave — `string trim` 기반 Write file 표현식을 절대경로로 덮어쓴다.
 
-    BPE가 NK를 ``//server/share/...`` UNC로 열면 Nuke는 ``root.name``을 ``//`` 로
-    정규화한다. 기존 템플릿의 ``string trim`` 은 ``/`` 를 trim 문자 집합에 넣어
-    선행 ``//`` 를 제거해 무효 경로가 된다. ``file dirname`` 템플릿으로 바꾼 뒤에도
-    서버에 남아 있는 구 NK는 저장 시 여기서 한 번 보정한다.
+def _bpe_normalize_root_and_read_paths() -> None:
+    """``root.name`` 과 Read ``file`` 의 UNC 를 ``W:`` 등 드라이브 경로로 통일."""
+    try:
+        rk = nuke.root()["name"]
+        rn = rk.value()
+    except Exception:
+        return
+    if rn:
+        new_rn = normalize_path_str(rn)
+        old_s = str(rn).replace("\\", "/").rstrip("/")
+        if new_rn.rstrip("/") != old_s.rstrip("/"):
+            try:
+                rk.setValue(new_rn)
+            except Exception:
+                pass
+    for node in nuke.allNodes("Read"):
+        fk = node.knob("file")
+        if fk is None:
+            continue
+        try:
+            if fk.hasExpression():
+                continue
+        except Exception:
+            continue
+        try:
+            cur_s = str(fk.value())
+        except Exception:
+            continue
+        if not cur_s.strip():
+            continue
+        new_v = normalize_path_str(cur_s)
+        if new_v.replace("\\", "/").rstrip("/") != cur_s.replace("\\", "/").rstrip("/"):
+            try:
+                fk.setExpression("")
+                fk.setValue(new_v)
+            except Exception:
+                pass
+
+
+def _bpe_is_bpe_managed_write_path(script_text: str) -> bool:
+    """``value root.name`` 기반 BPE 템플릿/레거시 Write 만 대상으로 한다."""
+    if "value root.name" not in script_text:
+        return False
+    if "string trim" in script_text:
+        return True
+    st = script_text.replace("\\", "/").lower()
+    if "file dirname" in script_text and "/renders/" in st:
+        return True
+    return False
+
+
+def _bpe_extract_frame_pattern_from_script(script_text: str) -> str:
+    """Write ``file`` Tcl/값에서 프레임 패턴(``%04d``, ``####`` 등)을 추출. 기본 ``%04d``."""
+    t = script_text.replace("\\", "")
+    m = re.search(r"\.(%\d*d|#+)\.(\w+)", t)
+    if m:
+        fp = m.group(1)
+        if fp.startswith("#"):
+            n = len(fp)
+            return f"%{max(n, 4)}d" if n >= 4 else "%d"
+        return fp
+    return "%04d"
+
+
+def _bpe_write_ext_from_node(node, script_text: str) -> str:
+    """Write ``file_type`` 또는 기존 경로에서 확장자 추출."""
+    ft = node.knob("file_type")
+    if ft is not None:
+        try:
+            v = str(ft.value()).strip().lower()
+            if v:
+                return v
+        except Exception:
+            pass
+    t = script_text.replace("\\", "")
+    m = re.search(r"\.(%\d*d|#+)\.(\w+)", t)
+    if m:
+        return m.group(2).lower()
+    m2 = re.search(r"\.(\w+)(?:\s|$|\"|\])", t)
+    if m2:
+        return m2.group(1).lower()
+    return "exr"
+
+
+def _bpe_absolute_write_path_for_root(
+    root_name: str,
+    script_text: str,
+    node,
+    unc_mappings: Dict[str, str],
+) -> Optional[str]:
+    """``comp/devl/renders`` + UNC→드라이브 정규화 + 시퀀스/단일 파일 규칙."""
+    renders_dir = renders_dir_from_nk_path_robust(root_name)
+    if not renders_dir:
+        return None
+    renders_dir = normalize_unc_to_drive(renders_dir, unc_mappings)
+    normalized = root_name.replace("\\", "/")
+    nk_basename = os.path.basename(normalized)
+    shot_ver = os.path.splitext(nk_basename)[0]
+    ext = _bpe_write_ext_from_node(node, script_text)
+    if ext in _SINGLE_FILE_EXTS:
+        return f"{renders_dir}/{shot_ver}.{ext}"
+    fp = _bpe_extract_frame_pattern_from_script(script_text)
+    return f"{renders_dir}/{shot_ver}/{shot_ver}.{fp}.{ext}"
+
+
+def _bpe_apply_write_string_trim_fix() -> int:
+    """BPE 관리 Write 노드의 ``file`` 을 ``comp/devl/renders`` 절대 경로(``W:/``)로 설정한다.
+
+    ``string trim``/``file dirname`` Tcl 은 UNC·비표준 NK 깊이에서 잘못된 결과를 낼 수 있어
+    onLoad/onSave 마다 ``root.name`` 기준으로 재계산한다.
+
+    Returns:
+        갱신된 Write 노드 수.
     """
+    _bpe_normalize_root_and_read_paths()
+    patched = 0
     try:
         root_name = nuke.root()["name"].value()
-        if not root_name:
-            return
+    except Exception:
+        return 0
+    if not root_name:
+        return 0
+    try:
+        unc_mappings = get_unc_mappings()
+    except Exception:
+        unc_mappings = {}
+    for node in nuke.allNodes("Write"):
+        file_knob = node.knob("file")
+        if file_knob is None:
+            continue
+        try:
+            script_text = file_knob.toScript()
+        except Exception:
+            continue
+        if not _bpe_is_bpe_managed_write_path(script_text):
+            continue
+        abs_path = _bpe_absolute_write_path_for_root(root_name, script_text, node, unc_mappings)
+        if not abs_path:
+            continue
+        try:
+            cur = file_knob.value()
+        except Exception:
+            cur = ""
+        if str(cur).replace("\\", "/").rstrip("/") == abs_path.replace("\\", "/").rstrip("/"):
+            continue
+        try:
+            file_knob.setExpression("")
+        except Exception:
+            pass
+        try:
+            file_knob.setValue(abs_path)
+        except Exception:
+            continue
+        patched += 1
+        nuke.tprint(f"[BPE] Write 경로 보정: {node.name()}")
+    return patched
 
-        paths = write_file_paths_from_nk_root_name(root_name)
-        if paths is None:
-            return
-        _renders_dir, exr_path, mov_path = paths
 
-        for node in nuke.allNodes("Write"):
-            name = node.name()
-            if name not in ("Write2", "eo7Write1"):
-                continue
-            file_knob = node.knob("file")
-            if file_knob is None:
-                continue
-            try:
-                script_text = file_knob.toScript()
-            except Exception:
-                script_text = ""
-            if "string trim" not in script_text:
-                continue
-            if name == "Write2":
-                new_path = exr_path
-            else:
-                new_path = mov_path
-            try:
-                file_knob.setValue(new_path)
-            except Exception:
-                try:
-                    file_knob.setExpression("")
-                except Exception:
-                    pass
-                file_knob.setValue(new_path)
-            nuke.tprint(f"[BPE] Write 경로 보정: {name} -> {new_path}")
+def bpe_fix_write_paths_on_save() -> None:
+    """onScriptSave — BPE 관리 Write 의 ``file`` 을 ``comp/devl/renders`` 절대 경로로 갱신."""
+    try:
+        if not nuke.root()["name"].value():
+            return
+        _bpe_apply_write_string_trim_fix()
     except Exception as e:
-        nuke.tprint(f"[BPE] Write 경로 보정 실패: {e}")
+        nuke.tprint(f"[BPE] Write 경로 보정(onSave) 실패: {e}")
+
+
+def bpe_fix_write_paths_on_load() -> None:
+    """onScriptLoad — 스크립트 열 직후 BPE 관리 Write 절대 경로 보정 (직접 연 NK 대응)."""
+    try:
+        nuke.executeDeferred(_bpe_fix_write_paths_on_load_deferred)
+    except Exception as e:
+        nuke.tprint(f"[BPE] Write 경로 보정(onLoad) 실패: {e}")
+
+
+def _bpe_fix_write_paths_on_load_deferred() -> None:
+    try:
+        if not nuke.root()["name"].value():
+            return
+        _bpe_apply_write_string_trim_fix()
+        try:
+            nuke.root().setModified(False)
+        except Exception:
+            pass
+    except Exception as e:
+        nuke.tprint(f"[BPE] Write 경로 보정(load deferred) 실패: {e}")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -811,10 +959,19 @@ def reload_tool_hooks() -> None:
     except Exception as e:
         nuke.tprint(f"[BPE Tools] addOnScriptSave(Write 경로 보정) 등록 실패: {e}")
 
+    try:
+        nuke.removeOnScriptLoad(bpe_fix_write_paths_on_load)
+    except Exception:
+        pass
+    try:
+        nuke.addOnScriptLoad(bpe_fix_write_paths_on_load)
+    except Exception as e:
+        nuke.tprint(f"[BPE Tools] addOnScriptLoad(Write 경로 보정) 등록 실패: {e}")
+
     nuke.tprint(
         "[BPE Tools] Reload 완료 — "
         f"QC Checker: {'ON' if qc_enabled else 'OFF'}  |  "
         f"Post-Render Viewer: {'ON' if prv_enabled else 'OFF'}  |  "
-        f"Write 경로 보정(onSave): ON  |  "
+        f"Write 경로 보정(onLoad/onSave): ON  |  "
         f"settings: {cfg.SETTINGS_FILE}"
     )

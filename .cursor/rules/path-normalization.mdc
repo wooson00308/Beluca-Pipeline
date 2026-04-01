@@ -1,0 +1,61 @@
+---
+description: 네트워크 UNC 경로(\\zeus...) 금지 — 드라이브 문자 경로로 통일
+alwaysApply: true
+---
+
+# 경로 정규화 규칙 (UNC 금지)
+
+## 절대 원칙
+
+`\\zeus.lennon.co.kr\beluca` 또는 `//zeus.lennon.co.kr/beluca` 같은 **UNC 서버 주소**는
+어떤 경우에도 사용자에게 보이거나 외부 프로세스(Nuke, 탐색기, RV, subprocess)에 전달해서는 안 된다.
+
+드라이브 문자는 `W:`, `U:`, `V:` 등 팀이 매핑한 것이면 모두 허용.
+**금지 대상은 드라이브 문자가 아니라 UNC 서버 주소(`\\server\share`)다.**
+
+`C:`, `D:` 등 로컬 드라이브나 `https://` URL은 이 규칙 해당 없음.
+
+## 공통 함수 — 반드시 사용
+
+경로를 **사용자에게 보이거나 외부에 넘기기 직전**에 반드시 호출한다.
+`settings.json`의 `unc_mappings` 기본값(`//zeus.lennon.co.kr/beluca → W:`)을 읽어 변환한다.
+
+```python
+from bpe.core.nuke_render_paths import normalize_path_str
+
+safe = normalize_path_str(path)  # \\zeus..., //zeus... → W:/ (또는 매핑된 드라이브)
+```
+
+## 적용 위치 (빠짐없이)
+
+| 상황 | 적용 방법 |
+|------|----------|
+| `QUrl.fromLocalFile(...)` | `QUrl.fromLocalFile(normalize_path_str(path))` |
+| `subprocess.Popen([..., str(path)])` | `subprocess.Popen([..., normalize_path_str(path)])` |
+| `setText(str(path))` / `appendPlainText(...)` | `setText(normalize_path_str(path))` |
+| `Path.resolve()` 결과 반환 | `Path(normalize_path_str(p.resolve()))` |
+| `str(child.resolve())` 반환 | `normalize_path_str(child.resolve())` |
+| Nuke `file_knob.setValue(...)` | `file_knob.setValue(normalize_path_str(val))` |
+
+## 금지 패턴
+
+```python
+# 절대 금지 (resolve()가 UNC를 반환할 수 있음)
+QUrl.fromLocalFile(str(path))
+subprocess.Popen([exe, str(path)])
+self._label.setText(str(some_path))
+return str(child.resolve())
+```
+
+## Nuke 플러그인 내부
+
+`tool_hooks.py`의 `_bpe_normalize_root_and_read_paths()`이 `onLoad`/`onSave`에서
+`root.name` + Read 노드 + Write 노드를 일괄 정규화한다.
+새 훅 추가 시에도 경로 설정 전에 `normalize_path_str` 호출 필수.
+
+## 새 기능 추가 시 체크리스트
+
+1. 경로를 화면에 표시하는가? → `normalize_path_str` 적용
+2. 경로를 subprocess/Nuke/RV에 넘기는가? → `normalize_path_str` 적용
+3. `Path.resolve()` / `str(path)` 를 반환하는가? → `normalize_path_str` 적용
+4. 서버 경로를 직접 조립하는가? → `normalize_path_str` 적용

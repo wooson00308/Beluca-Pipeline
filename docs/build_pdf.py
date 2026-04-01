@@ -500,7 +500,7 @@ def cover_page() -> List[Any]:
         )
     )
     flow.append(Spacer(1, 1.2 * cm))
-    flow.append(Paragraph("v0.2  Beta  |  2026  |  Beluca Studio", ST["cover_version"]))
+    flow.append(Paragraph("v0.8 Beta  |  2026  |  Beluca Studio", ST["cover_version"]))
 
     # ★ 반드시 PageBreak 전에 NextPageTemplate 삽입
     flow.append(NextPageTemplate("Normal"))

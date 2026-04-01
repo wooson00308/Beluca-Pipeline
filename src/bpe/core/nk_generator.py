@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import struct
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -153,6 +154,297 @@ def _preset_first_part(preset_data: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 # Patch functions
 # ---------------------------------------------------------------------------
+
+
+_SHOT_CODE_TOKEN = re.compile(r"^E\d+_S\d+_\d+")
+
+# 플레이트 파일명 정규화: EXR·DPX 등은 ####, MOV·MP4 등은 단일 클립으로 취급
+_PLATE_SEQUENCE_EXTS = frozenset({"exr", "dpx", "tif", "tiff"})
+_PLATE_VIDEO_EXTS = frozenset({"mov", "mp4", "mxf", "m4v"})
+
+
+def _is_plate_read_file_path(file_path: str) -> bool:
+    """``.../plate/...`` 경로면 플레이트 Read로 간주한다."""
+    p = (file_path or "").replace("\\", "/").lower()
+    return "/plate/" in p
+
+
+def _normalize_plate_basename(
+    basename: str, shot_name: str, force_ext: Optional[str] = None
+) -> str:
+    """
+    다른 샷 템플릿의 플레이트 파일명을 현재 샷에 맞긴다.
+
+    - ``force_ext`` 가 있으면(``plate_hi`` 폴더명 ``mov``/``exr`` 등) 템플릿 확장자보다
+      실제 플레이트 폴더 종류를 우선한다.
+    - 파일명이 ``E###_S###_####`` 로 시작하면 샷 코드만 바꾼 뒤, 프레임 번호는
+      시퀀스/영상 모두 ``1001`` → ``####`` 로 통일한다.
+    - 샷 코드가 없으면: EXR·DPX 등은 ``{shot}_org_v001.####.ext``, MOV·MP4 등은
+      ``{shot}_org_v001.ext`` (단일 클립, ``####`` 없음).
+    """
+    base = basename.strip()
+
+    if force_ext:
+        fe = force_ext.lower().lstrip(".")
+        if fe in _PLATE_VIDEO_EXTS:
+            return f"{shot_name}_org_v001.{fe}"
+        if fe in _PLATE_SEQUENCE_EXTS:
+            return f"{shot_name}_org_v001.####.{fe}"
+        return f"{shot_name}_org_v001.####.exr"
+
+    if _SHOT_CODE_TOKEN.match(base):
+        base = _SHOT_CODE_TOKEN.sub(shot_name, base, count=1)
+        base = re.sub(
+            r"\.(\d{4})\.(exr|dpx|tif|tiff|mov|mp4|mxf|m4v)$",
+            r".####.\2",
+            base,
+            flags=re.IGNORECASE,
+        )
+        # Nuke 저장 형식 ``.%04d.exr`` (따옴표 없는 file 노브에서 흔함)
+        base = re.sub(
+            r"\.%0\d*d\.(exr|dpx|tif|tiff|mov|mp4|mxf|m4v)$",
+            r".####.\1",
+            base,
+            flags=re.IGNORECASE,
+        )
+        return base
+
+    if "." not in base:
+        return f"{shot_name}_org_v001.####.exr"
+
+    ext = base.rsplit(".", 1)[-1].lower()
+    if ext in _PLATE_VIDEO_EXTS:
+        return f"{shot_name}_org_v001.{ext}"
+    if ext in _PLATE_SEQUENCE_EXTS:
+        return f"{shot_name}_org_v001.####.{ext}"
+    return f"{shot_name}_org_v001.####.exr"
+
+
+def _patch_read_plate_file_paths(body: str, shot_name: str, paths: Dict[str, Path]) -> str:
+    """
+    프리셋 템플릿이 E107 고정 문자열이 아닌 *다른 샷* 경로로 저장된 경우,
+    ``W:.../E107/...`` 치환이 되지 않아 Read ``file`` 이 옛 샷을 가리킨다.
+
+    ``/plate/`` 가 포함된 Read 노드 ``file`` 을 ``paths['plate_hi']`` + 현재 샷
+    파일명으로 다시 쓴다 (EXR 시퀀스·MOV 단일/시퀀스 모두
+    :func:`_normalize_plate_basename` 규칙). ``file "..."``·``{...}``·따옴표 없는
+    ``file W:/...``·``%04d`` 시퀀스 모두 처리. colorspace 등 다른 노브는 건드리지 않는다.
+    """
+    plate_hi = _to_nk_path(paths["plate_hi"])
+    plate_folder = Path(paths["plate_hi"]).name.lower()
+    _allowed = _PLATE_VIDEO_EXTS | _PLATE_SEQUENCE_EXTS
+    force_ext: Optional[str] = plate_folder if plate_folder in _allowed else None
+
+    blocks = _find_blocks_with_positions(body, "Read")
+    result = body
+    for start, end, inner in reversed(blocks):
+        m = re.search(r'(?m)^( file )"([^"]*)"', inner)
+        if m:
+            old_path = m.group(2)
+        else:
+            m2 = re.search(r"(?m)^( file )\{([^}]*)\}", inner)
+            if m2:
+                old_path = m2.group(2).strip()
+            else:
+                # 따옴표 없이 `` file W:/path/...`` 만 있는 NK (Nuke가 이렇게 저장하는 경우)
+                m3 = re.search(r"(?m)^( file )(\S+)", inner)
+                if m3:
+                    old_path = m3.group(2)
+                else:
+                    continue
+
+        if not _is_plate_read_file_path(old_path):
+            continue
+
+        norm = old_path.replace("\\", "/")
+        basename = norm.split("/")[-1] if norm else ""
+        if not basename:
+            continue
+
+        new_base = _normalize_plate_basename(basename, shot_name, force_ext=force_ext)
+        new_path = f"{plate_hi}/{new_base}"
+        new_inner = _replace_knob_in_block(inner, "file", new_path)
+        if new_inner != inner:
+            result = result[:start] + f"Read {{{new_inner}}}" + result[end:]
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Plate frame range (Read + Viewer)
+# ---------------------------------------------------------------------------
+
+_EXR_FRAME_NUM_RE = re.compile(r"\.(\d{4})\.exr$", re.IGNORECASE)
+_PLATE_VIDEO_GLOBS = ("*.mov", "*.mp4", "*.m4v")
+_DEFAULT_FRAME_FIRST = 1001
+_DEFAULT_FRAME_LAST = 1123
+
+
+def _parse_stts_inner(body: bytes) -> int:
+    """MP4 ``stts`` box inner (version+flags+entries) 에서 총 샘플 수 합산."""
+    if len(body) < 8:
+        return 0
+    entry_count = struct.unpack_from(">I", body, 4)[0]
+    offset = 8
+    total = 0
+    for _ in range(min(entry_count, 10_000_000)):
+        if offset + 8 > len(body):
+            break
+        sample_count = struct.unpack_from(">I", body, offset)[0]
+        total += sample_count
+        offset += 8
+    return total
+
+
+def _find_stts_sample_total(data: bytes, start: int, end: int) -> Optional[int]:
+    """ISO BMFF 트리에서 첫 ``stts`` 의 총 샘플 수 (일반적으로 비디오 트랙)."""
+    pos = start
+    containers = {
+        b"moov",
+        b"trak",
+        b"mdia",
+        b"minf",
+        b"stbl",
+        b"edts",
+        b"moof",
+        b"traf",
+        b"meta",
+    }
+    while pos + 8 <= end:
+        size = struct.unpack_from(">I", data, pos)[0]
+        typ = data[pos + 4 : pos + 8]
+        if size < 8:
+            break
+        if size == 1:
+            if pos + 16 > end:
+                break
+            box_len = struct.unpack_from(">Q", data, pos + 8)[0]
+            header = 16
+        elif size == 0:
+            box_len = end - pos
+            header = 8
+        else:
+            box_len = size
+            header = 8
+        box_end = pos + box_len
+        if box_end > end:
+            box_end = end
+        content_start = pos + header
+        if typ == b"stts":
+            n = _parse_stts_inner(data[content_start:box_end])
+            return n if n > 0 else None
+        if typ in containers:
+            sub = _find_stts_sample_total(data, content_start, box_end)
+            if sub is not None:
+                return sub
+        pos = box_end
+    return None
+
+
+def _count_mov_frames(path: Path) -> Optional[int]:
+    """MOV/MP4/M4V 파일에서 비디오 샘플 수(프레임 수)를 순수 Python으로 읽는다."""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if len(data) < 32:
+        return None
+    total = _find_stts_sample_total(data, 0, len(data))
+    return total if total is not None and total > 0 else None
+
+
+def _scan_plate_frame_range(plate_hi: Path) -> Optional[Tuple[int, int]]:
+    """EXR 시퀀스면 파일명 min/max, 없으면 MOV/MP4/M4V 첫 파일로 ``1001`` 기준 길이 반영."""
+    nums: List[int] = []
+    try:
+        if not plate_hi.is_dir():
+            return None
+        for p in plate_hi.glob("*.exr"):
+            m = _EXR_FRAME_NUM_RE.search(p.name)
+            if m:
+                nums.append(int(m.group(1)))
+        if nums:
+            return (min(nums), max(nums))
+        for pattern in _PLATE_VIDEO_GLOBS:
+            candidates = sorted(plate_hi.glob(pattern))
+            for p in candidates:
+                if not p.is_file():
+                    continue
+                n = _count_mov_frames(p)
+                if n is not None and n > 0:
+                    last = _DEFAULT_FRAME_FIRST + n - 1
+                    return (_DEFAULT_FRAME_FIRST, last)
+    except OSError:
+        return None
+    return None
+
+
+def _read_file_path_from_inner(inner: str) -> Optional[str]:
+    """Read 블록 inner 에서 ``file`` 노브 경로 문자열을 꺼낸다."""
+    m = re.search(r'(?m)^( file )"([^"]*)"', inner)
+    if m:
+        return m.group(2)
+    m2 = re.search(r"(?m)^( file )\{([^}]*)\}", inner)
+    if m2:
+        return m2.group(2).strip()
+    m3 = re.search(r"(?m)^( file )(\S+)", inner)
+    if m3:
+        return m3.group(2)
+    return None
+
+
+def _patch_read_frame_range(body: str, first: int, last: int) -> str:
+    """
+    ``/plate/`` 경로 Read 의 first/last/orig* 및 ``origset`` 을 맞추고,
+    첫 번째 Viewer 의 ``frame_range`` 를 갱신한다.
+    """
+    blocks = _find_blocks_with_positions(body, "Read")
+    result = body
+    for start, end, inner in reversed(blocks):
+        fp = _read_file_path_from_inner(inner)
+        if not fp or not _is_plate_read_file_path(fp):
+            continue
+        new_inner = inner
+        new_inner = re.sub(r"(?m)^ first \d+$", f" first {first}", new_inner)
+        new_inner = re.sub(r"(?m)^ last \d+$", f" last {last}", new_inner)
+        new_inner = re.sub(r"(?m)^ origfirst \d+$", f" origfirst {first}", new_inner)
+        new_inner = re.sub(r"(?m)^ origlast \d+$", f" origlast {last}", new_inner)
+        new_inner = re.sub(r"(?m)^ origset true$", " origset false", new_inner)
+        if new_inner != inner:
+            result = result[:start] + f"Read {{{new_inner}}}" + result[end:]
+
+    result = re.sub(
+        r"(Viewer \{\n frame_range )\d+-\d+",
+        rf"\g<1>{first}-{last}",
+        result,
+        count=1,
+    )
+    return result
+
+
+def strip_eo7_mov_problem_knobs_from_nk_body(body: str) -> str:
+    """
+    eo7Write1(MOV 프리뷰) 블록에서 멀티프레임 렌더를 막는 노브를 제거한다.
+
+    ``raw true`` + ``in/out_colorspace scene_linear`` 등은 Nuke 가 MOV Write 를
+    단일 프레임 통과로 처리하게 해 ``cannot be executed for multiple frames`` 를
+    유발할 수 있다.
+    """
+    blocks = _find_blocks_with_positions(body, "Write")
+    for start, end, inner in reversed(blocks):
+        if not re.search(r"(?m)^ name eo7Write1\s*$", inner):
+            continue
+        new_inner = inner
+        for pat in (
+            r"(?m)^ raw true\s*\n",
+            r"(?m)^ colorspace qc_interchange\s*\n",
+            r"(?m)^ in_colorspace scene_linear\s*\n",
+            r"(?m)^ out_colorspace scene_linear\s*\n",
+        ):
+            new_inner = re.sub(pat, "", new_inner)
+        if new_inner != inner:
+            return body[:start] + f"Write {{{new_inner}}}" + body[end:]
+    return body
 
 
 def _patch_read_colorspace(body: str, colorspace: str) -> str:
@@ -418,7 +710,13 @@ def _generate_nk_minimal(
         write_file_type, write_ext = "mov", "mov"
     else:
         write_file_type, write_ext = "exr", "exr"
-    write_file = f"{_to_nk_path(paths['renders'])}/{shot_name}_comp_{nk_version}.####.{write_ext}"
+    # MOV/QuickTime은 단일 파일 — #### 시퀀스 접미사를 쓰면 Nuke가 멀티프레임 Write로
+    # 처리하려다 "cannot be executed for multiple frames" 오류가 난다.
+    renders = _to_nk_path(paths["renders"])
+    if write_file_type == "mov":
+        write_file = f"{renders}/{shot_name}_comp_{nk_version}.{write_ext}"
+    else:
+        write_file = f"{renders}/{shot_name}_comp_{nk_version}.####.{write_ext}"
     channels = preset_data.get("write_channels", "all") or "all"
     datatype_val = _preset_datatype_string(preset_data)
     comp_raw = preset_data.get("write_compression", "PIZ Wavelet (32 scanlines)") or ""
@@ -437,6 +735,8 @@ def _generate_nk_minimal(
     comp_val = comp_map.get(comp_raw, "PIZ Wavelet")
     metadata_raw = preset_data.get("write_metadata", "all metadata") or "all metadata"
     fmt_str = f"{width} {height} 0 0 {width} {height} 1 {format_name}"
+    fr = _scan_plate_frame_range(paths["plate_hi"])
+    first_fr, last_fr = fr if fr else (_DEFAULT_FRAME_FIRST, _DEFAULT_FRAME_LAST)
     lines = [
         "set cut_paste_input [stack 0]",
         "version 14.1 v4",
@@ -444,6 +744,8 @@ def _generate_nk_minimal(
         " inputs 0",
         f" fps {fps}",
         f' format "{fmt_str}"',
+        f" first_frame {first_fr}",
+        f" last_frame {last_fr}",
         *(
             [
                 " colorManagement OCIO",
@@ -540,6 +842,9 @@ def generate_nk_content(
     body = body.replace("/palte/", "/plate/")
     body = body.replace("\\palte\\", "\\plate\\")
 
+    # 템플릿이 E107 고정값이 아닌 다른 샷(E102 등)으로 저장된 경우 Read file 경로가 남는 문제
+    body = _patch_read_plate_file_paths(body, shot_name, paths)
+
     # Patch comp version in Viewer NDISender etc.
     body = re.sub(
         rf"(monitorOutNDISenderName \"NukeX - {re.escape(shot_name)}_comp_)v\d+",
@@ -582,11 +887,15 @@ def generate_nk_content(
             "  Write 설정(compression/datatype/colorspace)이 적용되지 않았습니다."
         )
 
-    body, eo7_ok = _patch_eo7_mov_write(body, preset_data)
-    if not eo7_ok:
-        warnings.append("⚠ eo7Write1 MOV 노드 패치 실패: display/view 설정이 적용되지 않았습니다.")
+    body, _ = _patch_eo7_mov_write(body, preset_data)
+    body = strip_eo7_mov_problem_knobs_from_nk_body(body)
+
+    fr = _scan_plate_frame_range(paths["plate_hi"])
+    first_fr, last_fr = fr if fr else (_DEFAULT_FRAME_FIRST, _DEFAULT_FRAME_LAST)
 
     body = _patch_viewer_fps(body, fps)
+    if fr is not None:
+        body = _patch_read_frame_range(body, fr[0], fr[1])
 
     # Root block override (inserted after version line)
     root_block = (
@@ -594,6 +903,8 @@ def generate_nk_content(
         " inputs 0\n"
         f" fps {fps}\n"
         f' format "{fmt_str}"\n'
+        f" first_frame {first_fr}\n"
+        f" last_frame {last_fr}\n"
         " colorManagement OCIO\n"
         " OCIO_config custom\n"
         f' customOCIOConfigPath "{ocio_path}"\n'
@@ -609,4 +920,23 @@ def generate_nk_content(
         second_nl = body.find("\n", body.find("\n") + 1)
         insert_pos = (second_nl + 1) if second_nl != -1 else 0
 
-    return body[:insert_pos] + root_block + body[insert_pos:], warnings
+    final_body = body[:insert_pos] + root_block + body[insert_pos:]
+    warnings.extend(_template_sample_path_warnings(final_body))
+    return final_body, warnings
+
+
+def _template_sample_path_warnings(body: str) -> List[str]:
+    """템플릿 샘플 경로가 그대로 남아 있으면 경고를 반환한다."""
+    out: List[str] = []
+    if _TEMPLATE_SAMPLE_SHOT_ROOT in body:
+        out.append(
+            "⚠ NK에 템플릿 샘플 경로(W:/vfx/...)가 남아 있습니다. "
+            "Read/Write file 경로를 수동으로 확인하세요."
+        )
+    bs = _TEMPLATE_SAMPLE_SHOT_ROOT.replace("/", "\\")
+    if bs in body:
+        out.append(
+            "⚠ NK에 템플릿 샘플 경로(백슬래시)가 남아 있습니다. "
+            "Read/Write file 경로를 수동으로 확인하세요."
+        )
+    return out

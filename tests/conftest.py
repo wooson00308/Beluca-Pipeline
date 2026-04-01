@@ -26,4 +26,9 @@ def tmp_app_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(cfg, "DATATYPE_CACHE_FILE", cache_dir / "nuke_write_datatypes.json")
     monkeypatch.setattr(cfg, "OCIO_CONFIG_CACHE_FILE", cache_dir / "ocio_configs.json")
 
+    # Presets default dir must stay under isolated APP_DIR (not team W: drive).
+    import bpe.core.settings as settings_mod
+
+    monkeypatch.setattr(settings_mod, "_DEFAULT_PRESETS_DIR", app_dir)
+
     return app_dir

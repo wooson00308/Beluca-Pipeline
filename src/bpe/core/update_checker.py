@@ -25,6 +25,20 @@ def _make_ssl_context() -> ssl.SSLContext:
         return ssl.create_default_context()
 
 
+def _ssl_contexts() -> list:
+    """검증 강도 순서로 SSL 컨텍스트를 반환한다.
+
+    1. certifi / 시스템 인증서
+    2. 검증 비활성화 (PyInstaller 번들에서 인증서가 누락된 경우)
+    """
+    contexts = [_make_ssl_context()]
+    unverified = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    unverified.check_hostname = False
+    unverified.verify_mode = ssl.CERT_NONE
+    contexts.append(unverified)
+    return contexts
+
+
 logger = get_logger("update_checker")
 
 GITHUB_REPO_OWNER = "wooson00308"
@@ -116,26 +130,39 @@ def download_release_asset(
     """릴리즈 에셋을 *dest* 경로에 다운로드한다.
 
     *progress_cb* 가 주어지면 0.0 ~ 1.0 범위로 진행률을 보고한다.
+    SSL 검증 실패 시 unverified 컨텍스트로 재시도한다.
     """
-    req = urllib.request.Request(url, headers={"User-Agent": "BPE-UpdateChecker"})
     dest.parent.mkdir(parents=True, exist_ok=True)
-    ctx = _make_ssl_context()
+    last_err: Optional[Exception] = None
 
-    with urllib.request.urlopen(req, timeout=60, context=ctx) as resp:
-        total = int(resp.headers.get("Content-Length", 0))
-        downloaded = 0
+    for ctx in _ssl_contexts():
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "BPE-UpdateChecker"})
+            with urllib.request.urlopen(req, timeout=120, context=ctx) as resp:
+                total = int(resp.headers.get("Content-Length", 0))
+                downloaded = 0
 
-        with open(dest, "wb") as fp:
-            while True:
-                chunk = resp.read(_CHUNK_SIZE)
-                if not chunk:
-                    break
-                fp.write(chunk)
-                downloaded += len(chunk)
-                if progress_cb and total > 0:
-                    progress_cb(downloaded / total)
+                with open(dest, "wb") as fp:
+                    while True:
+                        chunk = resp.read(_CHUNK_SIZE)
+                        if not chunk:
+                            break
+                        fp.write(chunk)
+                        downloaded += len(chunk)
+                        if progress_cb and total > 0:
+                            progress_cb(downloaded / total)
 
-    return dest
+            logger.info("다운로드 완료: %s (%d bytes)", dest.name, dest.stat().st_size)
+            return dest
+        except (ssl.SSLError, ssl.SSLCertVerificationError) as e:
+            logger.warning("SSL 에러, 다음 컨텍스트로 재시도: %s", e)
+            last_err = e
+            continue
+        except Exception as e:
+            logger.warning("다운로드 실패: %s", e)
+            raise
+
+    raise last_err or RuntimeError("다운로드 실패: 모든 SSL 컨텍스트 시도 완료")
 
 
 def extract_windows_exe(zip_path: Path) -> Path:

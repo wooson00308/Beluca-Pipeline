@@ -8,9 +8,18 @@ from typing import Any, Dict, Optional
 import bpe.core.config as cfg
 from bpe.core.atomic_io import read_json_file, write_json_file
 
+# Default presets directory when settings.json has no presets_dir (team pipeline).
+_DEFAULT_PRESETS_DIR = Path(r"W:\team\_Pipeline\Nuke Environment Presets")
+
 _DEFAULT_TOOLS: Dict[str, Any] = {
     "qc_checker": {"enabled": False},
     "post_render_viewer": {"enabled": False},
+}
+
+# 팀 서버 UNC → W: 드라이브 기본 매핑.
+# settings.json 의 unc_mappings 가 있으면 같은 키는 파일 값이 우선(덮어씀).
+_DEFAULT_UNC_MAPPINGS: Dict[str, str] = {
+    "//zeus.lennon.co.kr/beluca": "W:",
 }
 
 
@@ -31,7 +40,31 @@ def get_presets_dir(settings_file: Optional[Path] = None) -> Path:
     p = settings.get("presets_dir")
     if isinstance(p, str) and p.strip():
         return Path(p.strip())
-    return cfg.APP_DIR
+    return _DEFAULT_PRESETS_DIR
+
+
+def get_unc_mappings(settings_file: Optional[Path] = None) -> Dict[str, str]:
+    """Return UNC root → drive letter mappings.
+
+    :data:`_DEFAULT_UNC_MAPPINGS` 를 기본값으로 쓰고, ``settings.json`` 의
+    ``unc_mappings`` 에 같은 키가 있으면 파일 값이 우선한다.
+    """
+    merged: Dict[str, str] = dict(_DEFAULT_UNC_MAPPINGS)
+    settings = load_settings(settings_file)
+    m = settings.get("unc_mappings")
+    if not isinstance(m, dict):
+        return merged
+    for k, v in m.items():
+        if isinstance(k, str) and isinstance(v, str) and k.strip() and v.strip():
+            merged[k.strip()] = v.strip()
+    return merged
+
+
+def set_unc_mappings(mappings: Dict[str, str], settings_file: Optional[Path] = None) -> None:
+    """Set ``unc_mappings`` in settings.json. Preserves other keys."""
+    settings = load_settings(settings_file)
+    settings["unc_mappings"] = dict(mappings)
+    save_settings(settings, settings_file)
 
 
 def set_presets_dir(path_str: str, settings_file: Optional[Path] = None) -> None:

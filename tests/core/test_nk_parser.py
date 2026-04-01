@@ -11,6 +11,9 @@ from bpe.core.nk_parser import (
     _extract_all_blocks,
     _find_named_block,
     _get_knob,
+    merge_nk_preserve_root_template,
+    merge_nodetree_content,
+    merge_parsed_into_preset,
     parse_nk_file,
     parse_nk_for_preset,
 )
@@ -196,7 +199,9 @@ class TestParseNkFile:
         p = tmp_path / "empty.nk"
         p.write_text("", encoding="utf-8")
         result = parse_nk_file(str(p))
-        assert result == {}
+        assert "_node_stats" in result
+        assert result["_node_stats"]["total"] == 0
+        assert result["_node_stats"]["by_type"] == {}
 
     def test_braced_format(self, tmp_path: Path):
         """Root format in {value} notation."""
@@ -206,6 +211,26 @@ class TestParseNkFile:
         result = parse_nk_file(str(p))
         assert result["plate_width"] == "1920"
         assert result["plate_height"] == "1080"
+
+    def test_write_exr_datatype_inferred_when_missing(self, tmp_path: Path):
+        """EXR Write without explicit datatype knob → inferred '16 bit half'."""
+        nk = (
+            'Write {\n file_type exr\n channels rgba\n compression "PIZ Wavelet"\n name Write2\n}\n'
+        )
+        p = tmp_path / "test.nk"
+        p.write_text(nk, encoding="utf-8")
+        result = parse_nk_file(str(p))
+        assert result["write_datatype"] == "16 bit half"
+        assert result["delivery_format"] == "EXR 16bit"
+
+    def test_write_exr_datatype_explicit_overrides_inference(self, tmp_path: Path):
+        """Explicit datatype knob must not be replaced by inference."""
+        nk = 'Write {\n file_type exr\n datatype "32 bit float"\n name Write2\n}\n'
+        p = tmp_path / "test.nk"
+        p.write_text(nk, encoding="utf-8")
+        result = parse_nk_file(str(p))
+        assert result["write_datatype"] == "32 bit float"
+        assert result["delivery_format"] == "EXR 32bit"
 
 
 # ---------------------------------------------------------------------------
@@ -218,10 +243,11 @@ class TestParseNkForPreset:
         """Empty NK file should produce a dict with all default values."""
         p = tmp_path / "empty.nk"
         p.write_text("", encoding="utf-8")
-        result = parse_nk_for_preset(str(p))
+        result, stats = parse_nk_for_preset(str(p))
         for key, default in _PRESET_DEFAULTS.items():
             assert key in result
             assert result[key] == default
+        assert stats["total"] == 0
 
     def test_detected_values_override_defaults(self, tmp_path: Path):
         nk = (
@@ -239,7 +265,7 @@ class TestParseNkForPreset:
         )
         p = tmp_path / "test.nk"
         p.write_text(nk, encoding="utf-8")
-        result = parse_nk_for_preset(str(p))
+        result, _stats = parse_nk_for_preset(str(p))
         assert result["fps"] == "24"
         assert result["plate_width"] == "4096"
         assert result["plate_height"] == "2160"
@@ -251,7 +277,7 @@ class TestParseNkForPreset:
     def test_preset_name_sets_project_code(self, tmp_path: Path):
         p = tmp_path / "test.nk"
         p.write_text("", encoding="utf-8")
-        result = parse_nk_for_preset(str(p), preset_name="MY_PROJECT")
+        result, _stats = parse_nk_for_preset(str(p), preset_name="MY_PROJECT")
         assert result["project_code"] == "MY_PROJECT"
 
     def test_write_colorspace_fallback(self, tmp_path: Path):
@@ -259,7 +285,7 @@ class TestParseNkForPreset:
         nk = 'Write {\n file_type exr\n ocioColorspace "ACES - ACEScg"\n name Write2\n}\n'
         p = tmp_path / "test.nk"
         p.write_text(nk, encoding="utf-8")
-        result = parse_nk_for_preset(str(p))
+        result, _stats = parse_nk_for_preset(str(p))
         assert result["write_colorspace"] == result["write_out_colorspace"]
         assert result["write_colorspace"] == "ACES - ACEScg"
 
@@ -271,6 +297,175 @@ class TestParseNkForPreset:
         """Result should always contain every key from _PRESET_DEFAULTS."""
         p = tmp_path / "minimal.nk"
         p.write_text("Root {\n fps 30\n}\n", encoding="utf-8")
-        result = parse_nk_for_preset(str(p))
+        result, _stats = parse_nk_for_preset(str(p))
         for key in _PRESET_DEFAULTS:
             assert key in result
+
+
+# ---------------------------------------------------------------------------
+# Extended parsing — OCIO LUT, Viewer, MOV, node stats, merge
+# ---------------------------------------------------------------------------
+
+
+class TestParseNkFileExtended:
+    def test_root_ocio_lut_settings(self, tmp_path: Path):
+        nk = (
+            "Root {\n"
+            ' workingSpaceLUT "ACES - ACEScg"\n'
+            ' monitorLut "Rec.709"\n'
+            ' int8Lut "sRGB"\n'
+            ' int16Lut "ACEScc"\n'
+            ' logLut "ADX10"\n'
+            ' floatLut "ACEScg"\n'
+            "}\n"
+        )
+        p = tmp_path / "t.nk"
+        p.write_text(nk, encoding="utf-8")
+        r = parse_nk_file(str(p))
+        assert r["working_space_lut"] == "ACES - ACEScg"
+        assert r["monitor_lut"] == "Rec.709"
+        assert r["int8_lut"] == "sRGB"
+        assert r["int16_lut"] == "ACEScc"
+        assert r["log_lut"] == "ADX10"
+        assert r["float_lut"] == "ACEScg"
+
+    def test_root_color_management(self, tmp_path: Path):
+        nk = "Root {\n colorManagement OCIO\n}\n"
+        p = tmp_path / "t.nk"
+        p.write_text(nk, encoding="utf-8")
+        r = parse_nk_file(str(p))
+        assert r["color_management"] == "OCIO"
+
+    def test_root_format_name_plate(self, tmp_path: Path):
+        nk = 'Root {\n format "3840 2076 0 0 3840 2076 1 plate"\n}\n'
+        p = tmp_path / "t.nk"
+        p.write_text(nk, encoding="utf-8")
+        r = parse_nk_file(str(p))
+        assert r["plate_format_name"] == "plate"
+
+    def test_viewer_process(self, tmp_path: Path):
+        nk = 'Viewer {\n viewerProcess "Rec.709 (ACES)"\n name Viewer1\n}\n'
+        p = tmp_path / "t.nk"
+        p.write_text(nk, encoding="utf-8")
+        r = parse_nk_file(str(p))
+        assert r["viewer_process"] == "Rec.709 (ACES)"
+
+    def test_mov_write_node(self, tmp_path: Path):
+        nk = (
+            "Write {\n"
+            " file_type mov\n"
+            ' mov64_codec "Apple ProRes 422 HQ"\n'
+            ' colorspace "Rec.709"\n'
+            " name WriteMov\n"
+            "}\n"
+        )
+        p = tmp_path / "t.nk"
+        p.write_text(nk, encoding="utf-8")
+        r = parse_nk_file(str(p))
+        assert r["mov_codec"] == "Apple ProRes 422 HQ"
+        assert r["mov_colorspace"] == "Rec.709"
+        assert r["delivery_format"] == "ProRes 422 HQ"
+
+    def test_mov_extended_fields(self, tmp_path: Path):
+        """MOV Write node: fps, channels, display, view, codec_profile are captured."""
+        nk = (
+            "Write {\n"
+            " file_type mov\n"
+            ' mov64_codec "apcn"\n'
+            ' mov64_codec_profile "High Quality"\n'
+            " fps 23.976\n"
+            " channels rgb\n"
+            " display ACES\n"
+            ' view "Rec.709"\n'
+            " name WriteMov\n"
+            "}\n"
+        )
+        p = tmp_path / "t.nk"
+        p.write_text(nk, encoding="utf-8")
+        r = parse_nk_file(str(p))
+        assert r["mov_codec"] == "apcn"
+        assert r["mov_profile"] == "High Quality"
+        assert r["mov_fps"] == "23.976"
+        assert r["mov_channels"] == "rgb"
+        assert r["mov_display"] == "ACES"
+        assert r["mov_view"] == "Rec.709"
+
+    def test_exr_and_mov_write_both(self, tmp_path: Path):
+        nk = (
+            "Write {\n"
+            " file_type mov\n"
+            ' mov64_codec "ProRes"\n'
+            " name WMov\n"
+            "}\n"
+            "Write {\n"
+            " file_type exr\n"
+            ' datatype "16 bit half"\n'
+            ' compression "PIZ Wavelet"\n'
+            ' ocioColorspace "ACES2065"\n'
+            " name Write2\n"
+            "}\n"
+        )
+        p = tmp_path / "t.nk"
+        p.write_text(nk, encoding="utf-8")
+        r = parse_nk_file(str(p))
+        assert r["mov_codec"] == "ProRes"
+        assert r["write_out_colorspace"] == "ACES2065"
+        assert r["delivery_format"] == "EXR 16bit"
+
+    def test_node_stats(self, tmp_path: Path):
+        nk = (
+            "Root {\n fps 24\n}\n"
+            "Read {\n name Read1\n}\n"
+            "Read {\n name Read2\n}\n"
+            "Write {\n file_type exr\n name Write2\n}\n"
+        )
+        p = tmp_path / "t.nk"
+        p.write_text(nk, encoding="utf-8")
+        r = parse_nk_file(str(p))
+        stats = r["_node_stats"]
+        assert stats["total"] >= 4
+        assert stats["by_type"]["Root"] == 1
+        assert stats["by_type"]["Write"] == 1
+        assert len(stats["write_names"]) == 1
+        assert len(stats["read_names"]) == 2
+
+    def test_merge_parsed_into_preset(self, tmp_path: Path):
+        p = tmp_path / "t.nk"
+        p.write_text("Root {\n fps 30\n}\n", encoding="utf-8")
+        raw = parse_nk_file(str(p))
+        raw.pop("_node_stats", None)
+        merged = merge_parsed_into_preset(raw)
+        assert merged["fps"] == "30"
+        assert merged["project_code"] == ""
+
+    def test_merge_nk_preserve_root_template(self) -> None:
+        old = (
+            "set x 1\n"
+            "Root {\n"
+            " fps 24\n"
+            ' customOCIOConfigPath "W:/old"\n'
+            "}\n"
+            "Write {\n name Write1\n}\n"
+        )
+        new = 'Root {\n fps 30\n customOCIOConfigPath "W:/new"\n}\nRead {\n name Read9\n}\n'
+        out = merge_nk_preserve_root_template(old, new)
+        assert "W:/old" in out
+        assert "Read9" in out
+        assert "Write1" not in out
+
+    def test_merge_nodetree_content_with_root(self) -> None:
+        """When new content has Root, delegate to merge_nk_preserve_root_template."""
+        old = "Root {\n}\nWrite {\n name W1\n}\n"
+        new = "Root {\n}\nRead {\n name R1\n}\n"
+        out = merge_nodetree_content(old, new)
+        assert "R1" in out
+        assert "W1" not in out
+
+    def test_merge_nodetree_content_no_root(self) -> None:
+        """Nuke Ctrl+C style (no Root): append after old Root."""
+        old = "Root {\n fps 24\n}\nWrite {\n name W1\n}\n"
+        new = "Read {\n name R1\n}\n"
+        out = merge_nodetree_content(old, new)
+        assert "fps 24" in out
+        assert "R1" in out
+        assert "W1" not in out

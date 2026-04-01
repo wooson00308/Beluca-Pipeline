@@ -15,11 +15,12 @@ from bpe.core.presets import (
     save_presets,
     upsert_preset,
 )
+from bpe.core.settings import get_presets_dir
 
 
 def test_ensure_store_creates_dirs(tmp_app_dir: Path) -> None:
     ensure_store()
-    assert (tmp_app_dir / "presets.json").exists()
+    assert (get_presets_dir() / "presets.json").exists()
 
 
 def test_empty_presets(tmp_app_dir: Path) -> None:

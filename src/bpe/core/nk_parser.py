@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 def _get_knob(text: str, knob: str) -> Optional[str]:
@@ -53,6 +53,84 @@ def _find_named_block(content: str, node_type: str, node_name: str) -> Optional[
     return None
 
 
+def _parse_format_name_from_root(rb: str) -> Optional[str]:
+    """Last token of quoted or braced Root format line (e.g. plate, UHD)."""
+    m = re.search(r'format\s+"([^"]*)"', rb)
+    if m:
+        parts = m.group(1).split()
+        if len(parts) >= 7:
+            return parts[-1].strip()
+        if parts:
+            return parts[-1].strip()
+    m2 = re.search(r"format\s+\{([^}]*)\}", rb)
+    if m2:
+        parts = m2.group(1).split()
+        if len(parts) >= 7:
+            return parts[-1].strip()
+        if parts:
+            return parts[-1].strip()
+    return None
+
+
+def _collect_node_stats(content: str) -> Dict[str, Any]:
+    """Count node types and collect Read/Write node names (review UI only)."""
+    by_type: Dict[str, int] = {}
+    for line in content.splitlines():
+        m = re.match(r"^\s*([A-Za-z][A-Za-z0-9_]*)\s*\{", line)
+        if m:
+            t = m.group(1)
+            by_type[t] = by_type.get(t, 0) + 1
+
+    write_names: List[str] = []
+    for wb in _extract_all_blocks(content, "Write"):
+        nm = _get_knob(wb, "name")
+        if nm:
+            write_names.append(nm)
+
+    read_names: List[str] = []
+    for rb in _extract_all_blocks(content, "Read"):
+        nm = _get_knob(rb, "name")
+        if nm:
+            read_names.append(nm)
+
+    total = sum(by_type.values())
+    return {
+        "by_type": by_type,
+        "write_names": write_names,
+        "read_names": read_names,
+        "total": total,
+    }
+
+
+def _pick_exr_write_block(all_writes: List[str]) -> Optional[str]:
+    """Prefer Write2 / setup_pro_write with file_type exr, else first exr block."""
+    exr_blocks: List[Tuple[str, str]] = []
+    for wb in all_writes:
+        nm = (_get_knob(wb, "name") or "").strip()
+        ft = (_get_knob(wb, "file_type") or "exr").lower()
+        if ft in ("mov", "mp4"):
+            continue
+        exr_blocks.append((nm, wb))
+
+    if not exr_blocks:
+        return None
+
+    for prefer in ("Write2", "setup_pro_write"):
+        for nm, inner in exr_blocks:
+            if nm == prefer:
+                return inner
+    return exr_blocks[0][1]
+
+
+def _pick_mov_write_block(all_writes: List[str]) -> Optional[str]:
+    """First Write block with file_type mov or mp4."""
+    for wb in all_writes:
+        ft = (_get_knob(wb, "file_type") or "").lower()
+        if ft in ("mov", "mp4"):
+            return wb
+    return None
+
+
 def parse_nk_file(nk_path: str) -> Dict[str, Any]:
     """
     Extract preset-compatible settings from an NK file.
@@ -60,7 +138,7 @@ def parse_nk_file(nk_path: str) -> Dict[str, Any]:
     Handles nested ``{}`` and ``{value}`` formats correctly.
 
     Returns:
-        Dict of detected settings (missing items are omitted).
+        Dict of detected settings. Includes ``_node_stats`` for review UI only.
 
     Raises:
         ValueError: when the file cannot be read.
@@ -71,6 +149,7 @@ def parse_nk_file(nk_path: str) -> Dict[str, Any]:
         raise ValueError(f"NK 파일을 읽지 못했습니다: {e}") from e
 
     result: Dict[str, Any] = {}
+    result["_node_stats"] = _collect_node_stats(content)
 
     # --- Root block ---
     root_blocks = _extract_all_blocks(content, "Root")
@@ -85,29 +164,58 @@ def parse_nk_file(nk_path: str) -> Dict[str, Any]:
                 result["plate_width"] = fmt_m.group(1)
                 result["plate_height"] = fmt_m.group(2)
                 break
+        pfn = _parse_format_name_from_root(rb)
+        if pfn:
+            result["plate_format_name"] = pfn
+
+        cm = _get_knob(rb, "colorManagement")
+        if cm:
+            result["color_management"] = cm
+
+        for nk_knob, key in [
+            ("workingSpaceLUT", "working_space_lut"),
+            ("monitorLut", "monitor_lut"),
+            ("int8Lut", "int8_lut"),
+            ("int16Lut", "int16_lut"),
+            ("logLut", "log_lut"),
+            ("floatLut", "float_lut"),
+        ]:
+            v = _get_knob(rb, nk_knob)
+            if v:
+                result[key] = v
         ocio = _get_knob(rb, "customOCIOConfigPath")
         if ocio:
             result["ocio_path"] = ocio.replace("\\\\", "\\").strip()
 
-    # --- Write block ---
-    wb = _find_named_block(content, "Write", "Write2") or _find_named_block(
-        content, "Write", "setup_pro_write"
-    )
-    if not wb:
-        all_writes = _extract_all_blocks(content, "Write")
-        wb = all_writes[0] if all_writes else None
-    if wb:
+    # --- Viewer (first) ---
+    viewer_blocks = _extract_all_blocks(content, "Viewer")
+    if viewer_blocks:
+        vp = _get_knob(viewer_blocks[0], "viewerProcess")
+        if vp:
+            result["viewer_process"] = vp
+
+    # --- Write blocks: EXR vs MOV ---
+    all_writes = _extract_all_blocks(content, "Write")
+    wb_exr = _pick_exr_write_block(all_writes)
+    wb_mov = _pick_mov_write_block(all_writes)
+
+    if wb_exr:
         result["write_enabled"] = True
         for knob, key in [
             ("channels", "write_channels"),
-            ("datatype", "write_datatype"),
             ("compression", "write_compression"),
             ("metadata", "write_metadata"),
         ]:
-            v = _get_knob(wb, knob)
+            v = _get_knob(wb_exr, knob)
             if v:
                 result[key] = v
-        file_type = _get_knob(wb, "file_type")
+        file_type = _get_knob(wb_exr, "file_type")
+        # datatype: Nuke 기본값(16 bit half)은 NK에 저장 안 됨 → EXR이면 추론
+        dt_val = _get_knob(wb_exr, "datatype")
+        if dt_val:
+            result["write_datatype"] = dt_val
+        elif file_type == "exr":
+            result["write_datatype"] = "16 bit half"
         if file_type == "exr":
             dt = (result.get("write_datatype") or "").lower()
             result["delivery_format"] = (
@@ -115,10 +223,10 @@ def parse_nk_file(nk_path: str) -> Dict[str, Any]:
             )
         elif file_type in ("mov", "mp4"):
             result["delivery_format"] = "ProRes 422 HQ"
-        ocio_cs = _get_knob(wb, "ocioColorspace")
-        colorspace = _get_knob(wb, "colorspace")
-        display = _get_knob(wb, "display")
-        view = _get_knob(wb, "view")
+        ocio_cs = _get_knob(wb_exr, "ocioColorspace")
+        colorspace = _get_knob(wb_exr, "colorspace")
+        display = _get_knob(wb_exr, "display")
+        view = _get_knob(wb_exr, "view")
         if ocio_cs:
             result["write_out_colorspace"] = ocio_cs
             result["write_colorspace"] = ocio_cs
@@ -133,6 +241,36 @@ def parse_nk_file(nk_path: str) -> Dict[str, Any]:
             result["write_transform_type"] = "colorspace"
         elif display and view:
             result["write_transform_type"] = "display/view"
+
+    if wb_mov:
+        codec = _get_knob(wb_mov, "mov64_codec") or _get_knob(wb_mov, "codec")
+        if codec:
+            result["mov_codec"] = codec
+        profile = (
+            _get_knob(wb_mov, "mov64_codec_profile")
+            or _get_knob(wb_mov, "mov64_profile")
+            or _get_knob(wb_mov, "mov64_quality")
+        )
+        if profile:
+            result["mov_profile"] = profile
+        fps_mov = _get_knob(wb_mov, "fps")
+        if fps_mov:
+            result["mov_fps"] = fps_mov
+        ch_mov = _get_knob(wb_mov, "channels")
+        if ch_mov:
+            result["mov_channels"] = ch_mov
+        mcs = _get_knob(wb_mov, "ocioColorspace") or _get_knob(wb_mov, "colorspace")
+        if mcs:
+            result["mov_colorspace"] = mcs
+        md = _get_knob(wb_mov, "display")
+        if md:
+            result["mov_display"] = md
+        mv = _get_knob(wb_mov, "view")
+        if mv:
+            result["mov_view"] = mv
+
+    if "delivery_format" not in result and wb_mov:
+        result["delivery_format"] = "ProRes 422 HQ"
 
     # --- Read block ---
     rb_read = (
@@ -162,6 +300,21 @@ _PRESET_DEFAULTS: Dict[str, Any] = {
     "plate_width": "1920",
     "plate_height": "1080",
     "ocio_path": "",
+    "color_management": "",
+    "working_space_lut": "",
+    "monitor_lut": "",
+    "int8_lut": "",
+    "int16_lut": "",
+    "log_lut": "",
+    "float_lut": "",
+    "viewer_process": "",
+    "mov_codec": "",
+    "mov_profile": "",
+    "mov_fps": "",
+    "mov_channels": "",
+    "mov_colorspace": "",
+    "mov_display": "",
+    "mov_view": "",
     "write_enabled": True,
     "write_channels": "all",
     "write_datatype": "16 bit half",
@@ -176,22 +329,79 @@ _PRESET_DEFAULTS: Dict[str, Any] = {
 }
 
 
-def parse_nk_for_preset(nk_path: str, preset_name: str = "") -> Dict[str, Any]:
+def merge_parsed_into_preset(
+    parsed_fields: Dict[str, Any], preset_name: str = ""
+) -> Dict[str, Any]:
     """
-    Parse an NK file and return a complete preset dict with defaults filled in.
+    Merge output of :func:`parse_nk_file` (with ``_node_stats`` already removed)
+    into a full preset dict using :data:`_PRESET_DEFAULTS`.
+    """
+    data: Dict[str, Any] = {}
+    for key, default in _PRESET_DEFAULTS.items():
+        data[key] = parsed_fields.get(key, default)
+    if "write_colorspace" not in parsed_fields:
+        data["write_colorspace"] = data["write_out_colorspace"]
+    if preset_name:
+        data["project_code"] = preset_name
+    return data
+
+
+def parse_nk_for_preset(
+    nk_path: str, preset_name: str = ""
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    Parse an NK file and return a complete preset dict with defaults filled in,
+    plus node statistics for review UI.
 
     *preset_name* is written into ``project_code`` when provided.
+
+    Returns:
+        ``(preset_data, node_stats)`` — *node_stats* is empty if no file stats.
 
     Raises ``ValueError`` when the file cannot be read (propagated from
     :func:`parse_nk_file`).
     """
     parsed = parse_nk_file(nk_path)
-    data: Dict[str, Any] = {}
-    for key, default in _PRESET_DEFAULTS.items():
-        data[key] = parsed.get(key, default)
-    # write_colorspace falls back to write_out_colorspace when not explicitly set
-    if "write_colorspace" not in parsed:
-        data["write_colorspace"] = data["write_out_colorspace"]
-    if preset_name:
-        data["project_code"] = preset_name
-    return data
+    node_stats = parsed.pop("_node_stats", {})
+    data = merge_parsed_into_preset(parsed, preset_name=preset_name)
+    return data, node_stats
+
+
+def merge_nk_preserve_root_template(old_nk: str, new_nk: str) -> str:
+    """
+    Keep the first ``Root`` block and everything before it from *old_nk*,
+    append everything after the first ``Root`` block from *new_nk*.
+
+    Used when replacing only the node tree while preserving project Root settings.
+    """
+    from bpe.core.nk_generator import _find_blocks_with_positions
+
+    old_roots = _find_blocks_with_positions(old_nk, "Root")
+    new_roots = _find_blocks_with_positions(new_nk, "Root")
+    if not old_roots:
+        raise ValueError("기존 NK에서 Root 블록을 찾을 수 없습니다.")
+    if not new_roots:
+        raise ValueError("새 NK에서 Root 블록을 찾을 수 없습니다.")
+    _, end_old, _ = old_roots[0]
+    _, end_new, _ = new_roots[0]
+    return old_nk[:end_old] + new_nk[end_new:]
+
+
+def merge_nodetree_content(old_template: str, new_content: str) -> str:
+    """
+    Replace or append node tree content after the first ``Root`` block.
+
+    If *new_content* contains a ``Root`` block, use ``merge_nk_preserve_root_template``.
+    Otherwise (e.g. Nuke Ctrl+C node copy with no Root), append after the first
+    ``Root`` block of *old_template*.
+    """
+    from bpe.core.nk_generator import _find_blocks_with_positions
+
+    new_roots = _find_blocks_with_positions(new_content, "Root")
+    if new_roots:
+        return merge_nk_preserve_root_template(old_template, new_content)
+    old_roots = _find_blocks_with_positions(old_template, "Root")
+    if not old_roots:
+        raise ValueError("기존 NK 템플릿에서 Root 블록을 찾을 수 없습니다.")
+    _, end_old, _ = old_roots[0]
+    return old_template[:end_old] + "\n" + new_content.strip() + "\n"

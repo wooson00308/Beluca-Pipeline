@@ -19,6 +19,8 @@ from PySide6.QtWidgets import (
 class _State(Enum):
     NOTIFY = auto()
     DOWNLOADING = auto()
+    READY = auto()
+    ERROR = auto()
     DONE = auto()
 
 
@@ -26,7 +28,10 @@ class UpdateToast(QWidget):
     """MainWindow 우측 하단 오버레이 토스트."""
 
     install_requested = Signal()
+    restart_requested = Signal()
+    retry_requested = Signal()
     open_folder_requested = Signal(str)
+    open_release_page_requested = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -35,6 +40,7 @@ class UpdateToast(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
         self._download_path = ""
+        self._html_url = ""
 
         # --- widgets ---
         self._msg_label = QLabel()
@@ -84,7 +90,6 @@ class UpdateToast(QWidget):
     def show_update(self, version: str, release_notes: str = "") -> None:
         self._msg_label.setText(f"v{version} 업데이트 가능")
         if release_notes:
-            # 첫 2줄만 표시
             lines = release_notes.strip().splitlines()[:2]
             self._notes_label.setText("\n".join(lines))
             self._notes_label.setVisible(True)
@@ -97,12 +102,34 @@ class UpdateToast(QWidget):
     def show_progress(self, value: int) -> None:
         if self._state != _State.DOWNLOADING:
             self._msg_label.setText("다운로드 중...")
+            self._notes_label.setVisible(False)
             self._set_state(_State.DOWNLOADING)
         clamped = max(0, min(100, value))
         self._progress_bar.setValue(clamped)
         self._pct_label.setText(f"{clamped} %")
 
+    def show_ready(self, version: str) -> None:
+        """다운로드+추출 성공 후 재시작 확인 상태."""
+        self._msg_label.setText(f"v{version} 설치 준비 완료!\n재시작하면 새 버전이 적용됩니다.")
+        self._notes_label.setVisible(False)
+        self._btn_primary.setText("재시작")
+        self._btn_secondary.setText("나중에")
+        self._set_state(_State.READY)
+
+    def show_error(self, msg: str, html_url: str = "") -> None:
+        """다운로드/설치 실패 시 에러 표시."""
+        self._html_url = html_url
+        self._msg_label.setText(f"업데이트 실패\n{msg}")
+        self._notes_label.setVisible(False)
+        self._btn_primary.setText("다시 시도")
+        if html_url:
+            self._btn_secondary.setText("Release 페이지")
+        else:
+            self._btn_secondary.setText("닫기")
+        self._set_state(_State.ERROR)
+
     def show_done(self, download_path: str) -> None:
+        """macOS: DMG 다운로드 완료 후 폴더 열기."""
         self._download_path = download_path
         self._msg_label.setText("다운로드 완료! 앱을 종료하고 새 버전을 실행하세요.")
         self._btn_primary.setText("폴더 열기")
@@ -122,14 +149,12 @@ class UpdateToast(QWidget):
 
     def _set_state(self, state: _State) -> None:
         self._state = state
-        is_notify = state == _State.NOTIFY
         is_downloading = state == _State.DOWNLOADING
-        is_done = state == _State.DONE
 
         self._progress_bar.setVisible(is_downloading)
         self._pct_label.setVisible(is_downloading)
-        self._btn_primary.setVisible(is_notify or is_done)
-        self._btn_secondary.setVisible(is_notify or is_done)
+        self._btn_primary.setVisible(not is_downloading)
+        self._btn_secondary.setVisible(not is_downloading)
 
         self.show()
         self.raise_()
@@ -139,8 +164,15 @@ class UpdateToast(QWidget):
     def _on_primary(self) -> None:
         if self._state == _State.NOTIFY:
             self.install_requested.emit()
+        elif self._state == _State.READY:
+            self.restart_requested.emit()
+        elif self._state == _State.ERROR:
+            self.retry_requested.emit()
         elif self._state == _State.DONE:
             self.open_folder_requested.emit(self._download_path)
 
     def _on_secondary(self) -> None:
-        self.hide()
+        if self._state == _State.ERROR and self._html_url:
+            self.open_release_page_requested.emit()
+        else:
+            self.hide()

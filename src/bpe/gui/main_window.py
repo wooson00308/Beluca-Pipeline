@@ -141,7 +141,11 @@ class MainWindow(QMainWindow):
 
         self._toast = UpdateToast(self.centralWidget())
         self._toast.install_requested.connect(self._on_install_requested)
+        self._toast.restart_requested.connect(self._on_restart_requested)
+        self._toast.retry_requested.connect(self._on_install_requested)
         self._toast.open_folder_requested.connect(self._on_open_folder)
+        self._toast.open_release_page_requested.connect(self._on_open_release_page)
+        self._pending_new_exe: Optional[Path] = None
 
     def _start_update_check(self) -> None:
         from bpe.gui.workers.update_worker import UpdateCheckWorker
@@ -164,6 +168,8 @@ class MainWindow(QMainWindow):
     def _on_install_requested(self) -> None:
         info = self._update_info
         if info is None or not info.download_url:
+            html_url = getattr(info, "html_url", "") if info else ""
+            self._toast.show_error("다운로드 URL을 찾을 수 없습니다.", html_url)
             return
 
         suffix = ".dmg" if sys.platform == "darwin" else ".zip"
@@ -180,31 +186,50 @@ class MainWindow(QMainWindow):
         w.start()
         self._workers.append(w)
 
-    def _on_download_error(self, _msg: str) -> None:
-        logger.warning("업데이트 다운로드 실패, 브라우저 폴백: %s", _msg)
+    def _on_download_error(self, msg: str) -> None:
+        logger.warning("업데이트 다운로드 실패: %s", msg)
         info = self._update_info
-        if info is not None and getattr(info, "html_url", ""):
-            QDesktopServices.openUrl(QUrl(info.html_url))
+        html_url = getattr(info, "html_url", "") if info else ""
+        self._toast.show_error(msg or "다운로드 중 오류가 발생했습니다.", html_url)
 
     def _on_download_finished(self, path: str) -> None:
         dl = Path(path)
+        info = self._update_info
+
         if sys.platform == "darwin":
             self._toast.show_done(path)
             return
+
         if sys.platform == "win32":
             try:
-                self._apply_windows_update(dl)
-            except Exception:
-                logger.warning("Windows 업데이트 적용 실패, 브라우저 폴백", exc_info=True)
-                self._on_download_error("")
+                new_exe = update_checker.extract_windows_exe(dl)
+                self._pending_new_exe = new_exe
+                version = getattr(info, "latest_version", "?") if info else "?"
+                self._toast.show_ready(version)
+            except Exception as e:
+                logger.warning("ZIP 추출 실패: %s", e, exc_info=True)
+                html_url = getattr(info, "html_url", "") if info else ""
+                self._toast.show_error(f"설치 파일 추출 실패: {e}", html_url)
             return
-        info = self._update_info
-        if info is not None and getattr(info, "html_url", ""):
-            QDesktopServices.openUrl(QUrl(info.html_url))
 
-    def _apply_windows_update(self, zip_path: Path) -> None:
-        """ZIP 다운로드 후 새 BPE.exe를 풀고, 종료 뒤 교체하는 PS1을 실행한다."""
-        new_exe = update_checker.extract_windows_exe(zip_path)
+        html_url = getattr(info, "html_url", "") if info else ""
+        if html_url:
+            QDesktopServices.openUrl(QUrl(html_url))
+
+    def _on_restart_requested(self) -> None:
+        """사용자가 '재시작' 버튼을 클릭하면 PS1으로 exe 교체 후 앱을 종료한다."""
+        if self._pending_new_exe is None:
+            return
+        try:
+            self._apply_windows_update(self._pending_new_exe)
+        except Exception as e:
+            logger.warning("업데이트 적용 실패: %s", e, exc_info=True)
+            info = self._update_info
+            html_url = getattr(info, "html_url", "") if info else ""
+            self._toast.show_error(f"업데이트 적용 실패: {e}", html_url)
+
+    def _apply_windows_update(self, new_exe: Path) -> None:
+        """새 BPE.exe를 현재 위치에 덮어쓰는 PS1을 실행하고 앱을 종료한다."""
         current_exe = Path(self._get_app_path())
         bpe_pid = os.getpid()
         ps1_dir = new_exe.parent
@@ -234,6 +259,13 @@ Remove-Item -LiteralPath $Ps1Path -Force -ErrorAction SilentlyContinue
         creationflags = 0
         if sys.platform == "win32" and hasattr(subprocess, "CREATE_NO_WINDOW"):
             creationflags = subprocess.CREATE_NO_WINDOW
+
+        logger.info(
+            "업데이트 PS1 실행: new=%s, current=%s, pid=%d",
+            new_exe,
+            current_exe,
+            bpe_pid,
+        )
 
         subprocess.Popen(
             [
@@ -272,6 +304,12 @@ Remove-Item -LiteralPath $Ps1Path -Force -ErrorAction SilentlyContinue
     def _on_open_folder(self, path: str) -> None:
         folder = str(Path(path).parent)
         QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+
+    def _on_open_release_page(self) -> None:
+        info = self._update_info
+        html_url = getattr(info, "html_url", "") if info else ""
+        if html_url:
+            QDesktopServices.openUrl(QUrl(html_url))
 
     def resizeEvent(self, event: Any) -> None:  # noqa: N802
         super().resizeEvent(event)

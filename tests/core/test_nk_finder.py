@@ -22,6 +22,9 @@ from bpe.core.nk_finder import (
     find_server_root_auto,
     find_shot_folder,
     patch_nk_string_trim_in_place,
+    patch_string_trim_file_knob_script,
+    patch_string_trim_in_nk_text,
+    patch_string_trim_tcl_source,
 )
 
 # ── _nk_is_junk_file ────────────────────────────────────────────
@@ -562,3 +565,62 @@ class TestPatchNkStringTrimInPlace:
         assert "string trim" not in patched
         assert ".mov" in patched
         assert ".%04d.exr" in patched
+
+
+class TestPatchStringTrimAllExtensions:
+    """regex 기반 확장자 무관 패치."""
+
+    _OLD_DPX = (
+        r' file "\[string trim \[value root.name] nuke/\[file tail \[value root.name]]]'
+        r"/renders/\[string trim \[file tail \[value root.name]] .nk]"
+        r'/\[string trim \[file tail \[value root.name]] .nk].%04d.dpx"'
+    )
+
+    def test_patches_dpx_sequence_in_nk_body(self):
+        body = f"Write {{\n{self._OLD_DPX}\n name Write1\n}}\n"
+        out = patch_string_trim_in_nk_text(body)
+        assert "string trim" not in out
+        assert "file dirname" in out
+        assert ".%04d.dpx" in out
+
+    def test_patches_tiff_hash_frames(self):
+        old = (
+            r' file "\[string trim \[value root.name] nuke/\[file tail \[value root.name]]]'
+            r"/renders/\[string trim \[file tail \[value root.name]] .nk]"
+            r'/\[string trim \[file tail \[value root.name]] .nk].####.tiff"'
+        )
+        body = f"Write {{\n{old}\n name W\n}}\n"
+        out = patch_string_trim_in_nk_text(body)
+        assert "string trim" not in out
+        assert ".####.tiff" in out
+
+    def test_patches_percent_d_no_pad(self):
+        old = (
+            r' file "\[string trim \[value root.name] nuke/\[file tail \[value root.name]]]'
+            r"/renders/\[string trim \[file tail \[value root.name]] .nk]"
+            r'/\[string trim \[file tail \[value root.name]] .nk].%d.exr"'
+        )
+        out = patch_string_trim_in_nk_text(f"Write {{\n{old}\n name W\n}}\n")
+        assert "string trim" not in out
+        assert ".%d.exr" in out
+
+    def test_patch_string_trim_tcl_source_unescaped(self):
+        s = (
+            "[string trim [value root.name] nuke/[file tail [value root.name]]]"
+            "/renders/[string trim [file tail [value root.name]] .nk]/"
+            "[string trim [file tail [value root.name]] .nk].%04d.dpx"
+        )
+        out = patch_string_trim_tcl_source(s)
+        assert "string trim" not in out
+        assert "[file dirname [file dirname [file dirname [value root.name]]]]" in out
+
+    def test_patch_string_trim_file_knob_script_escaped_fallback(self):
+        """NK 디스크 형식(``\\[``) 이 ``toScript()`` 에 남는 경우."""
+        s = (
+            r"\[string trim \[value root.name] nuke/\[file tail \[value root.name]]]"
+            r"/renders/\[string trim \[file tail \[value root.name]] .nk]/"
+            r"\[string trim \[file tail \[value root.name]] .nk].%05d.tif"
+        )
+        out = patch_string_trim_file_knob_script(s)
+        assert "string trim" not in out
+        assert ".%05d.tif" in out
