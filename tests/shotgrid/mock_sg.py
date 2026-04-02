@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 
@@ -129,7 +130,13 @@ def _match_filters(entity: Dict[str, Any], filters: Any) -> bool:
         ev = entity.get(field)
         op_lower = str(op).lower()
         if op_lower == "is":
-            if field == "attachment_links" and isinstance(value, dict):
+            if field == "task_assignees" and isinstance(value, dict) and isinstance(ev, list):
+                wt, wid = value.get("type"), value.get("id")
+                if not any(
+                    isinstance(x, dict) and x.get("type") == wt and x.get("id") == wid for x in ev
+                ):
+                    return False
+            elif field == "attachment_links" and isinstance(value, dict):
                 if not isinstance(ev, list):
                     return False
                 wt, wid = value.get("type"), value.get("id")
@@ -157,7 +164,46 @@ def _match_filters(entity: Dict[str, Any], filters: Any) -> bool:
                     return False
             else:
                 return False
+        elif op_lower == "greater_than":
+            if not _cmp_dt_ok(ev, value, "gt"):
+                return False
+        elif op_lower == "less_than":
+            if not _cmp_dt_ok(ev, value, "lt"):
+                return False
     return True
+
+
+def _cmp_dt_ok(ev: Any, value: Any, mode: str) -> bool:
+    """Compare datetimes or date strings for greater_than / less_than filters."""
+    if ev is None or value is None:
+        return False
+    a = _to_ts(ev)
+    b = _to_ts(value)
+    if a is None or b is None:
+        return False
+    if mode == "gt":
+        return a > b
+    if mode == "lt":
+        return a < b
+    return False
+
+
+def _to_ts(v: Any) -> Optional[float]:
+    if isinstance(v, datetime):
+        return v.timestamp()
+    if isinstance(v, date) and not isinstance(v, datetime):
+        from datetime import time as dtime
+
+        return datetime.combine(v, dtime.min).timestamp()
+    if isinstance(v, str):
+        s = v.strip()
+        if len(s) >= 10 and s[4] == "-" and s[7] == "-":
+            try:
+                y, m, d = int(s[0:4]), int(s[5:7]), int(s[8:10])
+                return datetime(y, m, d).timestamp()
+            except ValueError:
+                return None
+    return None
 
 
 def _project_fields(entity: Dict[str, Any], fields: Any) -> Dict[str, Any]:

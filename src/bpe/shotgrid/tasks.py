@@ -165,6 +165,36 @@ def find_tasks_for_shot(sg: Any, shot_id: int) -> List[Dict[str, Any]]:
     )
 
 
+def list_tasks_for_project_assignee(
+    sg: Any,
+    project_id: int,
+    human_user_id: int,
+    *,
+    limit: int = 300,
+) -> List[Dict[str, Any]]:
+    """Tasks on *project_id* assigned to *human_user_id* (any entity type)."""
+    uid = int(human_user_id)
+    pid = int(project_id)
+    fields = ["id", "content", "entity", "project", "sg_status_list", "task_assignees"]
+    order = [{"field_name": "content", "direction": "asc"}]
+    lim = int(limit)
+    base = [["project", "is", {"type": "Project", "id": pid}]]
+    assignee_try: List[List[Any]] = [
+        ["task_assignees", "is", {"type": "HumanUser", "id": uid}],
+        ["task_assignees", "in", {"type": "HumanUser", "id": uid}],
+        ["task_assignees", "contains", {"type": "HumanUser", "id": uid}],
+    ]
+    for af in assignee_try:
+        filters = base + [af]
+        try:
+            rows = sg.find("Task", filters, fields, order=order, limit=lim)
+            if rows:
+                return list(rows)
+        except Exception:
+            continue
+    return []
+
+
 def search_tasks_for_shot(
     sg: Any, shot_id: int, query: str, limit: int = 20
 ) -> List[Dict[str, Any]]:

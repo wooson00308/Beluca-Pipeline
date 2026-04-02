@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -181,6 +182,21 @@ def _version_status_bar_style(bg_hex: str, fg_hex: str, alpha: float = 0.42) -> 
         f"background-color: {bg}; color: {fg_hex}; padding: 4px 8px; "
         f"border-radius: 4px; font-weight: 600; border: none;"
     )
+
+
+def _normalize_version_description_for_display(text: str) -> str:
+    """줄 단위로 UNC를 드라이브 경로로 바꿔 사용자에게 표시한다."""
+    lines = text.splitlines()
+    out: List[str] = []
+    for line in lines:
+        if line.strip():
+            out.append(normalize_path_str(line))
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
+_VERSION_DESC_EDIT_MAX_H = 90
 
 
 def _status_bg_luminance(bg: str) -> float:
@@ -735,6 +751,9 @@ class MyTasksTab(QWidget):
         super().__init__(parent)
         self._projects: List[Dict[str, Any]] = []
         self._user_id: Optional[int] = None
+        # PC에서 추정한 ShotGrid HumanUser (My Tasks 자동 인식 성공 시만). 담당자 필터와 별개.
+        self._me_sg_user: Optional[Dict[str, Any]] = None
+        self._timelog_resolve_busy: bool = False
         self._user_search_seq: int = 0
         self._cards: List[_ShotCard] = []
         self._workers: List[ShotGridWorker] = []
@@ -771,6 +790,7 @@ class MyTasksTab(QWidget):
             app.focusChanged.connect(self._on_app_focus_changed)
         QTimer.singleShot(200, self._load_projects)
         QTimer.singleShot(400, self._guess_me)
+        self._update_timelog_button_state()
 
     # ── UI construction ─────────────────────────────────────────────
 
@@ -862,6 +882,14 @@ class MyTasksTab(QWidget):
         filter_bar.addWidget(refresh_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
         filter_bar.addStretch()
+
+        self._timelog_btn = QPushButton("TimeLog")
+        self._timelog_btn.setMinimumWidth(88)
+        self._timelog_btn.setToolTip("")
+        self._timelog_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._timelog_btn.clicked.connect(self._open_time_log_dialog)
+        filter_bar.addWidget(self._timelog_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+
         root.addLayout(filter_bar)
 
         # Loading indicator
@@ -1176,6 +1204,7 @@ class MyTasksTab(QWidget):
         if not user or not isinstance(user, dict):
             self._show_user_id_badge("자동 감지 실패", success=False)
             return
+        self._me_sg_user = dict(user)
         self._apply_user_from_dict(user)
 
     def _position_user_results_combo(self) -> None:
@@ -1213,6 +1242,67 @@ class MyTasksTab(QWidget):
         self._user_edit.setText(_format_human_user_display(u))
         self._user_edit.setCursorPosition(0)
         self._show_user_id_badge(f"✓ #{self._user_id}")
+        self._update_timelog_button_state()
+
+    def _update_timelog_button_state(self) -> None:
+        if getattr(self, "_timelog_btn", None) is None:
+            return
+        busy = getattr(self, "_timelog_resolve_busy", False)
+        self._timelog_btn.setEnabled(not busy)
+        self._timelog_btn.setToolTip(
+            "PC ShotGrid 사용자(My Tasks 자동 인식)로 TimeLog를 씁니다."
+            if not busy
+            else "PC 사용자 확인 중…"
+        )
+
+    def _open_time_log_dialog(self) -> None:
+        if getattr(self, "_timelog_resolve_busy", False):
+            return
+        from bpe.gui.widgets.time_log_dialog import TimeLogDialog
+
+        if self._me_sg_user and self._me_sg_user.get("id") is not None:
+            uid = int(self._me_sg_user["id"])
+            name = _format_human_user_display(self._me_sg_user)
+            dlg = TimeLogDialog(self, uid, self._workers.append, user_name=name)
+            dlg.exec()
+            return
+
+        def _fetch() -> Optional[Dict[str, Any]]:
+            sg = get_default_sg()
+            return guess_human_user_for_me(sg)
+
+        self._timelog_resolve_busy = True
+        self._update_timelog_button_state()
+
+        w = ShotGridWorker(_fetch)
+
+        def _done(result: object) -> None:
+            self._timelog_resolve_busy = False
+            self._update_timelog_button_state()
+            u = result if isinstance(result, dict) else None
+            if not u or u.get("id") is None:
+                QMessageBox.warning(
+                    self,
+                    "사용자 확인 실패",
+                    "이 PC의 ShotGrid 사용자를 찾지 못했습니다.\n"
+                    "상단의 My Tasks 버튼으로 자동 인식을 먼저 시도해 보세요.",
+                )
+                return
+            self._me_sg_user = dict(u)
+            uid = int(u["id"])
+            name = _format_human_user_display(u)
+            dlg = TimeLogDialog(self, uid, self._workers.append, user_name=name)
+            dlg.exec()
+
+        def _err(msg: str) -> None:
+            self._timelog_resolve_busy = False
+            self._update_timelog_button_state()
+            QMessageBox.warning(self, "ShotGrid 오류", msg)
+
+        w.finished.connect(_done)
+        w.error.connect(_err)
+        self._workers.append(w)
+        w.start()
 
     def _on_user_search_immediate(self) -> None:
         """엔터 시 디바운스 없이 즉시 검색(아래 빈 콤보 줄 깜빡임 완화에도 도움)."""
@@ -2105,6 +2195,18 @@ class MyTasksTab(QWidget):
             st_bar = QLabel(f"Status: {st or '—'}")
             st_bar.setStyleSheet(_version_status_bar_style(bg, fg, alpha=0.42))
             rcol.addWidget(st_bar)
+            raw_desc = (rec.get("description") or "").strip()
+            if raw_desc:
+                desc_te = QPlainTextEdit()
+                desc_te.setObjectName("version_description")
+                desc_te.setReadOnly(True)
+                desc_te.setPlainText(_normalize_version_description_for_display(raw_desc))
+                desc_te.setFixedHeight(_VERSION_DESC_EDIT_MAX_H)
+                desc_te.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+                desc_te.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+                desc_te.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+                desc_te.setTabChangesFocus(False)
+                rcol.addWidget(desc_te)
             main_row.addLayout(rcol, 1)
 
             self._versions_layout.insertWidget(self._versions_layout.count() - 1, row_fr)

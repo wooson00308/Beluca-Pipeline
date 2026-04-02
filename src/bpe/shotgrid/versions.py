@@ -8,6 +8,8 @@ import shutil
 import sys
 import tempfile
 import time
+from datetime import date, datetime, timedelta
+from datetime import time as dt_time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -119,10 +121,10 @@ def list_versions_for_shot(
     *,
     limit: int = 80,
 ) -> List[Dict[str, Any]]:
-    """Versions linked to a Shot, newest first (code, artist, status, created_at)."""
+    """Versions linked to a Shot, newest first (code, artist, status, created_at, description)."""
     sid = int(shot_id)
     filters = [["entity", "is", {"type": "Shot", "id": sid}]]
-    fields = ["id", "code", "user", "sg_status_list", "created_at", "image"]
+    fields = ["id", "code", "user", "sg_status_list", "created_at", "image", "description"]
     order = [{"field_name": "created_at", "direction": "desc"}]
     try:
         raw = list(sg.find("Version", filters, fields, limit=int(limit), order=order) or [])
@@ -153,6 +155,11 @@ def list_versions_for_shot(
             thumb_url = img.strip()
         elif isinstance(img, dict):
             thumb_url = (img.get("url") or "").strip()
+        desc_raw = row.get("description")
+        if desc_raw is None:
+            description = ""
+        else:
+            description = str(desc_raw).strip()
         out.append(
             {
                 "version_id": vid_i,
@@ -161,6 +168,89 @@ def list_versions_for_shot(
                 "status": status,
                 "created_at_display": ts_str,
                 "thumb_url": thumb_url,
+                "description": description,
+            }
+        )
+    return out
+
+
+def list_shots_uploaded_by_user_on_date(
+    sg: Any,
+    *,
+    user_id: int,
+    target_date: date,
+    limit: int = 500,
+) -> List[Dict[str, Any]]:
+    """Shots the user uploaded Versions for on *target_date* (local calendar day).
+
+    One row per Shot (newest matching Version per shot). All projects.
+    """
+    uid = int(user_id)
+    day_start = datetime.combine(target_date, dt_time.min)
+    day_end = datetime.combine(target_date + timedelta(days=1), dt_time.min)
+    filters = [
+        ["user", "is", {"type": "HumanUser", "id": uid}],
+        ["created_at", "greater_than", day_start],
+        ["created_at", "less_than", day_end],
+    ]
+    fields = ["id", "code", "created_at", "entity", "image", "sg_task", "project", "description"]
+    order = [{"field_name": "created_at", "direction": "desc"}]
+    try:
+        raw = list(sg.find("Version", filters, fields, limit=int(limit), order=order) or [])
+    except Exception as exc:
+        logger.warning("list_shots_uploaded_by_user_on_date find failed: %s", exc)
+        return []
+
+    seen_shot_ids: set[int] = set()
+    out: List[Dict[str, Any]] = []
+    for row in raw:
+        ent = row.get("entity") or {}
+        if (ent.get("type") or "").lower() != "shot":
+            continue
+        sid = ent.get("id")
+        try:
+            sid_i = int(sid) if sid is not None else 0
+        except (TypeError, ValueError):
+            continue
+        if sid_i <= 0 or sid_i in seen_shot_ids:
+            continue
+        seen_shot_ids.add(sid_i)
+        shot_code = (ent.get("code") or ent.get("name") or "").strip() or f"Shot #{sid_i}"
+        proj = row.get("project") or {}
+        try:
+            proj_id = int(proj.get("id")) if proj.get("id") is not None else 0
+        except (TypeError, ValueError):
+            proj_id = 0
+        proj_name = (proj.get("name") or proj.get("code") or "").strip() or "—"
+        thumb_url = ""
+        img = row.get("image")
+        if isinstance(img, str):
+            thumb_url = img.strip()
+        elif isinstance(img, dict):
+            thumb_url = (img.get("url") or "").strip()
+        sg_task = row.get("sg_task") or {}
+        default_task_id = 0
+        if isinstance(sg_task, dict) and sg_task.get("id") is not None:
+            try:
+                default_task_id = int(sg_task["id"])
+            except (TypeError, ValueError):
+                pass
+        try:
+            vid_i = int(row.get("id") or 0)
+        except (TypeError, ValueError):
+            vid_i = 0
+        desc_raw = row.get("description")
+        ver_desc = (str(desc_raw).strip() if desc_raw is not None else "").strip()
+        out.append(
+            {
+                "shot_id": sid_i,
+                "shot_code": shot_code,
+                "project_id": proj_id,
+                "project_name": proj_name,
+                "thumb_url": thumb_url,
+                "default_task_id": default_task_id,
+                "version_id": vid_i,
+                "version_description": ver_desc,
             }
         )
     return out

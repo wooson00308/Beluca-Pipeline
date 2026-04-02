@@ -20,15 +20,26 @@ def list_projects(sg: Any, limit: int = 500) -> List[Dict[str, Any]]:
 
 
 def find_project_by_code(sg: Any, code: str) -> Optional[Dict[str, Any]]:
-    """Find a Project by its code field."""
+    """Find a Project by code; if not found, try matching name (e.g. PROD shown as name only)."""
     code = (code or "").strip()
     if not code:
         return None
-    return sg.find_one(
-        "Project",
-        [["code", "is", code]],
-        ["id", "name", "code"],
-    )
+    fields = ["id", "name", "code"]
+    row = sg.find_one("Project", [["code", "is", code]], fields)
+    if row:
+        return row
+    return sg.find_one("Project", [["name", "is", code]], fields)
+
+
+def resolve_project_id_by_code(sg: Any, code: str) -> Optional[int]:
+    """Return Project id for code, or None if not found."""
+    row = find_project_by_code(sg, code)
+    if not row:
+        return None
+    try:
+        return int(row.get("id"))
+    except (TypeError, ValueError):
+        return None
 
 
 def list_active_projects(sg: Any, limit: int = 300) -> List[Dict[str, Any]]:

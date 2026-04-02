@@ -4,12 +4,18 @@ from __future__ import annotations
 
 import os
 import tempfile
+from datetime import date, datetime
 from typing import Any
 
 import pytest
 
 from bpe.shotgrid.errors import ShotGridError
-from bpe.shotgrid.versions import create_version, upload_movie_to_version
+from bpe.shotgrid.versions import (
+    create_version,
+    list_shots_uploaded_by_user_on_date,
+    list_versions_for_shot,
+    upload_movie_to_version,
+)
 from tests.shotgrid.mock_sg import MockShotgun
 
 # ── create_version ───────────────────────────────────────────────────
@@ -52,6 +58,104 @@ class TestCreateVersion:
         sg = self._sg()
         with pytest.raises(ShotGridError, match="Version Name"):
             create_version(sg, project_id=100, shot_id=200, task_id=None, version_name="")
+
+
+class TestListVersionsForShot:
+    def test_includes_description(self) -> None:
+        sg = MockShotgun()
+        sg._add_entity(
+            "Version",
+            {
+                "id": 501,
+                "code": "E01_S01_0010_comp_v001",
+                "user": {"type": "HumanUser", "id": 7, "name": "Test Artist"},
+                "sg_status_list": "rev",
+                "created_at": None,
+                "image": None,
+                "entity": {"type": "Shot", "id": 200},
+                "description": "노트 한 줄\n//zeus.example/beluca/renders",
+            },
+        )
+        rows = list_versions_for_shot(sg, 200, limit=10)
+        assert len(rows) == 1
+        assert rows[0]["code"] == "E01_S01_0010_comp_v001"
+        assert rows[0]["description"] == "노트 한 줄\n//zeus.example/beluca/renders"
+        assert rows[0]["version_id"] == 501
+
+    def test_empty_description_key_when_missing(self) -> None:
+        sg = MockShotgun()
+        sg._add_entity(
+            "Version",
+            {
+                "id": 502,
+                "code": "E01_S01_0010_comp_v002",
+                "user": {"type": "HumanUser", "id": 7, "name": "Test Artist"},
+                "sg_status_list": "fin",
+                "created_at": None,
+                "image": None,
+                "entity": {"type": "Shot", "id": 200},
+            },
+        )
+        rows = list_versions_for_shot(sg, 200, limit=10)
+        assert len(rows) == 1
+        assert rows[0]["description"] == ""
+
+
+class TestListShotsUploadedByUserOnDate:
+    def test_dedupes_shot_and_returns_project(self) -> None:
+        sg = MockShotgun()
+        d = date(2026, 4, 1)
+        sg._add_entity(
+            "Version",
+            {
+                "id": 601,
+                "user": {"type": "HumanUser", "id": 7},
+                "created_at": datetime(2026, 4, 1, 15, 0, 0),
+                "entity": {"type": "Shot", "id": 300, "code": "E01_S02"},
+                "project": {"type": "Project", "id": 10, "name": "ProjA", "code": "PA"},
+                "image": None,
+                "sg_task": {"type": "Task", "id": 40},
+                "description": "latest",
+            },
+        )
+        sg._add_entity(
+            "Version",
+            {
+                "id": 602,
+                "user": {"type": "HumanUser", "id": 7},
+                "created_at": datetime(2026, 4, 1, 10, 0, 0),
+                "entity": {"type": "Shot", "id": 300, "code": "E01_S02"},
+                "project": {"type": "Project", "id": 10, "name": "ProjA", "code": "PA"},
+                "image": None,
+                "sg_task": None,
+                "description": "older",
+            },
+        )
+        rows = list_shots_uploaded_by_user_on_date(sg, user_id=7, target_date=d)
+        assert len(rows) == 1
+        assert rows[0]["shot_id"] == 300
+        assert rows[0]["shot_code"] == "E01_S02"
+        assert rows[0]["project_id"] == 10
+        assert rows[0]["project_name"] == "ProjA"
+        assert rows[0]["default_task_id"] == 40
+        assert rows[0]["version_description"] == "latest"
+
+    def test_other_day_empty(self) -> None:
+        sg = MockShotgun()
+        sg._add_entity(
+            "Version",
+            {
+                "id": 603,
+                "user": {"type": "HumanUser", "id": 7},
+                "created_at": datetime(2026, 4, 1, 12, 0, 0),
+                "entity": {"type": "Shot", "id": 301, "code": "X"},
+                "project": {"type": "Project", "id": 1, "name": "P"},
+                "image": None,
+                "description": "",
+            },
+        )
+        rows = list_shots_uploaded_by_user_on_date(sg, user_id=7, target_date=date(2026, 4, 2))
+        assert rows == []
 
 
 # ── upload_movie_to_version ──────────────────────────────────────────

@@ -553,6 +553,10 @@ def build_stylesheet() -> str:
     #card[selected="true"]:hover {{
         border-color: {ACCENT_HOVER};
     }}
+    #version_description {{
+        font-size: {FONT_SIZE}px;
+        padding: 4px 8px;
+    }}
 
     /* ── Tools tab only (switch slider + cards; no extra #card padding on inner labels) ── */
     #tools_card {{
