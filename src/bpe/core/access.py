@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 
-# sha256("0401".encode("utf-8")).hexdigest()
 PRESET_PW_HASH = "12b408838e33f12bf8886792e6d44de0d9623e2bbf833b70f9f2e13fdf802706"
 
 

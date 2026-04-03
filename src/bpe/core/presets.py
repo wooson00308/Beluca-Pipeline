@@ -9,11 +9,14 @@ from typing import Any, Dict, Optional
 
 import bpe.core.config as cfg
 from bpe.core.atomic_io import atomic_write_text, write_json_file
+from bpe.core.logging import get_logger
 from bpe.core.settings import get_presets_dir
+
+logger = get_logger("presets")
 
 
 def _preset_file(settings_file: Optional[Path] = None) -> Path:
-    return get_presets_dir() / "presets.json"
+    return get_presets_dir(settings_file) / "presets.json"
 
 
 def ensure_store() -> None:
@@ -42,6 +45,7 @@ def load_presets() -> Dict[str, Any]:
             return {}
         except (json.JSONDecodeError, OSError, PermissionError):
             time.sleep(0.04)
+    logger.warning("presets.json 로드 실패(12회 재시도 후): %s", pf)
     return {}
 
 

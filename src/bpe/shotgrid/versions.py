@@ -333,6 +333,7 @@ def upload_movie_to_version(
     try:
         upload_rounds = 3
         _overall(0.55)
+        _up_ret: Optional[Any] = None
         for attempt_idx in range(1, upload_rounds + 1):
             try:
                 logger.debug("sg.upload attempt %d/%d", attempt_idx, upload_rounds)

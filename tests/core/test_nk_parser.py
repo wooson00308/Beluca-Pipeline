@@ -10,7 +10,7 @@ from bpe.core.nk_parser import (
     _PRESET_DEFAULTS,
     _extract_all_blocks,
     _find_named_block,
-    _get_knob,
+    get_knob,
     merge_nk_preserve_root_template,
     merge_nodetree_content,
     merge_parsed_into_preset,
@@ -19,22 +19,22 @@ from bpe.core.nk_parser import (
 )
 
 # ---------------------------------------------------------------------------
-# _get_knob
+# get_knob
 # ---------------------------------------------------------------------------
 
 
 class TestGetKnob:
     def test_quoted(self):
-        assert _get_knob(' fps "23.976"', "fps") == "23.976"
+        assert get_knob(' fps "23.976"', "fps") == "23.976"
 
     def test_braced(self):
-        assert _get_knob(" fps {24}", "fps") == "24"
+        assert get_knob(" fps {24}", "fps") == "24"
 
     def test_bare(self):
-        assert _get_knob(" fps 30", "fps") == "30"
+        assert get_knob(" fps 30", "fps") == "30"
 
     def test_missing(self):
-        assert _get_knob(" fps 30", "format") is None
+        assert get_knob(" fps 30", "format") is None
 
 
 # ---------------------------------------------------------------------------

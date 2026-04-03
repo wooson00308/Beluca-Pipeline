@@ -147,9 +147,14 @@ class MainWindow(QMainWindow):
         self._toast.open_release_page_requested.connect(self._on_open_release_page)
         self._pending_new_exe: Optional[Path] = None
 
+    def _cleanup_finished_workers(self) -> None:
+        """완료된 QThread를 _workers에서 제거한다. GC 방지 목적은 유지한다."""
+        self._workers = [w for w in self._workers if not w.isFinished()]
+
     def _start_update_check(self) -> None:
         from bpe.gui.workers.update_worker import UpdateCheckWorker
 
+        self._cleanup_finished_workers()
         w = UpdateCheckWorker(__version__)
         w.update_available.connect(self._on_update_available)
         w.up_to_date.connect(self._on_up_to_date)
@@ -179,6 +184,7 @@ class MainWindow(QMainWindow):
 
         from bpe.gui.workers.update_worker import UpdateDownloadWorker
 
+        self._cleanup_finished_workers()
         w = UpdateDownloadWorker(info.download_url, str(dest_path))
         w.progress.connect(lambda v: self._toast.show_progress(int(v * 100)))
         w.finished.connect(self._on_download_finished)

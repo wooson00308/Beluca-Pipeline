@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from bpe.core.nk_parser import _get_knob
+from bpe.core.nk_parser import get_knob
 from bpe.core.presets import load_preset_template
 
 # Template sample values used for path/name substitution
@@ -478,9 +478,9 @@ def _write2_inner_is_exr_delivery_target(inner: str) -> bool:
     Whether the Write2 block should receive EXR preset patching.
 
     If ``file_type`` is absent or blank, treat as EXR (stock / legacy templates).
-    Values are parsed like ``nk_parser._get_knob`` (quoted, braced, or bare).
+    Values are parsed like ``nk_parser.get_knob`` (quoted, braced, or bare).
     """
-    raw = _get_knob(inner, "file_type")
+    raw = get_knob(inner, "file_type")
     if raw is None or not str(raw).strip():
         return True
     norm = str(raw).strip().lower()

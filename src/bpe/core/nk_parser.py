@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 
-def _get_knob(text: str, knob: str) -> Optional[str]:
+def get_knob(text: str, knob: str) -> Optional[str]:
     """
     Extract a knob value supporting three NK formats:
       knob "value"  /  knob {value}  /  knob value
@@ -83,13 +83,13 @@ def _collect_node_stats(content: str) -> Dict[str, Any]:
 
     write_names: List[str] = []
     for wb in _extract_all_blocks(content, "Write"):
-        nm = _get_knob(wb, "name")
+        nm = get_knob(wb, "name")
         if nm:
             write_names.append(nm)
 
     read_names: List[str] = []
     for rb in _extract_all_blocks(content, "Read"):
-        nm = _get_knob(rb, "name")
+        nm = get_knob(rb, "name")
         if nm:
             read_names.append(nm)
 
@@ -106,8 +106,8 @@ def _pick_exr_write_block(all_writes: List[str]) -> Optional[str]:
     """Prefer Write2 / setup_pro_write with file_type exr, else first exr block."""
     exr_blocks: List[Tuple[str, str]] = []
     for wb in all_writes:
-        nm = (_get_knob(wb, "name") or "").strip()
-        ft = (_get_knob(wb, "file_type") or "exr").lower()
+        nm = (get_knob(wb, "name") or "").strip()
+        ft = (get_knob(wb, "file_type") or "exr").lower()
         if ft in ("mov", "mp4"):
             continue
         exr_blocks.append((nm, wb))
@@ -125,7 +125,7 @@ def _pick_exr_write_block(all_writes: List[str]) -> Optional[str]:
 def _pick_mov_write_block(all_writes: List[str]) -> Optional[str]:
     """First Write block with file_type mov or mp4."""
     for wb in all_writes:
-        ft = (_get_knob(wb, "file_type") or "").lower()
+        ft = (get_knob(wb, "file_type") or "").lower()
         if ft in ("mov", "mp4"):
             return wb
     return None
@@ -155,7 +155,7 @@ def parse_nk_file(nk_path: str) -> Dict[str, Any]:
     root_blocks = _extract_all_blocks(content, "Root")
     rb = root_blocks[0] if root_blocks else None
     if rb:
-        fps = _get_knob(rb, "fps")
+        fps = get_knob(rb, "fps")
         if fps:
             result["fps"] = fps
         for pat in (r'format "(\d+) (\d+)', r"format \{(\d+) (\d+)"):
@@ -168,7 +168,7 @@ def parse_nk_file(nk_path: str) -> Dict[str, Any]:
         if pfn:
             result["plate_format_name"] = pfn
 
-        cm = _get_knob(rb, "colorManagement")
+        cm = get_knob(rb, "colorManagement")
         if cm:
             result["color_management"] = cm
 
@@ -180,17 +180,17 @@ def parse_nk_file(nk_path: str) -> Dict[str, Any]:
             ("logLut", "log_lut"),
             ("floatLut", "float_lut"),
         ]:
-            v = _get_knob(rb, nk_knob)
+            v = get_knob(rb, nk_knob)
             if v:
                 result[key] = v
-        ocio = _get_knob(rb, "customOCIOConfigPath")
+        ocio = get_knob(rb, "customOCIOConfigPath")
         if ocio:
             result["ocio_path"] = ocio.replace("\\\\", "\\").strip()
 
     # --- Viewer (first) ---
     viewer_blocks = _extract_all_blocks(content, "Viewer")
     if viewer_blocks:
-        vp = _get_knob(viewer_blocks[0], "viewerProcess")
+        vp = get_knob(viewer_blocks[0], "viewerProcess")
         if vp:
             result["viewer_process"] = vp
 
@@ -206,12 +206,12 @@ def parse_nk_file(nk_path: str) -> Dict[str, Any]:
             ("compression", "write_compression"),
             ("metadata", "write_metadata"),
         ]:
-            v = _get_knob(wb_exr, knob)
+            v = get_knob(wb_exr, knob)
             if v:
                 result[key] = v
-        file_type = _get_knob(wb_exr, "file_type")
+        file_type = get_knob(wb_exr, "file_type")
         # datatype: Nuke 기본값(16 bit half)은 NK에 저장 안 됨 → EXR이면 추론
-        dt_val = _get_knob(wb_exr, "datatype")
+        dt_val = get_knob(wb_exr, "datatype")
         if dt_val:
             result["write_datatype"] = dt_val
         elif file_type == "exr":
@@ -223,10 +223,10 @@ def parse_nk_file(nk_path: str) -> Dict[str, Any]:
             )
         elif file_type in ("mov", "mp4"):
             result["delivery_format"] = "ProRes 422 HQ"
-        ocio_cs = _get_knob(wb_exr, "ocioColorspace")
-        colorspace = _get_knob(wb_exr, "colorspace")
-        display = _get_knob(wb_exr, "display")
-        view = _get_knob(wb_exr, "view")
+        ocio_cs = get_knob(wb_exr, "ocioColorspace")
+        colorspace = get_knob(wb_exr, "colorspace")
+        display = get_knob(wb_exr, "display")
+        view = get_knob(wb_exr, "view")
         if ocio_cs:
             result["write_out_colorspace"] = ocio_cs
             result["write_colorspace"] = ocio_cs
@@ -243,29 +243,29 @@ def parse_nk_file(nk_path: str) -> Dict[str, Any]:
             result["write_transform_type"] = "display/view"
 
     if wb_mov:
-        codec = _get_knob(wb_mov, "mov64_codec") or _get_knob(wb_mov, "codec")
+        codec = get_knob(wb_mov, "mov64_codec") or get_knob(wb_mov, "codec")
         if codec:
             result["mov_codec"] = codec
         profile = (
-            _get_knob(wb_mov, "mov64_codec_profile")
-            or _get_knob(wb_mov, "mov64_profile")
-            or _get_knob(wb_mov, "mov64_quality")
+            get_knob(wb_mov, "mov64_codec_profile")
+            or get_knob(wb_mov, "mov64_profile")
+            or get_knob(wb_mov, "mov64_quality")
         )
         if profile:
             result["mov_profile"] = profile
-        fps_mov = _get_knob(wb_mov, "fps")
+        fps_mov = get_knob(wb_mov, "fps")
         if fps_mov:
             result["mov_fps"] = fps_mov
-        ch_mov = _get_knob(wb_mov, "channels")
+        ch_mov = get_knob(wb_mov, "channels")
         if ch_mov:
             result["mov_channels"] = ch_mov
-        mcs = _get_knob(wb_mov, "ocioColorspace") or _get_knob(wb_mov, "colorspace")
+        mcs = get_knob(wb_mov, "ocioColorspace") or get_knob(wb_mov, "colorspace")
         if mcs:
             result["mov_colorspace"] = mcs
-        md = _get_knob(wb_mov, "display")
+        md = get_knob(wb_mov, "display")
         if md:
             result["mov_display"] = md
-        mv = _get_knob(wb_mov, "view")
+        mv = get_knob(wb_mov, "view")
         if mv:
             result["mov_view"] = mv
 
@@ -282,7 +282,7 @@ def parse_nk_file(nk_path: str) -> Dict[str, Any]:
         all_reads = _extract_all_blocks(content, "Read")
         rb_read = all_reads[0] if all_reads else None
     if rb_read:
-        cs = _get_knob(rb_read, "colorspace")
+        cs = get_knob(rb_read, "colorspace")
         if cs:
             result["read_input_transform"] = cs
 

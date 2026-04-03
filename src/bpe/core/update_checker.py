@@ -62,7 +62,10 @@ class UpdateInfo:
 
 def _parse_version(v: str) -> Tuple[int, ...]:
     """버전 문자열을 정수 튜플로 변환한다."""
-    return tuple(int(x) for x in v.split("."))
+    try:
+        return tuple(int(x) for x in v.split("."))
+    except (ValueError, AttributeError):
+        return (0,)
 
 
 def compare_versions(current: str, latest: str) -> bool:
