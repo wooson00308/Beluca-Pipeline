@@ -44,21 +44,32 @@ def run_app(argv: List[str] | None = None) -> int:
     if icon_path:
         app.setWindowIcon(QIcon(icon_path))
 
+    from bpe.core.logging import get_logger
+
+    logger = get_logger("app")
+    logger.info("BPE 부팅 시작")
+
     # 스플래시 먼저 띄우기
     from bpe.gui.splash import SplashScreen
 
     splash = SplashScreen()
     splash.show()
     app.processEvents()
+    logger.info("스플래시 표시 완료")
 
     # 스플래시 애니메이션 중 메인 윈도우 생성 (백그라운드)
     window = None
 
     def _init_main() -> None:
         nonlocal window
-        from bpe.gui.main_window import MainWindow
+        logger.info("MainWindow 생성 시작")
+        try:
+            from bpe.gui.main_window import MainWindow
 
-        window = MainWindow()
+            window = MainWindow()
+            logger.info("MainWindow 생성 완료")
+        except Exception:
+            logger.critical("MainWindow 생성 실패", exc_info=True)
 
     # 스플래시 뜨고 300ms 후 메인윈도우 초기화 시작
     QTimer.singleShot(300, _init_main)
@@ -68,6 +79,9 @@ def run_app(argv: List[str] | None = None) -> int:
             window.show()
             window.raise_()
             window.activateWindow()
+            logger.info("메인 윈도우 표시 완료")
+        else:
+            logger.critical("메인 윈도우가 None — 생성 실패 또는 타이밍 경합")
 
     splash.on_finished(_show_main)
 
