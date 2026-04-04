@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -177,20 +178,14 @@ class MainWindow(QMainWindow):
             self._toast.show_error("다운로드 URL을 찾을 수 없습니다.", html_url)
             return
 
-        suffix = ".dmg" if sys.platform == "darwin" else ".zip"
-        fd, dest_str = tempfile.mkstemp(suffix=suffix, prefix="bpe_dl_")
-        os.close(fd)
-        dest_path = Path(dest_str)
+        # 런처가 번들에 있으면 런처 경유 업데이트
+        launcher = self._find_launcher()
+        if launcher is not None:
+            self._launch_updater(launcher, info)
+            return
 
-        from bpe.gui.workers.update_worker import UpdateDownloadWorker
-
-        self._cleanup_finished_workers()
-        w = UpdateDownloadWorker(info.download_url, str(dest_path))
-        w.progress.connect(lambda v: self._toast.show_progress(int(v * 100)))
-        w.finished.connect(self._on_download_finished)
-        w.error.connect(self._on_download_error)
-        w.start()
-        self._workers.append(w)
+        # 런처 없으면 셀프 업데이트 폴백
+        self._on_install_selfupdate()
 
     def _on_download_error(self, msg: str) -> None:
         logger.warning("업데이트 다운로드 실패: %s", msg)
@@ -316,6 +311,74 @@ Remove-Item -LiteralPath $Ps1Path -Force -ErrorAction SilentlyContinue
         html_url = getattr(info, "html_url", "") if info else ""
         if html_url:
             QDesktopServices.openUrl(QUrl(html_url))
+
+    def _find_launcher(self) -> Optional[Path]:
+        """번들 내 런처 바이너리를 찾는다."""
+        name = "BPELauncher" if sys.platform == "darwin" else "BPELauncher.exe"
+
+        # PyInstaller 번들
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            p = Path(meipass) / name
+            if p.exists():
+                return p
+            # macOS .app 번들
+            p = Path(sys.executable).parent / name
+            if p.exists():
+                return p
+
+        # 개발 모드: 프로젝트 루트의 launcher-dl/
+        dev_path = Path(__file__).resolve().parent.parent.parent.parent / "launcher-dl" / name
+        if dev_path.exists():
+            return dev_path
+
+        return None
+
+    def _launch_updater(self, launcher: Path, info: Any) -> None:
+        """런처를 임시 경로로 복사 후 실행한다. _MEIPASS 정리 충돌 방지."""
+        try:
+            tmp_dir = tempfile.mkdtemp(prefix="bpe_launcher_")
+            tmp_launcher = Path(tmp_dir) / launcher.name
+            shutil.copy2(str(launcher), str(tmp_launcher))
+            if os.name != "nt":
+                os.chmod(str(tmp_launcher), 0o755)
+
+            subprocess.Popen(
+                [
+                    str(tmp_launcher),
+                    "--version",
+                    info.latest_version,
+                    "--download-url",
+                    info.download_url,
+                    "--app-path",
+                    self._get_app_path(),
+                ]
+            )
+            QApplication.instance().quit()  # type: ignore[union-attr]
+        except Exception:
+            logger.warning("런처 실행 실패, 셀프 업데이트 폴백", exc_info=True)
+            # 런처 실패 시 셀프 업데이트로 재시도
+            self._on_install_selfupdate()
+
+    def _on_install_selfupdate(self) -> None:
+        """런처 없거나 실패 시 직접 다운로드 셀프 업데이트."""
+        info = self._update_info
+        if info is None or not info.download_url:
+            return
+        suffix = ".dmg" if sys.platform == "darwin" else ".zip"
+        fd, dest_str = tempfile.mkstemp(suffix=suffix, prefix="bpe_dl_")
+        os.close(fd)
+        dest_path = Path(dest_str)
+
+        from bpe.gui.workers.update_worker import UpdateDownloadWorker
+
+        self._cleanup_finished_workers()
+        w = UpdateDownloadWorker(info.download_url, str(dest_path))
+        w.progress.connect(lambda v: self._toast.show_progress(int(v * 100)))
+        w.finished.connect(self._on_download_finished)
+        w.error.connect(self._on_download_error)
+        w.start()
+        self._workers.append(w)
 
     def resizeEvent(self, event: Any) -> None:  # noqa: N802
         super().resizeEvent(event)
