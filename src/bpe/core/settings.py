@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import bpe.core.config as cfg
 from bpe.core.atomic_io import read_json_file, write_json_file
+from bpe.core.logging import get_logger
 
-# Default presets directory when settings.json has no presets_dir (team pipeline).
-_DEFAULT_PRESETS_DIR = Path(r"W:\team\_Pipeline\Nuke Environment Presets")
+logger = get_logger("settings")
+
+# Default presets directory when settings.json has no presets_dir.
+# Windows: 팀 네트워크 드라이브 / macOS: 로컬 앱 디렉토리
+if sys.platform == "win32":
+    _DEFAULT_PRESETS_DIR = Path(r"W:\team\_Pipeline\Nuke Environment Presets")
+else:
+    _DEFAULT_PRESETS_DIR = cfg.APP_DIR / "presets"
 
 _DEFAULT_TOOLS: Dict[str, Any] = {
     "qc_checker": {"enabled": False},
@@ -35,12 +43,28 @@ def save_settings(data: Dict[str, Any], settings_file: Optional[Path] = None) ->
 
 
 def get_presets_dir(settings_file: Optional[Path] = None) -> Path:
-    """Return the directory where presets.json is stored."""
+    """Return the directory where presets.json is stored.
+
+    설정값 또는 플랫폼 기본 경로를 반환한다.
+    네트워크 경로가 접근 불가능하면 로컬 폴백(``APP_DIR/presets``)을 반환한다.
+    """
+    _LOCAL_FALLBACK = cfg.APP_DIR / "presets"
+
     settings = load_settings(settings_file)
     p = settings.get("presets_dir")
-    if isinstance(p, str) and p.strip():
-        return Path(p.strip())
-    return _DEFAULT_PRESETS_DIR
+    target = Path(p.strip()) if isinstance(p, str) and p.strip() else _DEFAULT_PRESETS_DIR
+
+    # 이미 존재하면 바로 반환
+    if target.exists():
+        return target
+
+    # 존재하지 않으면 생성 시도, 실패 시 로컬 폴백
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        return target
+    except OSError:
+        logger.warning("프리셋 경로 접근 불가 (%s), 로컬 폴백: %s", target, _LOCAL_FALLBACK)
+        return _LOCAL_FALLBACK
 
 
 def get_unc_mappings(settings_file: Optional[Path] = None) -> Dict[str, str]:

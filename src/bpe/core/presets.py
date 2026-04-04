@@ -20,11 +20,20 @@ def _preset_file(settings_file: Optional[Path] = None) -> Path:
 
 
 def ensure_store() -> None:
-    """Create all required directories and an empty presets.json if missing."""
+    """Create all required directories and an empty presets.json if missing.
+
+    네트워크 프리셋 경로에 접근할 수 없으면 로컬 폴백(``APP_DIR/presets``)을 사용한다.
+    """
     cfg.APP_DIR.mkdir(parents=True, exist_ok=True)
     presets_dir = get_presets_dir()
-    presets_dir.mkdir(parents=True, exist_ok=True)
-    pf = _preset_file()
+    try:
+        presets_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        fallback = cfg.APP_DIR / "presets"
+        logger.warning("프리셋 경로 접근 불가 (%s), 로컬 폴백 사용: %s", presets_dir, fallback)
+        fallback.mkdir(parents=True, exist_ok=True)
+        presets_dir = fallback
+    pf = presets_dir / "presets.json"
     if not pf.exists():
         atomic_write_text(pf, "{}")
     cfg.CACHE_DIR.mkdir(parents=True, exist_ok=True)
