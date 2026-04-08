@@ -64,6 +64,38 @@ def list_notes_for_shots(
     return [_format_note(n) for n in (raw or [])]
 
 
+def create_note(
+    sg: Any,
+    *,
+    project_id: int,
+    shot_id: int,
+    subject: str,
+    content: str,
+    version_id: Optional[int] = None,
+    attachment_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """ShotGrid에 Note를 생성하고 선택적으로 이미지를 첨부한다."""
+    links: List[Dict[str, Any]] = [{"type": "Shot", "id": int(shot_id)}]
+    if version_id is not None:
+        links.append({"type": "Version", "id": int(version_id)})
+    data: Dict[str, Any] = {
+        "project": {"type": "Project", "id": int(project_id)},
+        "note_links": links,
+        "subject": (subject.strip() or "(BPE 피드백)"),
+        "content": (content or "").strip(),
+    }
+    try:
+        note = sg.create("Note", data)
+    except Exception as exc:
+        raise ShotGridError(f"Note 생성 실패: {exc}") from exc
+    if attachment_path:
+        try:
+            sg.upload("Note", note["id"], attachment_path, "attachments")
+        except Exception as exc:
+            logger.warning("Note 첨부 업로드 실패: %s", exc)
+    return note
+
+
 def _build_filters(
     link_clause: List[Any],
     cutoff: Optional[datetime],

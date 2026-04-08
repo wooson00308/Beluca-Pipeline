@@ -7,7 +7,8 @@ from typing import Any, Dict, List
 
 import pytest
 
-from bpe.shotgrid.notes import list_notes_for_shots
+from bpe.shotgrid.errors import ShotGridError
+from bpe.shotgrid.notes import create_note, list_notes_for_shots
 from tests.shotgrid.mock_sg import MockShotgun
 
 
@@ -72,7 +73,7 @@ class TestListNotesForShots:
                 "content": None,
                 "created_at": None,
                 "created_by": None,
-                "note_links": None,
+                "note_links": [{"type": "Shot", "id": 1}],
                 "project": None,
             },
         )
@@ -85,7 +86,7 @@ class TestListNotesForShots:
         assert note["author"] == "—"
         assert note["context"] == "—"
         assert note["project_name"] == "—"
-        assert note["shot_ids"] == []
+        assert note["shot_ids"] == [1]
 
     def test_no_days_back_returns_all(self) -> None:
         sg = MockShotgun()
@@ -145,3 +146,63 @@ class TestGetNoteAttachments:
             },
         )
         assert get_note_attachments(sg, 8) == []
+
+
+class TestCreateNote:
+    def test_create_note_minimal(self) -> None:
+        sg = MockShotgun()
+        sg._add_entity("Project", {"id": 1, "code": "P1"})
+        note = create_note(
+            sg,
+            project_id=1,
+            shot_id=50,
+            subject="Hello",
+            content="Body text",
+        )
+        assert note.get("type") == "Note"
+        nid = note.get("id")
+        assert nid is not None
+        pool = sg._entities.get("Note", [])
+        assert len(pool) == 1
+        row = pool[0]
+        assert row.get("subject") == "Hello"
+        assert row.get("content") == "Body text"
+        assert row.get("note_links") == [{"type": "Shot", "id": 50}]
+
+    def test_create_note_with_version_and_attachment(self, tmp_path) -> None:
+        sg = MockShotgun()
+        sg._add_entity("Project", {"id": 1})
+        png = tmp_path / "x.png"
+        png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 20)
+        note = create_note(
+            sg,
+            project_id=1,
+            shot_id=50,
+            subject="S",
+            content="C",
+            version_id=99,
+            attachment_path=str(png),
+        )
+        nid = note["id"]
+        row = next(e for e in sg._entities["Note"] if e["id"] == nid)
+        links = row.get("note_links") or []
+        assert {"type": "Shot", "id": 50} in links
+        assert {"type": "Version", "id": 99} in links
+        assert "attachments" in row
+
+    def test_create_note_raises_shotgrid_error(self) -> None:
+        class Boom:
+            def create(self, *a, **k):
+                raise RuntimeError("nope")
+
+            def upload(self, *a, **k):
+                pass
+
+        with pytest.raises(ShotGridError, match="Note 생성 실패"):
+            create_note(
+                Boom(),
+                project_id=1,
+                shot_id=1,
+                subject="x",
+                content="y",
+            )

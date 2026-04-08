@@ -31,7 +31,7 @@ logger = get_logger("main_window")
 
 TAB_DEFS: List[Dict[str, str]] = [
     {"key": "my_tasks", "label": "My Tasks"},
-    {"key": "presets", "label": "Preset Manager"},
+    {"key": "presets", "label": "Manager"},
     {"key": "tools", "label": "Tools"},
 ]
 
@@ -323,17 +323,17 @@ Remove-Item -LiteralPath $Ps1Path -Force -ErrorAction SilentlyContinue
             self._toast.reposition()
 
     def _build_tabs(self) -> None:
+        from bpe.gui.tabs.manager_tab import ManagerTab
         from bpe.gui.tabs.my_tasks_tab import MyTasksTab
-        from bpe.gui.tabs.preset_tab import PresetTab
         from bpe.gui.tabs.tools_tab import ToolsTab
         from bpe.gui.widgets.lock_overlay import LockOverlay
 
-        preset_tab = PresetTab()
+        manager_tab = ManagerTab()
         lock_overlay = LockOverlay()
         lock_overlay.unlocked.connect(self._on_preset_unlocked)
         preset_stack = QStackedWidget()
         preset_stack.addWidget(lock_overlay)
-        preset_stack.addWidget(preset_tab)
+        preset_stack.addWidget(manager_tab)
         self._preset_stack = preset_stack
 
         self._tab_pages["my_tasks"] = MyTasksTab()

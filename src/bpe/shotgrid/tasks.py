@@ -603,3 +603,171 @@ def list_comp_tasks_for_project_user(
             }
         )
     return out
+
+
+def list_review_tasks_for_project(
+    sg: Any,
+    project_id: int,
+    *,
+    statuses: Optional[List[str]] = None,
+    task_content: str = "comp",
+    status_field_name: Optional[str] = None,
+    due_date_field: Optional[str] = None,
+    limit: int = 500,
+) -> List[Dict[str, Any]]:
+    """Comp tasks on *project_id* linked to Shots, filtered by task status (e.g. sv, tm).
+
+    No assignee filter — for supervisor / feedback review queues.
+
+    Query order:
+    1. ``[status_fn, "in", statuses]`` when multiple statuses.
+    2. ``filter_operator: any`` with per-status ``is`` clauses.
+    3. Separate ``find`` per status, merged by task id (dedupe).
+    """
+    if status_field_name:
+        status_fn = status_field_name.strip()
+    else:
+        detected = detect_task_status_field(sg)
+        status_fn = detected if detected else "sg_status_list"
+
+    raw_statuses = statuses if statuses is not None else ["sv", "tm"]
+    st_list = [str(s).strip().lower() for s in raw_statuses if str(s).strip()]
+    if not st_list:
+        st_list = ["sv", "tm"]
+
+    due_fn_effective = (due_date_field or "").strip() or "due_date"
+    vfx_field = _detect_shot_vfx_field(sg)
+    delivery_field = _detect_shot_delivery_date_field(sg)
+    tc_raw = (task_content or "").strip()
+
+    def _fields() -> List[str]:
+        base = [
+            "id",
+            "content",
+            status_fn,
+            due_fn_effective,
+            "project",
+            "entity",
+            "entity.Shot.code",
+            "entity.Shot.description",
+            "entity.Shot.image",
+            "project.Project.code",
+            "project.Project.name",
+        ]
+        if due_fn_effective != "due_date":
+            base.append("due_date")
+        if vfx_field:
+            base.append(f"entity.Shot.{vfx_field}")
+        if delivery_field:
+            base.append(f"entity.Shot.{delivery_field}")
+        return base
+
+    def _fields_with_version() -> List[str]:
+        return _fields() + [
+            "sg_latest_version",
+            "sg_latest_version.Version.code",
+            "sg_latest_version.Version.sg_path_to_movie",
+        ]
+
+    base_filters: List[Any] = [
+        ["project", "is", {"type": "Project", "id": int(project_id)}],
+        ["entity", "type_is", "Shot"],
+    ]
+    if tc_raw:
+        base_filters.append(["content", "contains", tc_raw])
+
+    rows: List[Dict[str, Any]] = []
+    due_read_col = due_fn_effective
+
+    def _find_with_fields(field_list: List[str], extra: List[Any]) -> List[Dict[str, Any]]:
+        return list(sg.find("Task", base_filters + extra, field_list, limit=int(limit)) or [])
+
+    # 1) "in" list
+    try:
+        rows = _find_with_fields(_fields_with_version(), [[status_fn, "in", st_list]])
+    except Exception as exc:
+        logger.debug("list_review_tasks_for_project 'in' filter failed: %s", exc)
+        rows = []
+
+    # 2) OR via filter_operator any
+    if not rows and len(st_list) > 1:
+        any_clause: Dict[str, Any] = {
+            "filter_operator": "any",
+            "filters": [[status_fn, "is", s] for s in st_list],
+        }
+        try:
+            rows = _find_with_fields(_fields_with_version(), [any_clause])
+        except Exception as exc2:
+            logger.debug("list_review_tasks_for_project 'any' fallback failed: %s", exc2)
+            rows = []
+
+    # 3) Per-status merge
+    if not rows:
+        seen: Dict[int, Dict[str, Any]] = {}
+        for st in st_list:
+            try:
+                part = _find_with_fields(_fields_with_version(), [[status_fn, "is", st]])
+            except Exception as exc3:
+                logger.debug("list_review_tasks_for_project per-status find failed: %s", exc3)
+                part = []
+            for t in part:
+                tid = t.get("id")
+                if tid is not None:
+                    try:
+                        seen[int(tid)] = t
+                    except (TypeError, ValueError):
+                        pass
+        rows = list(seen.values())
+
+    # due_date column fallback (match list_comp_tasks_for_project_user)
+    if not rows:
+        return []
+
+    def _map_rows(task_rows: List[Dict[str, Any]], read_col: str) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for t in task_rows:
+            ent = t.get("entity") or {}
+            if (ent.get("type") or "").lower() != "shot":
+                continue
+            proj = t.get("project") or {}
+            due_val = t.get(read_col)
+            proj_code = (proj.get("code") or "").strip()
+            proj_name = (proj.get("name") or "").strip()
+            ver = t.get("sg_latest_version")
+            latest_ver = ""
+            latest_ver_id: Optional[int] = None
+            if isinstance(ver, dict):
+                latest_ver = (ver.get("code") or ver.get("name") or "").strip()
+                vid = ver.get("id")
+                if vid is not None:
+                    try:
+                        latest_ver_id = int(vid)
+                    except (TypeError, ValueError):
+                        latest_ver_id = None
+            sg_movie_path = t.get("sg_latest_version.Version.sg_path_to_movie")
+            latest_sg_path = str(sg_movie_path).strip() if sg_movie_path is not None else ""
+            out.append(
+                {
+                    "task_id": t.get("id"),
+                    "task_content": (t.get("content") or "").strip(),
+                    "task_status": (t.get(status_fn) or "").strip(),
+                    "status_field": status_fn,
+                    "due_date": due_val,
+                    "delivery_date": _delivery_date_from_row(t, delivery_field),
+                    "vfx_work_order": _vfx_work_order_from_row(t, vfx_field),
+                    "shot_id": ent.get("id"),
+                    "shot_code": (ent.get("code") or ent.get("name") or "").strip(),
+                    "shot_description": (ent.get("description") or "").strip(),
+                    "shot_image": t.get("entity.Shot.image") or ent.get("image"),
+                    "project_id": proj.get("id"),
+                    "project_code": proj_code,
+                    "project_name": proj_name,
+                    "project_folder": (proj_code or proj_name).strip(),
+                    "latest_version_code": latest_ver,
+                    "latest_version_id": latest_ver_id,
+                    "latest_version_sg_path": latest_sg_path,
+                }
+            )
+        return out
+
+    return _map_rows(rows, due_read_col)

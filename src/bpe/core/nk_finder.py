@@ -842,45 +842,100 @@ def _version_ints_from_mov_filename(p: Path) -> List[int]:
     return [int(m.group(1)) for m in _NK_VERSION_RE.finditer(p.name)]
 
 
-def find_comp_render_mov(
+# 샷 루트 기준 렌더/리뷰 후보 폴더 (상대 경로 튜플)
+_RENDER_SUBDIRS: Tuple[Tuple[str, ...], ...] = (
+    ("comp", "devl", "renders"),
+    ("comp", "renders"),
+    ("renders",),
+    ("comp", "devl"),
+    ("comp", "devl", "review"),
+    ("comp", "review"),
+    ("review",),
+)
+
+
+def find_comp_render_video(
     shot_name: str,
     project_code: str,
     server_root: str,
     *,
     version_code: Optional[str] = None,
+    extensions: Tuple[str, ...] = (".mov", ".mp4", ".mxf", ".mkv"),
 ) -> Optional[Path]:
-    """``comp/devl/renders`` 아래에서 렌더 MOV를 찾는다.
+    """샷 루트 아래 여러 후보 폴더에서 영상 파일을 찾는다.
 
-    Parameters
-    ----------
-    version_code : str | None
-        ShotGrid Version 엔티티의 ``code`` 값 (예: ``"S100_0140_comp_v007"``).
-        지정하면 해당 버전 파일만 반환 — stem 완전 일치 우선, 포함 일치 폴백.
-        None이면 버전 번호 최대(동률 시 mtime) 파일을 반환.
-
-    샷 루트는 ``_resolve_shot_root`` (``build_shot_paths`` → BFS 휴리스틱)로 구한다.
+    ``find_comp_render_mov`` 보다 확장자·폴더 범위가 넓다. 동일한 버전 매칭 규칙을 쓴다.
     """
-    shot_root = _resolve_shot_root(server_root, project_code, shot_name)
+    sn = (shot_name or "").strip()
+    pc = (project_code or "").strip()
+    sr = (server_root or "").strip()
+    shot_root = _resolve_shot_root(sr, pc, sn)
     if shot_root is None:
+        logger.warning(
+            "find_comp_render_video: 샷 폴더 없음 shot=%s project=%s root=%s",
+            sn,
+            pc,
+            sr,
+        )
         return None
-    renders = shot_root / "comp" / "devl" / "renders"
-    if not renders.is_dir():
-        return None
-    try:
-        movs = [p for p in renders.glob("*.mov") if p.is_file()]
-    except OSError:
-        return None
-    if not movs:
+
+    exts = tuple(e.lower() if e.startswith(".") else f".{e.lower()}" for e in extensions if e)
+    if not exts:
+        exts = (".mov", ".mp4", ".mxf", ".mkv")
+
+    candidates: List[Path] = []
+    seen: set = set()
+    tried_dirs: List[str] = []
+    for parts in _RENDER_SUBDIRS:
+        d = shot_root.joinpath(*parts)
+        tried_dirs.append(str(d))
+        try:
+            if not d.is_dir():
+                continue
+        except OSError:
+            continue
+        for ext in exts:
+            try:
+                for p in d.glob(f"*{ext}"):
+                    if not p.is_file():
+                        continue
+                    try:
+                        rp = p.resolve()
+                    except OSError:
+                        rp = p
+                    if rp in seen:
+                        continue
+                    seen.add(rp)
+                    candidates.append(p)
+            except OSError as exc:
+                logger.debug("find_comp_render_video glob 실패 %s: %s", d, exc)
+
+    if not candidates:
+        logger.warning(
+            "find_comp_render_video: 영상 없음 shot=%s project=%s root=%s "
+            "exts=%s tried=%s version_code=%r",
+            sn,
+            pc,
+            sr,
+            exts,
+            tried_dirs[:4],
+            version_code,
+        )
         return None
 
     if version_code is not None:
         vc_lower = version_code.strip().lower()
-        exact = [p for p in movs if p.stem.lower() == vc_lower]
+        exact = [p for p in candidates if p.stem.lower() == vc_lower]
         if exact:
             return exact[0]
-        contained = [p for p in movs if vc_lower in p.stem.lower()]
+        contained = [p for p in candidates if vc_lower in p.stem.lower()]
         if contained:
             return contained[0]
+        logger.warning(
+            "find_comp_render_video: 버전 코드와 일치하는 파일 없음 vc=%r candidates=%d",
+            version_code,
+            len(candidates),
+        )
         return None
 
     def _sort_key(p: Path) -> Tuple[int, float]:
@@ -892,7 +947,34 @@ def find_comp_render_mov(
             vmax, mt = -1, 0.0
         return (vmax, mt)
 
-    return max(movs, key=_sort_key)
+    return max(candidates, key=_sort_key)
+
+
+def find_comp_render_mov(
+    shot_name: str,
+    project_code: str,
+    server_root: str,
+    *,
+    version_code: Optional[str] = None,
+) -> Optional[Path]:
+    """``comp/devl/renders`` 등 후보 폴더에서 ``.mov`` 만 찾는다 (RV 등 기존 호출 호환).
+
+    Parameters
+    ----------
+    version_code : str | None
+        ShotGrid Version 엔티티의 ``code`` 값 (예: ``"S100_0140_comp_v007"``).
+        지정하면 해당 버전 파일만 반환 — stem 완전 일치 우선, 포함 일치 폴백.
+        None이면 버전 번호 최대(동률 시 mtime) 파일을 반환.
+
+    샷 루트는 ``_resolve_shot_root`` (``build_shot_paths`` → BFS 휴리스틱)로 구한다.
+    """
+    return find_comp_render_video(
+        shot_name,
+        project_code,
+        server_root,
+        version_code=version_code,
+        extensions=(".mov",),
+    )
 
 
 def open_comp_render_in_rv(
