@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from bpe.core.nk_parser import get_knob
+from bpe.core.nuke_render_paths import normalize_path_str
 from bpe.core.presets import load_preset_template
 
 # Template sample values used for path/name substitution
@@ -229,12 +230,18 @@ def _patch_read_plate_file_paths(body: str, shot_name: str, paths: Dict[str, Pat
     ``/plate/`` 가 포함된 Read 노드 ``file`` 을 ``paths['plate_hi']`` + 현재 샷
     파일명으로 다시 쓴다 (EXR 시퀀스·MOV 단일/시퀀스 모두
     :func:`_normalize_plate_basename` 규칙). ``file "..."``·``{...}``·따옴표 없는
-    ``file W:/...``·``%04d`` 시퀀스 모두 처리. colorspace 등 다른 노브는 건드리지 않는다.
+    ``file W:/...``·``%04d`` 시퀀스 모두 처리.
+    디스크에 실제 시퀀스가 있으면 파일명·확장자를 그에 맞추고, 템플릿이 ``file_type exr``
+    고정이어도 경로 확장자에 맞게 ``file_type`` 을 맞춘다 (DPX 경로+EXR 노브 불일치 방지).
+    ``file_type`` 줄이 없으면 ``file`` 줄 바로 앞에 삽입한다.
+    colorspace 등 그 외 노브는 건드리지 않는다.
     """
     plate_hi = _to_nk_path(paths["plate_hi"])
     plate_folder = Path(paths["plate_hi"]).name.lower()
     _allowed = _PLATE_VIDEO_EXTS | _PLATE_SEQUENCE_EXTS
     force_ext: Optional[str] = plate_folder if plate_folder in _allowed else None
+
+    discovered = _discover_plate_sequence_basename(Path(paths["plate_hi"]), shot_name)
 
     blocks = _find_blocks_with_positions(body, "Read")
     result = body
@@ -263,9 +270,22 @@ def _patch_read_plate_file_paths(body: str, shot_name: str, paths: Dict[str, Pat
             continue
 
         new_base = _normalize_plate_basename(basename, shot_name, force_ext=force_ext)
+        if discovered is not None:
+            new_base = discovered
         new_path = f"{plate_hi}/{new_base}"
         new_inner = _replace_knob_in_block(inner, "file", new_path)
         if new_inner != inner:
+            ft = _read_file_type_from_plate_basename(new_base)
+            patched_ft = _replace_knob_in_block(new_inner, "file_type", ft)
+            if patched_ft == new_inner:
+                new_inner = re.sub(
+                    r"(?m)^( file )",
+                    f' file_type "{_nk_escape_quotes(ft)}"\n\\1',
+                    patched_ft,
+                    count=1,
+                )
+            else:
+                new_inner = patched_ft
             result = result[:start] + f"Read {{{new_inner}}}" + result[end:]
 
     return result
@@ -275,10 +295,98 @@ def _patch_read_plate_file_paths(body: str, shot_name: str, paths: Dict[str, Pat
 # Plate frame range (Read + Viewer)
 # ---------------------------------------------------------------------------
 
-_EXR_FRAME_NUM_RE = re.compile(r"\.(\d{4})\.exr$", re.IGNORECASE)
+_PLATE_SEQ_FRAME_RE = re.compile(
+    r"^(.+)\.(\d{4})\.(exr|dpx|tif|tiff)$",
+    re.IGNORECASE,
+)
 _PLATE_VIDEO_GLOBS = ("*.mov", "*.mp4", "*.m4v")
 _DEFAULT_FRAME_FIRST = 1001
 _DEFAULT_FRAME_LAST = 1123
+
+
+def _plate_read_file_type_for_ext(ext: str) -> str:
+    """Read 노드 ``file_type`` 에 넣을 값 (Nuke 표기)."""
+    e = (ext or "").lower()
+    if e == "exr":
+        return "exr"
+    if e == "dpx":
+        return "dpx"
+    if e in ("tif", "tiff"):
+        return "tiff"
+    return "exr"
+
+
+def _read_file_type_from_plate_basename(basename: str) -> str:
+    """플레이트 ``file`` 베이스명(``…####.dpx`` 등)에서 Read ``file_type`` 토큰을 유추한다."""
+    bn = (basename or "").lower()
+    m = re.search(r"\.(?:####|%0\d*d)\.(exr|dpx|tif|tiff)$", bn)
+    if m:
+        return _plate_read_file_type_for_ext(m.group(1))
+    m2 = re.search(r"\.(mov|mp4|m4v|mxf)$", bn)
+    if m2:
+        e = m2.group(1)
+        return "mov" if e in ("mov", "mp4", "m4v") else e
+    return "exr"
+
+
+def _tiebreak_plate_sequence_prefix(
+    candidates: List[Tuple[str, str]],
+    groups: Dict[Tuple[str, str], List[Tuple[str, int]]],
+    shot_name_hint: str,
+) -> Tuple[str, str]:
+    """동일 프레임 개수 시퀀스가 여러 개일 때 샷 힌트로 하나를 고른다."""
+
+    def sort_key(c: Tuple[str, str]) -> Tuple[int, int, str]:
+        prefix_lower, _ext = c
+        pl = prefix_lower.replace("_", "").replace(" ", "")
+        hint = (shot_name_hint or "").upper().replace("_", "").replace(" ", "")
+        score = 0
+        if hint and hint in pl:
+            score = 2
+        elif hint:
+            for part in shot_name_hint.upper().split("_"):
+                p = part.replace("_", "").replace(" ", "")
+                if len(p) >= 2 and p.lower() in pl:
+                    score = 1
+                    break
+        return (score, len(groups[c]), prefix_lower)
+
+    return max(candidates, key=sort_key)
+
+
+def _discover_plate_sequence_basename(plate_hi: Path, shot_name_hint: str = "") -> Optional[str]:
+    """
+    ``plate_hi`` 디렉터리에 실제 이미지 시퀀스가 있으면 Nuke용 베이스명을 돌려준다.
+
+    예) ``foo.1001.dpx`` … → ``foo.####.dpx``
+    폴더가 없거나 시퀀스가 없으면 None (기존 ``_normalize_plate_basename`` 결과 유지).
+    """
+    if not plate_hi.is_dir():
+        return None
+    groups: Dict[Tuple[str, str], List[Tuple[str, int]]] = {}
+    try:
+        for p in plate_hi.iterdir():
+            if not p.is_file():
+                continue
+            m = _PLATE_SEQ_FRAME_RE.match(p.name)
+            if not m:
+                continue
+            raw_prefix, fr_s, ext = m.group(1), m.group(2), m.group(3).lower()
+            key = (raw_prefix.lower(), ext)
+            groups.setdefault(key, []).append((raw_prefix, int(fr_s)))
+    except OSError:
+        return None
+    if not groups:
+        return None
+    max_n = max(len(v) for v in groups.values())
+    cand_keys = [k for k, v in groups.items() if len(v) == max_n]
+    if len(cand_keys) == 1:
+        chosen = cand_keys[0]
+    else:
+        chosen = _tiebreak_plate_sequence_prefix(cand_keys, groups, shot_name_hint)
+    ext = chosen[1]
+    orig_prefix = groups[chosen][0][0]
+    return f"{orig_prefix}.####.{ext}"
 
 
 def _parse_stts_inner(body: bytes) -> int:
@@ -355,15 +463,17 @@ def _count_mov_frames(path: Path) -> Optional[int]:
 
 
 def _scan_plate_frame_range(plate_hi: Path) -> Optional[Tuple[int, int]]:
-    """EXR 시퀀스면 파일명 min/max, 없으면 MOV/MP4/M4V 첫 파일로 ``1001`` 기준 길이 반영."""
+    """EXR/DPX/TIFF 시퀀스면 min/max 프레임. 없으면 MOV 등으로 ``1001`` 기준 길이."""
     nums: List[int] = []
     try:
         if not plate_hi.is_dir():
             return None
-        for p in plate_hi.glob("*.exr"):
-            m = _EXR_FRAME_NUM_RE.search(p.name)
+        for p in plate_hi.iterdir():
+            if not p.is_file():
+                continue
+            m = _PLATE_SEQ_FRAME_RE.match(p.name)
             if m:
-                nums.append(int(m.group(1)))
+                nums.append(int(m.group(2)))
         if nums:
             return (min(nums), max(nums))
         for pattern in _PLATE_VIDEO_GLOBS:
@@ -420,6 +530,24 @@ def _patch_read_frame_range(body: str, first: int, last: int) -> str:
         result,
         count=1,
     )
+    return result
+
+
+def _patch_all_root_frame_range(content: str, first: int, last: int) -> str:
+    """
+    스크립트 내 모든 ``Root`` 블록의 ``first_frame`` / ``last_frame`` 정수 노브를 통일한다.
+
+    템플릿 ``Root`` 가 남아 프로젝트 패널 프레임이 삽입 Root 와 어긋나는 경우를 막는다.
+    해당 줄이 없는 ``Root`` 는 변경하지 않는다.
+    """
+    blocks = _find_blocks_with_positions(content, "Root")
+    result = content
+    for start, end, inner in reversed(blocks):
+        new_inner = inner
+        new_inner = re.sub(r"(?m)^ first_frame \d+$", f" first_frame {first}", new_inner)
+        new_inner = re.sub(r"(?m)^ last_frame \d+$", f" last_frame {last}", new_inner)
+        if new_inner != inner:
+            result = result[:start] + f"Root {{{new_inner}}}" + result[end:]
     return result
 
 
@@ -721,9 +849,26 @@ def _generate_nk_minimal(
     fps = preset_data.get("fps", "23.976")
     width = int(float(preset_data.get("plate_width", 1920)))
     height = int(float(preset_data.get("plate_height", 1080)))
-    ocio_path = (preset_data.get("ocio_path", "") or "").replace("\\", "/")
+    ocio_raw = (preset_data.get("ocio_path", "") or "").strip()
+    ocio_path_escaped = (
+        _nk_escape_quotes(normalize_path_str(ocio_raw.replace("\\", "/"))) if ocio_raw else ""
+    )
     format_name = f"SP_{width}x{height}"
-    plate_file = f"{_to_nk_path(paths['plate_hi'])}/{shot_name}.####.exr"
+    disc_plate = _discover_plate_sequence_basename(paths["plate_hi"], shot_name)
+    if disc_plate:
+        plate_tail = disc_plate
+        plate_read_ft = _plate_read_file_type_for_ext(disc_plate.rsplit(".", 1)[-1])
+    else:
+        plate_folder_name = Path(paths["plate_hi"]).name.lower()
+        if plate_folder_name in _PLATE_VIDEO_EXTS:
+            plate_tail = f"{shot_name}_org_v001.{plate_folder_name}"
+            plate_read_ft = (
+                "mov" if plate_folder_name in ("mov", "mp4", "m4v") else plate_folder_name
+            )
+        else:
+            plate_tail = f"{shot_name}.####.exr"
+            plate_read_ft = "exr"
+    plate_file = f"{_to_nk_path(paths['plate_hi'])}/{plate_tail}"
     edit_file = f"{_to_nk_path(paths['edit'])}/{shot_name}_edit.####.exr"
     delivery_fmt = (preset_data.get("delivery_format", "EXR 16bit") or "EXR 16bit").upper()
     if "EXR" in delivery_fmt:
@@ -772,15 +917,15 @@ def _generate_nk_minimal(
             [
                 " colorManagement OCIO",
                 " OCIO_config custom",
-                f' customOCIOConfigPath "{ocio_path}"',
+                f' customOCIOConfigPath "{ocio_path_escaped}"',
             ]
-            if ocio_path
+            if ocio_raw
             else []
         ),
         "}",
         "Read {",
         " inputs 0",
-        " file_type exr",
+        f" file_type {plate_read_ft}",
         f" file {plate_file}",
         f" colorspace {(preset_data.get('read_input_transform') or 'scene_linear').strip()}",
         " name Read_Plate",
@@ -878,7 +1023,15 @@ def generate_nk_content(
     fps = str(preset_data.get("fps", "23.976"))
     width = int(float(preset_data.get("plate_width", 1920)))
     height = int(float(preset_data.get("plate_height", 1080)))
-    ocio_path = _nk_escape_quotes((preset_data.get("ocio_path", "") or "").replace("\\", "/"))
+    ocio_raw = (preset_data.get("ocio_path", "") or "").strip()
+    ocio_path_escaped = (
+        _nk_escape_quotes(normalize_path_str(ocio_raw.replace("\\", "/"))) if ocio_raw else ""
+    )
+    ocio_root_tail = (
+        f' colorManagement OCIO\n OCIO_config custom\n customOCIOConfigPath "{ocio_path_escaped}"\n'
+        if ocio_raw
+        else ""
+    )
     format_name = f"SP_{width}x{height}"
     fmt_str = f"{width} {height} 0 0 {width} {height} 1 {_nk_escape_quotes(format_name)}"
 
@@ -916,10 +1069,15 @@ def generate_nk_content(
     first_fr, last_fr = fr if fr else (_DEFAULT_FRAME_FIRST, _DEFAULT_FRAME_LAST)
 
     body = _patch_viewer_fps(body, fps)
-    if fr is not None:
-        body = _patch_read_frame_range(body, fr[0], fr[1])
+    body = _patch_read_frame_range(body, first_fr, last_fr)
+    if fr is None:
+        warnings.append(
+            "⚠ plate_hi에서 프레임 범위를 읽지 못해 기본 1001–1123을 사용했습니다. "
+            "플레이트 Read·Root 범위를 확인하세요."
+        )
 
     # Root block override (inserted after version line)
+    # ocio_path 가 비어 있으면 OCIO 줄 생략 (빈 customOCIOConfigPath 로 Nuke 오류 방지)
     root_block = (
         "Root {\n"
         " inputs 0\n"
@@ -927,9 +1085,7 @@ def generate_nk_content(
         f' format "{fmt_str}"\n'
         f" first_frame {first_fr}\n"
         f" last_frame {last_fr}\n"
-        " colorManagement OCIO\n"
-        " OCIO_config custom\n"
-        f' customOCIOConfigPath "{ocio_path}"\n'
+        f"{ocio_root_tail}"
         "}\n"
     )
 
@@ -943,6 +1099,7 @@ def generate_nk_content(
         insert_pos = (second_nl + 1) if second_nl != -1 else 0
 
     final_body = body[:insert_pos] + root_block + body[insert_pos:]
+    final_body = _patch_all_root_frame_range(final_body, first_fr, last_fr)
     warnings.extend(_template_sample_path_warnings(final_body))
     return final_body, warnings
 

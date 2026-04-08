@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from bpe.core.nk_generator import (
+    _discover_plate_sequence_basename,
     _find_blocks_with_positions,
     _generate_nk_minimal,
     _nk_escape_quotes,
@@ -18,6 +19,7 @@ from bpe.core.nk_generator import (
     _patch_write2_from_preset,
     _preset_datatype_string,
     _preset_first_part,
+    _read_file_type_from_plate_basename,
     _replace_knob_in_block,
     _scan_plate_frame_range,
     _template_sample_path_warnings,
@@ -299,6 +301,17 @@ class TestPlateFrameRangeAndEo7Strip:
     def test_scan_plate_frame_range_empty(self, tmp_path):
         assert _scan_plate_frame_range(tmp_path / "nope") is None
 
+    def test_scan_plate_frame_range_dpx(self, tmp_path):
+        hi = tmp_path / "hi"
+        hi.mkdir()
+        for name in (
+            "S260_0515_org_v001.1001.dpx",
+            "S260_0515_org_v001.1005.dpx",
+            "S260_0515_org_v001.1010.dpx",
+        ):
+            (hi / name).write_bytes(b"")
+        assert _scan_plate_frame_range(hi) == (1001, 1010)
+
     def test_patch_read_frame_range(self):
         nk = """
 Read {
@@ -379,6 +392,189 @@ Viewer {
         assert "origset false" in content
         assert "first_frame 1001" in content
         assert "last_frame 1023" in content
+        norm = content.replace("\\", "/")
+        assert 'file_type "exr"' in norm or "file_type exr" in norm
+
+    def test_generate_nk_content_syncs_plate_frames_when_scan_fails(self, tmp_path):
+        """스캔 실패 시에도 플레이트 Read·Viewer·Root를 기본 1001–1123에 맞춘다."""
+        plate_hi = tmp_path / "plate" / "org" / "v001" / "hi"
+        plate_hi.mkdir(parents=True)
+        ph = plate_hi.as_posix()
+        template_body = (
+            "set cut_paste_input [stack 0]\n"
+            "version 14.1 v4\n"
+            "Read {\n"
+            f' file "{ph}/E01_S01_0010_org_v001.1001.exr"\n'
+            " first 1\n"
+            " last 1\n"
+            " origfirst 1\n"
+            " origlast 1\n"
+            " origset true\n"
+            " name Read4\n"
+            "}\n"
+            "Viewer {\n"
+            " frame_range 1-1\n"
+            " fps 23.976\n"
+            "}\n"
+        )
+        paths = {
+            "shot_root": tmp_path / "shot",
+            "plate_hi": plate_hi,
+            "edit": tmp_path / "edit",
+            "renders": tmp_path / "renders",
+        }
+        preset = {"fps": "24", "plate_width": 1920, "plate_height": 1080, "project_code": "X"}
+        with patch(
+            "bpe.core.nk_generator.load_preset_template",
+            return_value=template_body,
+        ):
+            content, warnings = generate_nk_content(preset, "E01_S01_0010", paths, "v001")
+        assert " first 1001" in content
+        assert " last 1123" in content
+        assert "origfirst 1001" in content
+        assert "origlast 1123" in content
+        assert "frame_range 1001-1123" in content
+        assert "first_frame 1001" in content
+        assert "last_frame 1123" in content
+        assert any("프레임 범위" in w for w in warnings)
+
+    def test_generate_nk_content_patches_second_root_frame_range(self, tmp_path):
+        """템플릿에 Root가 있으면 삽입 Root와 함께 last_frame 등을 플레이트 스캔값으로 통일한다."""
+        plate_hi = tmp_path / "plate" / "org" / "v001" / "hi"
+        plate_hi.mkdir(parents=True)
+        (plate_hi / "E01_S01_0010_org_v001.1001.exr").write_bytes(b"")
+        (plate_hi / "E01_S01_0010_org_v001.1023.exr").write_bytes(b"")
+        ph = plate_hi.as_posix()
+        template_body = (
+            "set cut_paste_input [stack 0]\n"
+            "version 14.1 v4\n"
+            "Root {\n"
+            " inputs 0\n"
+            " fps 23.976\n"
+            " first_frame 1001\n"
+            " last_frame 9999\n"
+            "}\n"
+            "Read {\n"
+            f' file "{ph}/E01_S01_0010_org_v001.1001.exr"\n'
+            " name Read4\n"
+            "}\n"
+            "Viewer {\n"
+            " frame_range 1001-1100\n"
+            " fps 23.976\n"
+            "}\n"
+        )
+        paths = {
+            "shot_root": tmp_path / "shot",
+            "plate_hi": plate_hi,
+            "edit": tmp_path / "edit",
+            "renders": tmp_path / "renders",
+        }
+        preset = {"fps": "24", "plate_width": 1920, "plate_height": 1080, "project_code": "X"}
+        with patch(
+            "bpe.core.nk_generator.load_preset_template",
+            return_value=template_body,
+        ):
+            content, _ = generate_nk_content(preset, "E01_S01_0010", paths, "v001")
+        assert content.count("last_frame 1023") >= 2
+        assert content.count("first_frame 1001") >= 2
+
+    def test_plate_read_inserts_file_type_when_knob_missing(self, tmp_path):
+        """템플릿에 file_type 줄이 없어도 디스크 DPX면 file_type dpx 삽입."""
+        plate_hi = tmp_path / "plate" / "org" / "v001" / "hi"
+        plate_hi.mkdir(parents=True)
+        for fr in (1001, 1002):
+            (plate_hi / f"E01_S01_0010_org_v001.{fr}.dpx").write_bytes(b"")
+        ph = plate_hi.as_posix()
+        template_body = (
+            "set cut_paste_input [stack 0]\n"
+            "version 14.1 v4\n"
+            "Read {\n"
+            " inputs 0\n"
+            f' file "{ph}/E01_S01_0010_org_v001.1001.exr"\n'
+            " name Read1\n"
+            "}\n"
+        )
+        paths = {
+            "shot_root": tmp_path / "shot",
+            "plate_hi": plate_hi,
+            "edit": tmp_path / "edit",
+            "renders": tmp_path / "renders",
+        }
+        preset = {"fps": "24", "plate_width": 1920, "plate_height": 1080, "project_code": "X"}
+        with patch(
+            "bpe.core.nk_generator.load_preset_template",
+            return_value=template_body,
+        ):
+            content, _ = generate_nk_content(preset, "E01_S01_0010", paths, "v001")
+        norm = content.replace("\\", "/")
+        assert 'file_type "dpx"' in norm
+        assert ".dpx" in norm
+
+    def test_plate_read_uses_disk_dpx_sequence_basename(self, tmp_path):
+        """디스크 DPX 시퀀스 + 템플릿 file_type exr 이면 file·file_type 모두 dpx에 맞춘다."""
+        plate_hi = tmp_path / "plate" / "org" / "v001" / "hi"
+        plate_hi.mkdir(parents=True)
+        for fr in (1001, 1002, 1003):
+            (plate_hi / f"s260_0515_org_v001.{fr}.dpx").write_bytes(b"")
+        ph = plate_hi.as_posix()
+        template_body = (
+            "set cut_paste_input [stack 0]\n"
+            "version 14.1 v4\n"
+            "Read {\n"
+            " inputs 0\n"
+            " file_type exr\n"
+            f' file "{ph}/E102_wrong_org_v001.1001.exr"\n'
+            " name Read1\n"
+            "}\n"
+        )
+        paths = {
+            "shot_root": tmp_path / "shot",
+            "plate_hi": plate_hi,
+            "edit": tmp_path / "edit",
+            "renders": tmp_path / "renders",
+        }
+        preset = {"fps": "24", "plate_width": 1920, "plate_height": 1080, "project_code": "X"}
+        with patch(
+            "bpe.core.nk_generator.load_preset_template",
+            return_value=template_body,
+        ):
+            content, _ = generate_nk_content(preset, "S260_0515", paths, "v001")
+        norm = content.replace("\\", "/")
+        assert "s260_0515_org_v001.####.dpx" in norm
+        assert "E102_wrong" not in norm
+        assert 'file_type "dpx"' in norm
+
+    def test_plate_read_uses_disk_tiff_sequence(self, tmp_path):
+        plate_hi = tmp_path / "plate" / "org" / "v001" / "hi"
+        plate_hi.mkdir(parents=True)
+        for fr in (1001, 1002):
+            (plate_hi / f"E01_S01_0010_org_v001.{fr}.tif").write_bytes(b"")
+        ph = plate_hi.as_posix()
+        template_body = (
+            "set cut_paste_input [stack 0]\n"
+            "version 14.1 v4\n"
+            "Read {\n"
+            " inputs 0\n"
+            " file_type exr\n"
+            f' file "{ph}/E01_S01_0010_org_v001.1001.exr"\n'
+            " name Read1\n"
+            "}\n"
+        )
+        paths = {
+            "shot_root": tmp_path / "shot",
+            "plate_hi": plate_hi,
+            "edit": tmp_path / "edit",
+            "renders": tmp_path / "renders",
+        }
+        preset = {"fps": "24", "plate_width": 1920, "plate_height": 1080, "project_code": "X"}
+        with patch(
+            "bpe.core.nk_generator.load_preset_template",
+            return_value=template_body,
+        ):
+            content, _ = generate_nk_content(preset, "E01_S01_0010", paths, "v001")
+        norm = content.replace("\\", "/")
+        assert 'file_type "tiff"' in norm
+        assert ".tif" in norm
 
 
 # ---------------------------------------------------------------------------
@@ -406,6 +602,23 @@ class TestGenerateNkMinimal:
         assert "setup_pro_write" in result
         assert "Read_Edit" in result
 
+    def test_minimal_plate_uses_dpx_sequence_on_disk(self, tmp_path):
+        plate_hi = tmp_path / "plate" / "org" / "v001" / "hi"
+        plate_hi.mkdir(parents=True)
+        (plate_hi / "E01_S01_0010_delivery.1001.dpx").write_bytes(b"")
+        (plate_hi / "E01_S01_0010_delivery.1002.dpx").write_bytes(b"")
+        paths = {
+            "shot_root": tmp_path / "shot",
+            "plate_hi": plate_hi,
+            "edit": tmp_path / "edit",
+            "renders": tmp_path / "renders",
+        }
+        preset = {"fps": "24", "plate_width": 1920, "plate_height": 1080}
+        result = _generate_nk_minimal(preset, "E01_S01_0010", paths, "v001")
+        norm = result.replace("\\", "/")
+        assert "file_type dpx" in norm
+        assert "E01_S01_0010_delivery.####.dpx" in norm
+
     def test_minimal_mov_write_single_file_no_frame_padding(self):
         """MOV는 단일 파일 — #### 접미사 없이 경로를 만든다 (Nuke 멀티프레임 Write 오류 방지)."""
         paths = {
@@ -424,6 +637,21 @@ class TestGenerateNkMinimal:
         assert "file_type mov" in result
         assert "/E01_S01_0010_comp_v001.mov" in result.replace("\\", "/")
         assert "####.mov" not in result
+
+    def test_minimal_mov_plate_folder(self):
+        """plate_hi가 v001/mov/ 이면 Read_Plate도 MOV로 맞춘다."""
+        paths = {
+            "shot_root": Path("/shots/E01_S01"),
+            "plate_hi": Path("/shots/E01_S01/plate/org/v001/mov"),
+            "edit": Path("/shots/E01_S01/edit"),
+            "renders": Path("/shots/E01_S01/comp/devl/renders"),
+        }
+        preset = {"fps": "24", "plate_width": 1920, "plate_height": 1080}
+        result = _generate_nk_minimal(preset, "E01_S01_0010", paths, "v001")
+        norm = result.replace("\\", "/")
+        assert "file_type mov" in norm
+        assert "plate/org/v001/mov" in norm
+        assert "E01_S01_0010_org_v001.mov" in norm
 
 
 class TestGenerateNkContent:
@@ -444,6 +672,56 @@ class TestGenerateNkContent:
         assert "Root {" in content
         assert len(warnings) == 1
         assert "최소 NK" in warnings[0]
+        assert "customOCIOConfigPath" not in content
+
+    def test_injected_root_omits_ocio_when_ocio_path_empty(self):
+        template_body = "set cut_paste_input [stack 0]\nversion 14.1 v4\nRead {\n name Read1\n}\n"
+        paths = {
+            "shot_root": Path("/shots/E01_S01"),
+            "plate_hi": Path("/shots/E01_S01/plate/org/v001/hi"),
+            "edit": Path("/shots/E01_S01/edit"),
+            "renders": Path("/shots/E01_S01/comp/devl/renders"),
+        }
+        preset = {
+            "fps": "24",
+            "plate_width": 1920,
+            "plate_height": 1080,
+            "project_code": "X",
+        }
+        with patch(
+            "bpe.core.nk_generator.load_preset_template",
+            return_value=template_body,
+        ):
+            content, _ = generate_nk_content(preset, "E01_S01_0010", paths, "v001")
+        norm = content.replace("\\", "/")
+        assert "customOCIOConfigPath" not in norm
+        assert "OCIO_config custom" not in norm
+        assert "colorManagement OCIO" not in norm
+
+    def test_injected_root_includes_ocio_when_path_set(self):
+        template_body = "set cut_paste_input [stack 0]\nversion 14.1 v4\nRead {\n name Read1\n}\n"
+        paths = {
+            "shot_root": Path("/shots/E01_S01"),
+            "plate_hi": Path("/shots/E01_S01/plate/org/v001/hi"),
+            "edit": Path("/shots/E01_S01/edit"),
+            "renders": Path("/shots/E01_S01/comp/devl/renders"),
+        }
+        preset = {
+            "fps": "24",
+            "plate_width": 1920,
+            "plate_height": 1080,
+            "project_code": "X",
+            "ocio_path": "W:/configs/aces_1.2/config.ocio",
+        }
+        with patch(
+            "bpe.core.nk_generator.load_preset_template",
+            return_value=template_body,
+        ):
+            content, _ = generate_nk_content(preset, "E01_S01_0010", paths, "v001")
+        norm = content.replace("\\", "/")
+        assert "colorManagement OCIO" in norm
+        assert "OCIO_config custom" in norm
+        assert "W:/configs/aces_1.2/config.ocio" in norm
 
     def test_with_custom_template(self):
         """When a custom preset template exists, uses it."""
@@ -515,6 +793,7 @@ class TestGenerateNkContent:
         template_body = (
             "set cut_paste_input [stack 0]\n"
             "Read {\n"
+            " file_type exr\n"
             ' file "W:/vfx/E102/E102_S001_0020/plate/org/v001/hi/'
             'E102_S001_0020_org_v001.1001.exr"\n'
             " name Read1\n"
@@ -540,6 +819,7 @@ class TestGenerateNkContent:
         assert "E102" not in content
         assert "E109_S002_0050_org_v001" in content
         assert "/shots/E109_S002_0050/plate/org/v001/hi/E109_S002_0050_org_v001" in content
+        assert 'file_type "exr"' in content.replace("\\", "/")
 
     def test_plate_read_unquoted_file_and_percent04d(self):
         """따옴표 없는 ``file W:/...``·``%04d`` 저장 형식도 현재 샷 plate로 치환한다."""
@@ -574,12 +854,14 @@ class TestGenerateNkContent:
         assert "E102" not in norm
         assert "E109_S002_0050_org_v001.####.exr" in norm
         assert "/shots/E109_S002_0050/plate/org/v001/hi/" in norm
+        assert 'file_type "exr"' in norm
 
     def test_plate_read_mov_single_clip_repoints(self):
         """MOV 단일 클립 템플릿도 현재 샷·plate_hi로 맞추고 확장자는 mov 유지."""
         template_body = (
             "set cut_paste_input [stack 0]\n"
             "Read {\n"
+            " file_type exr\n"
             ' file "W:/other/E102/E102_S001_0020/plate/org/v001/hi/'
             'E102_S001_0020_org_v001.mov"\n'
             " name Read1\n"
@@ -605,12 +887,14 @@ class TestGenerateNkContent:
         assert ".mov" in content
         assert "E109_S002_0050_org_v001.mov" in content
         assert "E102" not in content
+        assert 'file_type "mov"' in content.replace("\\", "/")
 
     def test_plate_read_mov_folder_forces_mov_from_exr_template(self):
         """plate_hi가 v001/mov면 EXR 템플릿이어도 경로·파일명은 mov로 맞춘다."""
         template_body = (
             "set cut_paste_input [stack 0]\n"
             "Read {\n"
+            " file_type exr\n"
             ' file "W:/vfx/E102/E102_S001_0020/plate/org/v001/hi/'
             'E102_S001_0020_org_v001.1001.exr"\n'
             " name Read1\n"
@@ -637,6 +921,38 @@ class TestGenerateNkContent:
         assert "/plate/org/v001/mov/" in norm
         assert "E109_S002_0050_org_v001.mov" in norm
         assert "E102_S001_0020_org_v001.1001.exr" not in norm
+        assert 'file_type "mov"' in norm
+
+
+class TestReadFileTypeFromPlateBasename:
+    def test_dpx_sequence(self):
+        assert _read_file_type_from_plate_basename("foo.####.dpx") == "dpx"
+
+    def test_exr_sequence(self):
+        assert _read_file_type_from_plate_basename("bar.%04d.exr") == "exr"
+
+    def test_tiff_sequence(self):
+        assert _read_file_type_from_plate_basename("bar.####.tif") == "tiff"
+
+    def test_tiff_long_ext(self):
+        assert _read_file_type_from_plate_basename("bar.%04d.tiff") == "tiff"
+
+
+class TestDiscoverPlateSequenceBasename:
+    def test_tiebreak_prefers_shot_related_prefix(self, tmp_path):
+        hi = tmp_path / "hi"
+        hi.mkdir()
+        for fr in (1001, 1002):
+            (hi / f"ref_alt.{fr}.dpx").write_bytes(b"")
+            (hi / f"S260_0515_org_v001.{fr}.dpx").write_bytes(b"")
+        assert _discover_plate_sequence_basename(hi, "S260_0515") == "S260_0515_org_v001.####.dpx"
+
+    def test_discovers_tiff_sequence(self, tmp_path):
+        hi = tmp_path / "hi"
+        hi.mkdir()
+        for fr in (1001, 1002, 1003):
+            (hi / f"shot_plate.{fr}.tif").write_bytes(b"")
+        assert _discover_plate_sequence_basename(hi, "shot") == "shot_plate.####.tif"
 
 
 class TestNormalizePlateBasename:
