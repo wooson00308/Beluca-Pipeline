@@ -124,53 +124,72 @@ def _match_filters(entity: Dict[str, Any], filters: Any) -> bool:
     if not filters:
         return True
     for f in filters:
+        if isinstance(f, dict) and f.get("filter_operator") == "any":
+            subfilters = f.get("filters") or []
+            ok_any = False
+            for sf in subfilters:
+                if isinstance(sf, (list, tuple)) and len(sf) >= 3:
+                    if _match_single_clause(entity, sf[0], sf[1], sf[2]):
+                        ok_any = True
+                        break
+            if not ok_any:
+                return False
+            continue
         if not isinstance(f, (list, tuple)) or len(f) < 3:
             continue
         field, op, value = f[0], f[1], f[2]
-        ev = entity.get(field)
-        op_lower = str(op).lower()
-        if op_lower == "is":
-            if field == "task_assignees" and isinstance(value, dict) and isinstance(ev, list):
-                wt, wid = value.get("type"), value.get("id")
-                if not any(
-                    isinstance(x, dict) and x.get("type") == wt and x.get("id") == wid for x in ev
-                ):
-                    return False
-            elif field == "attachment_links" and isinstance(value, dict):
-                if not isinstance(ev, list):
-                    return False
-                wt, wid = value.get("type"), value.get("id")
-                if not any(
-                    isinstance(x, dict) and x.get("type") == wt and x.get("id") == wid for x in ev
-                ):
-                    return False
-            elif isinstance(value, dict) and isinstance(ev, dict):
-                if ev.get("type") != value.get("type") or ev.get("id") != value.get("id"):
-                    return False
-            elif ev != value:
-                return False
-        elif op_lower == "contains":
-            if isinstance(ev, str) and isinstance(value, str):
-                if value.lower() not in ev.lower():
-                    return False
-            elif isinstance(ev, list):
-                if value not in ev:
-                    return False
-            else:
-                return False
-        elif op_lower == "type_is":
-            if isinstance(ev, dict):
-                if (ev.get("type") or "").lower() != str(value).lower():
-                    return False
-            else:
-                return False
-        elif op_lower == "greater_than":
-            if not _cmp_dt_ok(ev, value, "gt"):
-                return False
-        elif op_lower == "less_than":
-            if not _cmp_dt_ok(ev, value, "lt"):
-                return False
+        if not _match_single_clause(entity, field, op, value):
+            return False
     return True
+
+
+def _match_single_clause(entity: Dict[str, Any], field: Any, op: Any, value: Any) -> bool:
+    ev = entity.get(field)
+    op_lower = str(op).lower()
+    if op_lower == "is":
+        if field == "task_assignees" and isinstance(value, dict) and isinstance(ev, list):
+            wt, wid = value.get("type"), value.get("id")
+            return any(
+                isinstance(x, dict) and x.get("type") == wt and x.get("id") == wid for x in ev
+            )
+        if field == "attachment_links" and isinstance(value, dict):
+            if not isinstance(ev, list):
+                return False
+            wt, wid = value.get("type"), value.get("id")
+            return any(
+                isinstance(x, dict) and x.get("type") == wt and x.get("id") == wid for x in ev
+            )
+        if isinstance(value, dict) and isinstance(ev, dict):
+            return ev.get("type") == value.get("type") and ev.get("id") == value.get("id")
+        return ev == value
+    if op_lower == "in":
+        if field == "note_links" and isinstance(ev, list) and isinstance(value, list):
+            for req in value:
+                if not isinstance(req, dict):
+                    continue
+                rt, rid = req.get("type"), req.get("id")
+                for lk in ev:
+                    if isinstance(lk, dict) and lk.get("type") == rt and lk.get("id") == rid:
+                        return True
+            return False
+        if isinstance(value, list):
+            return ev in value
+        return False
+    if op_lower == "contains":
+        if isinstance(ev, str) and isinstance(value, str):
+            return value.lower() in ev.lower()
+        if isinstance(ev, list):
+            return value in ev
+        return False
+    if op_lower == "type_is":
+        if isinstance(ev, dict):
+            return (ev.get("type") or "").lower() == str(value).lower()
+        return False
+    if op_lower == "greater_than":
+        return bool(_cmp_dt_ok(ev, value, "gt"))
+    if op_lower == "less_than":
+        return bool(_cmp_dt_ok(ev, value, "lt"))
+    return False
 
 
 def _cmp_dt_ok(ev: Any, value: Any, mode: str) -> bool:

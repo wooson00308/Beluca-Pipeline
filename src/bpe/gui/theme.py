@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys as _sys
+from typing import Dict, Tuple
 
 # Color tokens
 BG = "#1a1a1d"
@@ -51,6 +52,36 @@ SIDEBAR_BTN_RADIUS = 8
 CONTENT_MARGIN = 32
 FORM_SPACING = 16
 FIELD_SPACING = 6
+
+# Task status code -> (background hex, text hex) — ShotGrid-style palette (My Tasks / Feedback)
+TASK_STATUS_COLORS: Dict[str, Tuple[str, str]] = {
+    "wtg": ("#FFFF00", "#111111"),
+    "assign": ("#E8E4C0", "#111111"),
+    "wip": ("#F0A0C0", "#111111"),
+    "retake": ("#FF6600", "#FFFFFF"),
+    "cfrm": ("#CCCCCC", "#111111"),
+    "sv": ("#00AA00", "#FFFFFF"),
+    "pub-s": ("#003399", "#FFFFFF"),
+    "pubok": ("#00CCCC", "#111111"),
+    "ct": ("#88AAFF", "#111111"),
+    "cts": ("#007799", "#FFFFFF"),
+    "ctr": ("#CC0000", "#FFFFFF"),
+    "cto": ("#8800CC", "#FFFFFF"),
+    "disent": ("#00AACC", "#FFFFFF"),
+    "fin": ("#1A1A1A", "#FFFFFF"),
+    "hld": ("#000000", "#FFFFFF"),
+    "omt": ("#666666", "#FFFFFF"),
+    "nocg": ("#444444", "#AAAAAA"),
+    "error": ("#777777", "#FFFFFF"),
+    "rev": ("#00AA77", "#FFFFFF"),
+    "tm": ("#88CC88", "#111111"),
+}
+
+
+def task_status_badge_colors(status_code: str) -> Tuple[str, str]:
+    """Return (background, foreground) hex for a ShotGrid task status code."""
+    key = (status_code or "").strip().lower()
+    return TASK_STATUS_COLORS.get(key, (PANEL_BG, TEXT))
 
 
 def build_stylesheet() -> str:
