@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import os
 import subprocess
-import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
@@ -465,13 +465,7 @@ class ShotBuilderTab(QWidget):
         if not target.exists():
             return
 
-        path_str = normalize_path_str(target)
-        if sys.platform == "win32":
-            subprocess.Popen(["explorer", path_str])
-        elif sys.platform == "darwin":
-            subprocess.Popen(["open", path_str])
-        else:
-            subprocess.Popen(["xdg-open", path_str])
+        QDesktopServices.openUrl(QUrl.fromLocalFile(normalize_path_str(target)))
 
     def _open_nukex(self) -> None:
         if self._last_nk_path is None or not self._last_nk_path.is_file():
