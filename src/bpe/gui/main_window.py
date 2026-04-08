@@ -117,7 +117,19 @@ class MainWindow(QMainWindow):
         self._update_timer.timeout.connect(self._start_update_check)
         self._update_timer.start(4 * 60 * 60 * 1000)
 
-        QTimer.singleShot(0, self._apply_dark_titlebar)
+        QTimer.singleShot(0, self._apply_windows_shell_after_show)
+
+    def _apply_windows_shell_after_show(self) -> None:
+        """DWM 다크 타이틀바 + HWND AppUserModelID(작업 표시줄 고정 보강)."""
+        self._apply_dark_titlebar()
+        if sys.platform != "win32":
+            return
+        try:
+            from bpe.core.windows_app_id import apply_app_user_model_id_to_hwnd
+
+            apply_app_user_model_id_to_hwnd(int(self.winId()))
+        except Exception:
+            pass
 
     def _apply_dark_titlebar(self) -> None:
         """Windows 네이티브 타이틀 바를 다크 모드로 (Qt QSS로는 칠할 수 없음)."""

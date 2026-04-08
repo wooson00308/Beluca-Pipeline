@@ -6,10 +6,11 @@ import sys
 from pathlib import Path
 from typing import List
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QCoreApplication, QTimer
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
+from bpe.core.windows_app_id import apply_explicit_app_user_model_id
 from bpe.gui.theme import build_stylesheet
 
 
@@ -35,8 +36,11 @@ def run_app(argv: List[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv
 
+    # Qt가 부팅 시 AppUserModelID를 다시 잡는 경우가 있어, 인스턴스 생성 직후 셸 ID를 재적용한다.
+    QCoreApplication.setOrganizationName("Beluca")
+    QCoreApplication.setApplicationName("BPE")
     app = QApplication(argv)
-    app.setApplicationName("BPE")
+    apply_explicit_app_user_model_id()
     app.setStyleSheet(build_stylesheet())
 
     # 아이콘 설정

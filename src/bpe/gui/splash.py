@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import sys
 from typing import List
 
 from PySide6.QtCore import QRect, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QPainter, QPen, QShowEvent
 from PySide6.QtWidgets import QWidget
 
 from bpe import __version__
@@ -63,6 +64,16 @@ class SplashScreen(QWidget):
         self._timer.start()
 
         self._on_finished = None
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        if sys.platform != "win32":
+            return
+        wid = int(self.winId())
+        if wid:
+            from bpe.core.windows_app_id import apply_app_user_model_id_to_hwnd
+
+            apply_app_user_model_id_to_hwnd(wid)
 
     # ── 외부 인터페이스 ─────────────────────────────────────────────
     def on_finished(self, callback) -> None:
