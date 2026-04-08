@@ -55,7 +55,7 @@ from bpe.gui.workers.sg_worker import ShotGridWorker
 from bpe.shotgrid.client import get_default_sg
 from bpe.shotgrid.notes import download_attachment_bytes, get_note_attachments, list_notes_for_shots
 from bpe.shotgrid.projects import list_active_projects
-from bpe.shotgrid.tasks import list_comp_tasks_for_project_user
+from bpe.shotgrid.tasks import BELUCA_TASK_STATUS_PRESETS, list_comp_tasks_for_project_user
 from bpe.shotgrid.users import guess_human_user_for_me, list_project_assignees, search_human_users
 from bpe.shotgrid.versions import list_versions_for_shot
 
@@ -76,22 +76,8 @@ _QWIDGETSIZE_MAX = 16777215
 
 _SPINNER_FRAMES: Tuple[str, ...] = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
-# 상태 필터 버튼 순서 (ALL 제외)
-_STATUS_ORDER = [
-    "wtg",
-    "assign",
-    "wip",
-    "retake",
-    "cfrm",
-    "tm",
-    "sv",
-    "cto",
-    "cts",
-    "ctr",
-    "fin",
-    "hld",
-    "omt",
-]
+# 상태 필터 버튼 순서 (ALL 제외) — shotgrid 프리셋과 동기화
+_STATUS_ORDER = [code for code, _ in BELUCA_TASK_STATUS_PRESETS]
 
 _SORT_MODE_SHOT = 0
 _SORT_MODE_DELIVERY = 1
