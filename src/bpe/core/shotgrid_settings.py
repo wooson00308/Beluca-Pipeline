@@ -20,6 +20,10 @@ _DEFAULT_SHOTGRID: Dict[str, Any] = {
     "task_due_date_field": "",
     "task_status_field": "",
     "last_project_id": None,
+    # My Tasks: 브라우저에서 열 Canvas 페이지 ID (팀 페이지 기본값)
+    "shot_browser_page_id": 14100,
+    # 비어 있으면 자동 탐지; 필요 시 전체 경로 (또는 환경 변수 BPE_CHROME_PATH)
+    "chrome_executable": "",
 }
 
 

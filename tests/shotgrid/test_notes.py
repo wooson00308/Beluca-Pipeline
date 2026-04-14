@@ -8,7 +8,7 @@ from typing import Any, Dict, List
 import pytest
 
 from bpe.shotgrid.errors import ShotGridError
-from bpe.shotgrid.notes import create_note, list_notes_for_shots
+from bpe.shotgrid.notes import create_note, list_notes_for_project, list_notes_for_shots
 from tests.shotgrid.mock_sg import MockShotgun
 
 
@@ -20,6 +20,7 @@ def _make_note(
     subject: str = "Review",
     content: str = "Looks good",
     author_name: str = "Alice",
+    project_id: int = 100,
     project_name: str = "ProjectA",
     shot_name: str = "SH010",
     created_at: Any = None,
@@ -35,9 +36,27 @@ def _make_note(
             "created_at": created_at,
             "created_by": {"type": "HumanUser", "id": 1, "name": author_name},
             "note_links": [{"type": "Shot", "id": shot_id, "name": shot_name}],
-            "project": {"type": "Project", "id": 100, "name": project_name},
+            "project": {"type": "Project", "id": project_id, "name": project_name},
         },
     )
+
+
+class TestListNotesForProject:
+    def test_empty_project_id(self) -> None:
+        sg = MockShotgun()
+        assert list_notes_for_project(sg, 0) == []
+
+    def test_filters_by_project(self) -> None:
+        sg = MockShotgun()
+        _make_note(sg, 1, 10, project_id=5, project_name="P5", subject="A")
+        _make_note(sg, 2, 20, project_id=6, project_name="P6", subject="B")
+
+        result = list_notes_for_project(sg, 5, days_back=0)
+
+        assert len(result) == 1
+        assert result[0]["note_id"] == 1
+        assert result[0]["subject"] == "A"
+        assert result[0]["project_name"] == "P5"
 
 
 class TestListNotesForShots:

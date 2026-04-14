@@ -19,6 +19,8 @@ def test_defaults(tmp_app_dir: Path) -> None:
     assert sg["base_url"] == "https://beluca.shotgrid.autodesk.com"
     assert sg["script_name"] == "belucaAPI"
     assert sg["task_content"] == "comp"
+    assert sg.get("shot_browser_page_id") == 14100
+    assert sg.get("chrome_executable") == ""
 
 
 def test_studio_json_override(tmp_app_dir: Path) -> None:

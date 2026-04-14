@@ -8,6 +8,12 @@ from bpe.core.logging import get_logger
 
 logger = get_logger("shotgrid.tasks")
 
+# My Tasks All Tasks: paginated Task.find over project Shot tasks (no single-find cap)
+_ALL_TASKS_FIND_CHUNK = 500
+# Max Task rows to scan (offset ceiling); log if a full chunk remains at cap
+# Very large projects: scan stops here with a warning (avoids unbounded memory/time)
+_ALL_TASKS_MAX_SCAN_ROWS = 300_000
+
 # Shot entity field for VFX work order (detected once per process from Shot schema)
 _VFX_FIELD_CACHE: Optional[str] = None
 # Shot entity field for delivery date (detected once per process from Shot schema)
@@ -456,6 +462,336 @@ def list_comp_tasks_for_assignee(
     return out
 
 
+def _my_tasks_dict_from_task_row(
+    t: Dict[str, Any],
+    *,
+    status_fn: str,
+    due_read_col: str,
+    delivery_field: str,
+    vfx_field: str,
+) -> Optional[Dict[str, Any]]:
+    """One Task row to My Tasks dict, or None if entity is not a Shot."""
+    ent = t.get("entity") or {}
+    if (ent.get("type") or "").lower() != "shot":
+        return None
+    proj = t.get("project") or {}
+    due_val = t.get(due_read_col)
+    proj_code = (proj.get("code") or "").strip()
+    proj_name = (proj.get("name") or "").strip()
+    ver = t.get("sg_latest_version")
+    latest_ver = ""
+    if isinstance(ver, dict):
+        latest_ver = (ver.get("code") or ver.get("name") or "").strip()
+    return {
+        "task_id": t.get("id"),
+        "task_content": (t.get("content") or "").strip(),
+        "task_status": (t.get(status_fn) or "").strip(),
+        "status_field": status_fn,
+        "due_date": due_val,
+        "delivery_date": _delivery_date_from_row(t, delivery_field),
+        "vfx_work_order": _vfx_work_order_from_row(t, vfx_field),
+        "shot_id": ent.get("id"),
+        "shot_code": (ent.get("code") or ent.get("name") or "").strip(),
+        "shot_description": (ent.get("description") or "").strip(),
+        "shot_image": t.get("entity.Shot.image") or ent.get("image"),
+        "project_id": proj.get("id"),
+        "project_code": proj_code,
+        "project_name": proj_name,
+        "project_folder": (proj_code or proj_name).strip(),
+        "latest_version_code": latest_ver,
+    }
+
+
+def _task_has_human_assignees(t: Dict[str, Any]) -> bool:
+    """True if Task has at least one HumanUser in ``task_assignees``."""
+    raw = t.get("task_assignees")
+    if not isinstance(raw, list) or not raw:
+        return False
+    for x in raw:
+        if not isinstance(x, dict):
+            continue
+        if (str(x.get("type") or "")).lower() != "humanuser":
+            continue
+        if x.get("id") is not None:
+            return True
+    return False
+
+
+def _dedupe_my_tasks_rows_by_shot(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """One card per Shot: prefer ``content`` matching *comp*, else highest ``task_id``."""
+
+    def _rep_score(r: Dict[str, Any]) -> Tuple[int, int]:
+        c = (r.get("task_content") or "").strip().lower()
+        comp = 1 if c == "comp" else (1 if "comp" in c else 0)
+        try:
+            tid = int(r.get("task_id") or 0)
+        except (TypeError, ValueError):
+            tid = 0
+        return (comp, tid)
+
+    best: Dict[int, Dict[str, Any]] = {}
+    for r in rows:
+        sid = r.get("shot_id")
+        if sid is None:
+            continue
+        try:
+            ik = int(sid)
+        except (TypeError, ValueError):
+            continue
+        cur = best.get(ik)
+        if cur is None or _rep_score(r) > _rep_score(cur):
+            best[ik] = r
+    out = list(best.values())
+    out.sort(key=lambda x: int(x.get("task_id") or 0), reverse=True)
+    return out
+
+
+def _project_all_tasks_collect_deduped_rows(
+    sg: Any,
+    project_id: int,
+    *,
+    task_content: str = "",
+    status_field_name: Optional[str] = None,
+    due_date_field: Optional[str] = None,
+) -> Tuple[List[Dict[str, Any]], str]:
+    """Every Shot-linked Task on the project with a HumanUser assignee, deduped by Shot.
+
+    Paginated ``find`` so large projects are not limited to one page of rows. Unassigned
+    Tasks are skipped so counts reflect **shots that have someone on a Task** (PM overview).
+
+    Status filtering for the UI is applied after this collect
+    (see :func:`load_my_tasks_all_tasks_bundle`).
+
+    Returns ``(my_tasks_dict_rows, status_field_name_used)``.
+    """
+    pid = int(project_id)
+
+    if status_field_name:
+        status_fn = status_field_name.strip()
+    else:
+        detected = detect_task_status_field(sg)
+        status_fn = detected if detected else "sg_status_list"
+
+    due_fn_effective = (due_date_field or "").strip() or "due_date"
+    vfx_field = _detect_shot_vfx_field(sg)
+    delivery_field = _detect_shot_delivery_date_field(sg)
+
+    def _fields() -> List[str]:
+        base = [
+            "id",
+            "content",
+            status_fn,
+            due_fn_effective,
+            "task_assignees",
+            "project",
+            "entity",
+            "entity.Shot.code",
+            "entity.Shot.description",
+            "entity.Shot.image",
+            "project.Project.code",
+            "project.Project.name",
+        ]
+        if due_fn_effective != "due_date":
+            base.append("due_date")
+        if vfx_field:
+            base.append(f"entity.Shot.{vfx_field}")
+        if delivery_field:
+            base.append(f"entity.Shot.{delivery_field}")
+        return base
+
+    def _fields_with_version() -> List[str]:
+        return _fields() + ["sg_latest_version", "sg_latest_version.Version.code"]
+
+    tc_raw = (task_content or "").strip()
+    base_filters: List[Any] = [
+        ["project", "is", {"type": "Project", "id": pid}],
+        ["entity", "type_is", "Shot"],
+    ]
+    if tc_raw:
+        base_filters.append(["content", "contains", tc_raw])
+
+    order = [{"field_name": "id", "direction": "desc"}]
+    flds_v = _fields_with_version()
+    flds_min = _fields()
+    due_read_col = due_fn_effective
+
+    fb_fields: List[str] = [
+        "id",
+        "content",
+        status_fn,
+        "due_date",
+        "task_assignees",
+        "project",
+        "entity",
+        "entity.Shot.code",
+        "entity.Shot.description",
+        "entity.Shot.image",
+        "project.Project.code",
+        "project.Project.name",
+    ]
+    if vfx_field:
+        fb_fields.append(f"entity.Shot.{vfx_field}")
+    if delivery_field:
+        fb_fields.append(f"entity.Shot.{delivery_field}")
+
+    working_fields: Optional[List[str]] = None
+    last_exc: Optional[Exception] = None
+    for cand in (flds_v, flds_min):
+        try:
+            sg.find(
+                "Task",
+                list(base_filters),
+                cand,
+                order=order,
+                limit=_ALL_TASKS_FIND_CHUNK,
+                page=1,
+            )
+            working_fields = cand
+            break
+        except Exception as exc:
+            last_exc = exc
+            working_fields = None
+    if working_fields is None and due_fn_effective != "due_date":
+        due_read_col = "due_date"
+        try:
+            sg.find(
+                "Task",
+                list(base_filters),
+                fb_fields,
+                order=order,
+                limit=_ALL_TASKS_FIND_CHUNK,
+                page=1,
+            )
+            working_fields = fb_fields
+        except Exception as exc:
+            last_exc = exc
+            working_fields = None
+    if working_fields is None:
+        if last_exc is not None:
+            logger.warning(
+                "_project_all_tasks_collect_deduped_rows: cannot read Tasks: %s",
+                last_exc,
+            )
+        return [], status_fn
+
+    merged: Dict[int, Dict[str, Any]] = {}
+    page_num = 1
+    total_scanned = 0
+    hit_cap = False
+    while total_scanned < _ALL_TASKS_MAX_SCAN_ROWS:
+        try:
+            chunk_rows = list(
+                sg.find(
+                    "Task",
+                    list(base_filters),
+                    working_fields,
+                    order=order,
+                    limit=_ALL_TASKS_FIND_CHUNK,
+                    page=page_num,
+                )
+                or []
+            )
+        except Exception as exc:
+            logger.warning(
+                "_project_all_tasks_collect_deduped_rows page=%s: %s",
+                page_num,
+                exc,
+            )
+            break
+        if not chunk_rows:
+            break
+        for t in chunk_rows:
+            if not _task_has_human_assignees(t):
+                continue
+            tid = t.get("id")
+            if tid is None:
+                continue
+            try:
+                merged[int(tid)] = t
+            except (TypeError, ValueError):
+                continue
+        total_scanned += len(chunk_rows)
+        if len(chunk_rows) < _ALL_TASKS_FIND_CHUNK:
+            break
+        if total_scanned >= _ALL_TASKS_MAX_SCAN_ROWS:
+            hit_cap = True
+            break
+        page_num += 1
+    if hit_cap:
+        logger.warning(
+            "_project_all_tasks_collect_deduped_rows: scan capped at %s Task rows (project=%s)",
+            _ALL_TASKS_MAX_SCAN_ROWS,
+            pid,
+        )
+
+    my_rows: List[Dict[str, Any]] = []
+    for _tid, t in sorted(merged.items(), key=lambda kv: -kv[0]):
+        row = _my_tasks_dict_from_task_row(
+            t,
+            status_fn=status_fn,
+            due_read_col=due_read_col,
+            delivery_field=delivery_field,
+            vfx_field=vfx_field,
+        )
+        if row is not None:
+            my_rows.append(row)
+
+    deduped = _dedupe_my_tasks_rows_by_shot(my_rows)
+    return deduped, status_fn
+
+
+def load_my_tasks_all_tasks_bundle(
+    sg: Any,
+    project_id: int,
+    *,
+    page_1based: int = 1,
+    page_size: int = 100,
+    task_content: str = "",
+    status_filter_active: Optional[str] = None,
+    status_field_name: Optional[str] = None,
+    due_date_field: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Single ShotGrid collect for My Tasks All Tasks: status chips + filtered page.
+
+    *status_filter_active* narrows the **paged list** (and pager ``total``); chip counts use the
+    full project Shot set (assigned Tasks only, one representative row per Shot).
+    """
+    page = max(1, int(page_1based))
+    psize = max(1, int(page_size))
+    offset = (page - 1) * psize
+
+    rows_full, status_fn = _project_all_tasks_collect_deduped_rows(
+        sg,
+        int(project_id),
+        task_content=task_content,
+        status_field_name=status_field_name,
+        due_date_field=due_date_field,
+    )
+    counts: Dict[str, int] = {}
+    for r in rows_full:
+        code = (r.get("task_status") or "").strip().lower()
+        if not code:
+            continue
+        counts[code] = counts.get(code, 0) + 1
+    total_all = len(rows_full)
+
+    st_a = (status_filter_active or "").strip().lower()
+    if st_a and st_a != "all":
+        page_source = [r for r in rows_full if (r.get("task_status") or "").strip().lower() == st_a]
+    else:
+        page_source = list(rows_full)
+    total_pager = len(page_source)
+    page_rows = page_source[offset : offset + psize]
+    return {
+        "_bpe_bundle": True,
+        "tasks": page_rows,
+        "status_counts": counts,
+        "total": total_pager,
+        "total_all": total_all,
+        "status_field": status_fn,
+    }
+
+
 def list_comp_tasks_for_project_user(
     sg: Any,
     project_id: int,
@@ -571,38 +907,67 @@ def list_comp_tasks_for_project_user(
 
     out: List[Dict[str, Any]] = []
     for t in rows:
-        ent = t.get("entity") or {}
-        if (ent.get("type") or "").lower() != "shot":
-            continue
-        proj = t.get("project") or {}
-        due_val = t.get(due_read_col)
-        proj_code = (proj.get("code") or "").strip()
-        proj_name = (proj.get("name") or "").strip()
-        ver = t.get("sg_latest_version")
-        latest_ver = ""
-        if isinstance(ver, dict):
-            latest_ver = (ver.get("code") or ver.get("name") or "").strip()
-        out.append(
-            {
-                "task_id": t.get("id"),
-                "task_content": (t.get("content") or "").strip(),
-                "task_status": (t.get(status_fn) or "").strip(),
-                "status_field": status_fn,
-                "due_date": due_val,
-                "delivery_date": _delivery_date_from_row(t, delivery_field),
-                "vfx_work_order": _vfx_work_order_from_row(t, vfx_field),
-                "shot_id": ent.get("id"),
-                "shot_code": (ent.get("code") or ent.get("name") or "").strip(),
-                "shot_description": (ent.get("description") or "").strip(),
-                "shot_image": t.get("entity.Shot.image") or ent.get("image"),
-                "project_id": proj.get("id"),
-                "project_code": proj_code,
-                "project_name": proj_name,
-                "project_folder": (proj_code or proj_name).strip(),
-                "latest_version_code": latest_ver,
-            }
+        row = _my_tasks_dict_from_task_row(
+            t,
+            status_fn=status_fn,
+            due_read_col=due_read_col,
+            delivery_field=delivery_field,
+            vfx_field=vfx_field,
         )
+        if row is not None:
+            out.append(row)
     return out
+
+
+def summarize_shot_tasks_for_project(
+    sg: Any,
+    project_id: int,
+    *,
+    task_content: str = "",
+    status_field_name: Optional[str] = None,
+    due_date_field: Optional[str] = None,
+) -> Tuple[Dict[str, int], int]:
+    """Count by status for My Tasks All Tasks (assigned Shot Tasks, deduped by Shot)."""
+    rows, _ = _project_all_tasks_collect_deduped_rows(
+        sg,
+        int(project_id),
+        task_content=task_content,
+        status_field_name=status_field_name,
+        due_date_field=due_date_field,
+    )
+    counts: Dict[str, int] = {}
+    for r in rows:
+        code = (r.get("task_status") or "").strip().lower()
+        if not code:
+            continue
+        counts[code] = counts.get(code, 0) + 1
+    return counts, len(rows)
+
+
+def list_comp_tasks_for_project_shot_paged(
+    sg: Any,
+    project_id: int,
+    *,
+    page_1based: int = 1,
+    page_size: int = 100,
+    task_content: str = "",
+    status_filter: Optional[str] = None,
+    status_field_name: Optional[str] = None,
+    due_date_field: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """One page of My Tasks All Tasks (same rules as :func:`load_my_tasks_all_tasks_bundle`)."""
+    b = load_my_tasks_all_tasks_bundle(
+        sg,
+        int(project_id),
+        page_1based=page_1based,
+        page_size=page_size,
+        task_content=task_content,
+        status_filter_active=status_filter,
+        status_field_name=status_field_name,
+        due_date_field=due_date_field,
+    )
+    tasks = b.get("tasks")
+    return tasks if isinstance(tasks, list) else []
 
 
 def list_review_tasks_for_project(

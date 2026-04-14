@@ -64,6 +64,35 @@ def list_notes_for_shots(
     return [_format_note(n) for n in (raw or [])]
 
 
+def list_notes_for_project(
+    sg: Any,
+    project_id: int,
+    *,
+    limit: int = 400,
+    days_back: int = 14,
+) -> List[Dict[str, Any]]:
+    """Return Notes in *project*, newest first (optionally limited to recent *days_back*)."""
+    try:
+        pid = int(project_id)
+    except (TypeError, ValueError):
+        return []
+    if pid <= 0:
+        return []
+
+    cutoff: Optional[datetime] = None
+    if days_back > 0:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=int(days_back))
+
+    link_clause = ["project", "is", {"type": "Project", "id": pid}]
+    filters = _build_filters(link_clause, cutoff)
+    order = [{"field_name": "created_at", "direction": "desc"}]
+    try:
+        raw = sg.find("Note", filters, _NOTE_FIELDS, limit=limit, order=order)
+    except Exception as exc:
+        raise ShotGridError(f"노트 조회 실패: {exc}") from exc
+    return [_format_note(n) for n in (raw or [])]
+
+
 def create_note(
     sg: Any,
     *,

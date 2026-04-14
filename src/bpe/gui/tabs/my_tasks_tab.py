@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from datetime import date, datetime
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-from PySide6.QtCore import QEvent, QPoint, QRect, Qt, QTimer, QUrl
+from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import (
     QDesktopServices,
+    QIcon,
+    QIntValidator,
     QMouseEvent,
     QPixmap,
     QResizeEvent,
@@ -49,13 +53,28 @@ from bpe.core.nk_finder import (
     open_plate_in_rv,
 )
 from bpe.core.nuke_render_paths import normalize_path_str
+from bpe.core.shotgrid_browser import (
+    build_project_overview_url,
+    build_shot_canvas_url,
+    try_launch_chrome_app_url,
+)
+from bpe.core.shotgrid_settings import get_shotgrid_settings
 from bpe.gui import theme
 from bpe.gui.widgets.clickable_image import ClickableImage
 from bpe.gui.workers.sg_worker import ShotGridWorker
 from bpe.shotgrid.client import get_default_sg
-from bpe.shotgrid.notes import download_attachment_bytes, get_note_attachments, list_notes_for_shots
+from bpe.shotgrid.notes import (
+    download_attachment_bytes,
+    get_note_attachments,
+    list_notes_for_project,
+    list_notes_for_shots,
+)
 from bpe.shotgrid.projects import list_active_projects
-from bpe.shotgrid.tasks import BELUCA_TASK_STATUS_PRESETS, list_comp_tasks_for_project_user
+from bpe.shotgrid.tasks import (
+    BELUCA_TASK_STATUS_PRESETS,
+    list_comp_tasks_for_project_user,
+    load_my_tasks_all_tasks_bundle,
+)
 from bpe.shotgrid.users import guess_human_user_for_me, list_project_assignees, search_human_users
 from bpe.shotgrid.versions import list_versions_for_shot
 
@@ -81,6 +100,29 @@ _STATUS_ORDER = [code for code, _ in BELUCA_TASK_STATUS_PRESETS]
 
 _SORT_MODE_SHOT = 0
 _SORT_MODE_DELIVERY = 1
+
+# My Tasks 샷 카드 — ShotGrid 열기 버튼 아이콘 (PNG는 팀에서 교체 가능)
+_SHOTGRID_OPEN_BTN_PX = 27
+_SHOTGRID_OPEN_ICON_PX = 22
+
+
+def _my_tasks_shotgrid_icon_png_path() -> Path:
+    """소스 실행 또는 PyInstaller 번들에서 ShotGrid 열기 버튼 PNG 경로.
+
+    onefile 번들에서는 ``__file__`` 근처에 리소스가 없을 수 있어 ``_MEIPASS`` 아래
+    ``bpe/gui/resources/`` 를 먼저 본다 (``bpe.spec`` 의 ``datas`` 트리와 동일).
+    """
+    name = "shotgrid_open.png"
+    candidates: List[Path] = []
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(Path(meipass) / "bpe" / "gui" / "resources" / name)
+    candidates.append(Path(__file__).resolve().parent.parent / "resources" / name)
+    for p in candidates:
+        if p.is_file():
+            return p
+    return candidates[-1]
 
 
 def _format_human_user_display(u: Dict[str, Any]) -> str:
@@ -459,31 +501,61 @@ class _ShotCard(QFrame):
         title_row.setContentsMargins(0, 0, 0, 0)
         title = QLabel(shot_code)
         title.setStyleSheet(f"font-weight: bold; border: none; color: {theme.ACCENT};")
-        copy_btn = QPushButton("\u29c9")
-        copy_btn.setFixedSize(18, 18)
-        copy_btn.setToolTip("샷 이름 복사")
-        _copy_style_default = (
+        shot_id_i: Optional[int] = None
+        try:
+            raw_sid = d.get("shot_id")
+            if raw_sid is not None:
+                shot_id_i = int(raw_sid)
+        except (TypeError, ValueError):
+            shot_id_i = None
+        if shot_id_i is not None and shot_id_i <= 0:
+            shot_id_i = None
+
+        sg_open_btn = QPushButton()
+        sg_open_btn.setFixedSize(_SHOTGRID_OPEN_BTN_PX, _SHOTGRID_OPEN_BTN_PX)
+        _sg_style = (
             f"QPushButton {{ color: {theme.ACCENT}; background: transparent; "
-            f"border: 1px solid {theme.ACCENT}; border-radius: 3px; font-size: 10px; padding: 0; "
-            f"min-width: 18px; min-height: 18px; }}"
+            f"border: 1px solid {theme.ACCENT}; border-radius: 5px; padding: 0; "
+            f"min-width: {_SHOTGRID_OPEN_BTN_PX}px; min-height: {_SHOTGRID_OPEN_BTN_PX}px; }}"
             f"QPushButton:hover {{ background: {theme.ACCENT}; color: {theme.BG}; }}"
+            f"QPushButton:disabled {{ color: {theme.BORDER}; border-color: {theme.BORDER}; }}"
         )
-        _copy_style_ok = (
-            f"QPushButton {{ color: {theme.SUCCESS}; background: transparent; "
-            f"border: 1px solid {theme.SUCCESS}; border-radius: 3px; font-size: 10px; padding: 0; "
-            f"min-width: 18px; min-height: 18px; }}"
-            f"QPushButton:hover {{ background: {theme.SUCCESS}; color: {theme.BG}; }}"
-        )
-        copy_btn.setStyleSheet(_copy_style_default)
+        sg_open_btn.setStyleSheet(_sg_style)
+        _icon_png = _my_tasks_shotgrid_icon_png_path()
+        if _icon_png.is_file():
+            sg_open_btn.setIcon(QIcon(str(_icon_png)))
+            sg_open_btn.setIconSize(QSize(_SHOTGRID_OPEN_ICON_PX, _SHOTGRID_OPEN_ICON_PX))
+        else:
+            sg_open_btn.setText("SG")
 
-        def _on_copy_shot_name() -> None:
-            QApplication.clipboard().setText(shot_code)
-            copy_btn.setStyleSheet(_copy_style_ok)
-            QTimer.singleShot(800, lambda: copy_btn.setStyleSheet(_copy_style_default))
+        if shot_id_i is None:
+            sg_open_btn.setEnabled(False)
+            sg_open_btn.setToolTip("ShotGrid 샷 ID가 없어 웹에서 열 수 없습니다")
+        else:
+            sg_open_btn.setToolTip("ShotGrid에서 이 샷 열기")
 
-        copy_btn.clicked.connect(_on_copy_shot_name)
+        def _on_open_shotgrid_in_browser() -> None:
+            if shot_id_i is None:
+                return
+            sgset = get_shotgrid_settings()
+            base_u = (sgset.get("base_url") or "").strip()
+            page_raw = sgset.get("shot_browser_page_id", 14100)
+            page_id: Any = page_raw if page_raw is not None else 14100
+            chrome_ex = ""
+            cx = sgset.get("chrome_executable")
+            if isinstance(cx, str):
+                chrome_ex = cx.strip()
+            try:
+                url = build_shot_canvas_url(base_u, page_id, shot_id_i)
+            except ValueError as e:
+                logger.warning("ShotGrid URL 생성 실패: %s", e)
+                return
+            if not try_launch_chrome_app_url(url, chrome_executable=chrome_ex):
+                QDesktopServices.openUrl(QUrl(url))
+
+        sg_open_btn.clicked.connect(_on_open_shotgrid_in_browser)
         title_row.addWidget(title)
-        title_row.addWidget(copy_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
+        title_row.addWidget(sg_open_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
         title_row.addStretch()
         info.addLayout(title_row)
         task_line = QLabel(f"Task: {task_content}")
@@ -735,6 +807,13 @@ class MyTasksTab(QWidget):
         self._version_widgets: List[QWidget] = []
         self._versions_req_seq: int = 0
         self._user_assignee_popup: Optional[QFrame] = None
+        self._assignee_all_mode: bool = False
+        self._skip_project_notes_on_next_tasks_load: bool = False
+        self._roster_page: int = 1
+        self._roster_page_size: int = 100
+        self._roster_total: int = 0
+        self._roster_total_all: int = 0
+        self._status_counts_sg: Dict[str, int] = {}
         self._spinner_timer = QTimer(self)
         self._spinner_timer.setInterval(100)
         self._spinner_timer.timeout.connect(self._on_spinner_tick)
@@ -775,6 +854,8 @@ class MyTasksTab(QWidget):
         filter_bar = QHBoxLayout()
         filter_bar.setSpacing(6)
         filter_bar.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
+        # 우측 노트 패널 right_lay(8px)과 맞춰 TimeLog·Shotgrid 오른쪽 끝을 노트 새로고침과 정렬
+        filter_bar.setContentsMargins(0, 0, 8, 0)
 
         _lbl_style = (
             f"color: {theme.TEXT_LABEL}; font-size: {theme.FONT_SIZE}px; "
@@ -844,14 +925,22 @@ class MyTasksTab(QWidget):
 
         filter_bar.addStretch()
 
+        self._project_shotgrid_btn = QPushButton("Shotgrid")
+        self._project_shotgrid_btn.setObjectName("my_tasks_project_shotgrid_btn")
+        self._project_shotgrid_btn.setFixedWidth(88)
+        self._project_shotgrid_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._project_shotgrid_btn.clicked.connect(self._open_project_overview_in_browser)
+        filter_bar.addWidget(self._project_shotgrid_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+
         self._timelog_btn = QPushButton("TimeLog")
-        self._timelog_btn.setMinimumWidth(88)
+        self._timelog_btn.setFixedWidth(88)
         self._timelog_btn.setToolTip("")
         self._timelog_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._timelog_btn.clicked.connect(self._open_time_log_dialog)
         filter_bar.addWidget(self._timelog_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
         root.addLayout(filter_bar)
+        self._update_project_shotgrid_btn_state()
 
         # Loading indicator
         self._loading_label = QLabel("")
@@ -875,6 +964,11 @@ class MyTasksTab(QWidget):
         shot_sub = QLabel("배정 태스크")
         shot_sub.setObjectName("page_subtitle")
         shot_hdr.addWidget(shot_sub)
+        self._shot_spinner_lbl = QLabel("")
+        self._shot_spinner_lbl.setFixedWidth(18)
+        self._shot_spinner_lbl.setObjectName("page_subtitle")
+        self._shot_spinner_lbl.setVisible(False)
+        shot_hdr.addWidget(self._shot_spinner_lbl)
         shot_hdr.addStretch()
         _sort_lbl = QLabel("샷 정렬")
         _sort_lbl.setObjectName("page_subtitle")
@@ -915,6 +1009,34 @@ class MyTasksTab(QWidget):
         self._status_scroll.setWidget(self._status_host)
         shot_lay.addWidget(self._status_scroll)
 
+        self._pager_host = QWidget()
+        self._pager_host.setVisible(False)
+        pager_lay = QHBoxLayout(self._pager_host)
+        pager_lay.setContentsMargins(0, 4, 0, 0)
+        pager_lay.setSpacing(8)
+        self._pager_prev = QPushButton("« 이전")
+        self._pager_prev.setFixedWidth(72)
+        self._pager_prev.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._pager_prev.clicked.connect(self._roster_prev_page)
+        pager_lay.addWidget(self._pager_prev)
+        self._pager_next = QPushButton("다음 »")
+        self._pager_next.setFixedWidth(72)
+        self._pager_next.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._pager_next.clicked.connect(self._roster_next_page)
+        pager_lay.addWidget(self._pager_next)
+        self._pager_info = QLabel("")
+        self._pager_info.setObjectName("page_subtitle")
+        pager_lay.addWidget(self._pager_info, 1)
+        sz_lbl = QLabel("페이지 크기")
+        sz_lbl.setObjectName("page_subtitle")
+        pager_lay.addWidget(sz_lbl)
+        self._pager_size_edit = QLineEdit()
+        self._pager_size_edit.setFixedWidth(52)
+        self._pager_size_edit.setValidator(QIntValidator(10, 500, self))
+        self._pager_size_edit.setText("100")
+        self._pager_size_edit.editingFinished.connect(self._roster_page_size_committed)
+        pager_lay.addWidget(self._pager_size_edit)
+
         self._card_area = QScrollArea()
         self._card_area.setObjectName("shot_list_scroll")
         self._card_area.setWidgetResizable(True)
@@ -927,6 +1049,7 @@ class MyTasksTab(QWidget):
         self._card_layout.addStretch()
         self._card_area.setWidget(self._card_host)
         shot_lay.addWidget(self._card_area, 1)
+        shot_lay.addWidget(self._pager_host)
 
         self._splitter.addWidget(shot_panel)
 
@@ -1131,7 +1254,18 @@ class MyTasksTab(QWidget):
 
     def _on_project_combo_changed(self, _idx: int = 0) -> None:
         self._project_users.clear()
+        assignee_text = (self._user_edit.text() or "").strip()
+        if assignee_text == "All Tasks":
+            self._assignee_all_mode = True
+            if getattr(self, "_pager_host", None) is not None:
+                self._pager_host.setVisible(True)
+            self._update_roster_pager_ui()
+        else:
+            self._assignee_all_mode = False
+            if getattr(self, "_pager_host", None) is not None:
+                self._pager_host.setVisible(False)
         pid = self._project_combo.currentData()
+        self._update_project_shotgrid_btn_state()
         if pid is None:
             return
 
@@ -1199,6 +1333,9 @@ class MyTasksTab(QWidget):
         uid = u.get("id")
         if uid is None:
             return
+        self._assignee_all_mode = False
+        if getattr(self, "_pager_host", None) is not None:
+            self._pager_host.setVisible(False)
         self._user_id = int(uid)
         self._user_edit.setText(_format_human_user_display(u))
         self._user_edit.setCursorPosition(0)
@@ -1215,6 +1352,52 @@ class MyTasksTab(QWidget):
             if not busy
             else "PC 사용자 확인 중…"
         )
+
+    def _update_project_shotgrid_btn_state(self) -> None:
+        btn = getattr(self, "_project_shotgrid_btn", None)
+        if btn is None:
+            return
+        pid = self._project_combo.currentData()
+        if pid is None:
+            btn.setEnabled(False)
+            btn.setToolTip("프로젝트를 선택한 뒤 ShotGrid 프로젝트 오버뷰를 엽니다.")
+            return
+        try:
+            pid_i = int(pid)
+        except (TypeError, ValueError):
+            btn.setEnabled(False)
+            btn.setToolTip("유효한 프로젝트 ID가 없습니다.")
+            return
+        if pid_i <= 0:
+            btn.setEnabled(False)
+            btn.setToolTip("유효한 프로젝트 ID가 없습니다.")
+            return
+        btn.setEnabled(True)
+        btn.setToolTip("ShotGrid에서 현재 프로젝트 오버뷰 열기")
+
+    def _open_project_overview_in_browser(self) -> None:
+        pid = self._project_combo.currentData()
+        if pid is None:
+            return
+        try:
+            pid_i = int(pid)
+        except (TypeError, ValueError):
+            return
+        if pid_i <= 0:
+            return
+        sgset = get_shotgrid_settings()
+        base_u = (sgset.get("base_url") or "").strip()
+        chrome_ex = ""
+        cx = sgset.get("chrome_executable")
+        if isinstance(cx, str):
+            chrome_ex = cx.strip()
+        try:
+            url = build_project_overview_url(base_u, pid_i)
+        except ValueError as e:
+            logger.warning("ShotGrid 프로젝트 오버뷰 URL 실패: %s", e)
+            return
+        if not try_launch_chrome_app_url(url, chrome_executable=chrome_ex):
+            QDesktopServices.openUrl(QUrl(url))
 
     def _open_time_log_dialog(self) -> None:
         if getattr(self, "_timelog_resolve_busy", False):
@@ -1392,6 +1575,10 @@ class MyTasksTab(QWidget):
         def _fill(filter_q: str) -> None:
             lst.clear()
             q = (filter_q or "").strip().lower()
+            if not q:
+                it0 = QListWidgetItem("All Tasks")
+                it0.setData(Qt.ItemDataRole.UserRole, {"_bpe_roster_all": True})
+                lst.addItem(it0)
             for u in self._project_users:
                 name = (u.get("name") or "").strip()
                 login = (u.get("login") or "").strip()
@@ -1413,6 +1600,14 @@ class MyTasksTab(QWidget):
             u = item.data(Qt.ItemDataRole.UserRole)
             if not isinstance(u, dict):
                 return
+            if u.get("_bpe_roster_all"):
+                self._assignee_all_mode = True
+                self._user_id = None
+                self._roster_page = 1
+                self._user_edit.setText("All Tasks")
+                self._show_user_id_badge("프로젝트 Shot Task 전체", success=True)
+                popup.hide()
+                return
             if u.get("id") is None:
                 return
             self._apply_user_from_dict(u)
@@ -1426,6 +1621,55 @@ class MyTasksTab(QWidget):
         self._user_assignee_popup = popup
         popup.show()
         QTimer.singleShot(0, search.setFocus)
+
+    def _update_roster_pager_ui(self) -> None:
+        if not getattr(self, "_pager_host", None):
+            return
+        vis = self._assignee_all_mode
+        self._pager_host.setVisible(vis)
+        if not vis:
+            return
+        max_page = max(
+            1, (self._roster_total + self._roster_page_size - 1) // self._roster_page_size
+        )
+        self._pager_prev.setEnabled(self._roster_page > 1)
+        self._pager_next.setEnabled(self._roster_page < max_page)
+        self._pager_info.setText(
+            f"페이지 {self._roster_page}/{max_page} · 전체 {self._roster_total}건 (All Tasks)"
+        )
+
+    def _roster_prev_page(self) -> None:
+        if not self._assignee_all_mode or self._roster_page <= 1:
+            return
+        self._roster_page -= 1
+        self._refresh(reset_status=False)
+
+    def _roster_next_page(self) -> None:
+        if not self._assignee_all_mode:
+            return
+        max_page = max(
+            1, (self._roster_total + self._roster_page_size - 1) // self._roster_page_size
+        )
+        if self._roster_page >= max_page:
+            return
+        self._roster_page += 1
+        self._refresh(reset_status=False)
+
+    def _roster_page_size_committed(self) -> None:
+        if not self._assignee_all_mode:
+            return
+        raw = self._pager_size_edit.text().strip()
+        try:
+            n = int(raw)
+        except ValueError:
+            n = 100
+        n = max(10, min(500, n))
+        self._pager_size_edit.setText(str(n))
+        if n == self._roster_page_size:
+            return
+        self._roster_page_size = n
+        self._roster_page = 1
+        self._refresh(reset_status=False)
 
     # ── Sort / status filter UI ─────────────────────────────────────
 
@@ -1466,8 +1710,14 @@ class MyTasksTab(QWidget):
                 w.deleteLater()
         self._status_btn_map.clear()
 
-        counts = self._count_statuses()
-        n_all = len(self._all_tasks)
+        if self._assignee_all_mode:
+            n_all = int(self._roster_total_all)
+            counts = (
+                dict(self._status_counts_sg) if self._status_counts_sg else self._count_statuses()
+            )
+        else:
+            counts = self._count_statuses()
+            n_all = len(self._all_tasks)
 
         def _add_btn(code: str, label: str, n: int) -> None:
             btn = QPushButton(f"{label}\n{n}")
@@ -1528,9 +1778,15 @@ class MyTasksTab(QWidget):
             self._set_status_button_style(btn, code, code == self._active_status)
 
     def _on_status_clicked(self, code: str) -> None:
-        if not self._all_tasks:
-            return
         if self._active_status == code:
+            return
+        if self._assignee_all_mode:
+            self._active_status = code
+            self._roster_page = 1
+            self._update_status_button_styles()
+            self._refresh(reset_status=False)
+            return
+        if not self._all_tasks:
             return
         self._active_status = code
         self._update_status_button_styles()
@@ -1539,7 +1795,13 @@ class MyTasksTab(QWidget):
     def _apply_filter_and_sort(self) -> None:
         if not self._all_tasks:
             self._clear_cards()
-            self._loading_label.setText("0개 Task 로드됨")
+            if self._assignee_all_mode and self._roster_total > 0:
+                self._loading_label.setText(
+                    f"이 페이지에 표시할 Task 없음 (전체 {self._roster_total}건, "
+                    f"상태·페이지를 바꿔 보세요)"
+                )
+            else:
+                self._loading_label.setText("0개 Task 로드됨")
             return
 
         filtered = _filter_tasks_by_status(self._all_tasks, self._active_status)
@@ -1562,11 +1824,20 @@ class MyTasksTab(QWidget):
             self._load_thumbnail(card)
             self._apply_cached_version_to_card(card)
 
-        self._loading_label.setText(
-            f"{len(sorted_tasks)}개 표시 (전체 {len(self._all_tasks)}개 Task)"
-        )
+        if self._assignee_all_mode:
+            max_page = max(
+                1, (self._roster_total + self._roster_page_size - 1) // self._roster_page_size
+            )
+            self._loading_label.setText(
+                f"{len(sorted_tasks)}개 표시 · 페이지 {self._roster_page}/{max_page} "
+                f"(전체 {self._roster_total}건)"
+            )
+        else:
+            self._loading_label.setText(
+                f"{len(sorted_tasks)}개 표시 (전체 {len(self._all_tasks)}개 Task)"
+            )
 
-        if self._last_shot_ids:
+        if not self._assignee_all_mode and self._last_shot_ids:
             self._load_notes(self._last_shot_ids, days_back=14)
         self._clear_versions_panel()
         if self._right_stack.currentIndex() == 1:
@@ -1587,38 +1858,90 @@ class MyTasksTab(QWidget):
 
     # ── Refresh / fetch tasks ───────────────────────────────────────
 
-    def _refresh(self) -> None:
-        if self._user_id is None:
+    def _refresh(self, *, reset_status: bool = True) -> None:
+        project_id = self._project_combo.currentData()
+        if self._assignee_all_mode:
+            if project_id is None:
+                self._loading_label.setText("All Tasks 조회는 프로젝트를 선택해야 합니다.")
+                return
+        elif self._user_id is None:
             self._loading_label.setText("담당자를 먼저 선택하세요.")
             return
 
-        project_id = self._project_combo.currentData()
+        if reset_status:
+            self._active_status = "all"
+            if self._assignee_all_mode:
+                self._roster_page = 1
+
         user_id = self._user_id
+
+        self._skip_project_notes_on_next_tasks_load = self._assignee_all_mode and not reset_status
 
         self._loading_label.setText("조회 중...")
         self._clear_cards()
+        self._start_spinner(self._shot_spinner_lbl)
 
-        def _fetch() -> List[Dict[str, Any]]:
+        def _fetch() -> Any:
             sg = get_default_sg()
+            if self._assignee_all_mode and project_id is not None:
+                pid = int(project_id)
+                st = None if self._active_status == "all" else self._active_status
+                b = load_my_tasks_all_tasks_bundle(
+                    sg,
+                    pid,
+                    page_1based=self._roster_page,
+                    page_size=self._roster_page_size,
+                    task_content="",
+                    status_filter_active=st,
+                )
+                return {
+                    "_bpe_bundle": True,
+                    "tasks": b.get("tasks") or [],
+                    "status_counts": b.get("status_counts") or {},
+                    "total": int(b.get("total") or 0),
+                    "total_all": int(b.get("total_all") or 0),
+                }
             return list_comp_tasks_for_project_user(
                 sg,
                 project_id=project_id,
-                human_user_id=user_id,
+                human_user_id=int(user_id),
                 status_filter=None,
                 task_content="",
             )
 
         w = ShotGridWorker(_fetch)
         w.finished.connect(self._on_tasks_loaded)
-        w.error.connect(lambda e: self._loading_label.setText(f"오류: {e}"))
+
+        def _on_refresh_error(msg: str) -> None:
+            self._stop_spinner(self._shot_spinner_lbl)
+            self._loading_label.setText(f"오류: {msg}")
+
+        w.error.connect(_on_refresh_error)
         w.start()
         self._workers.append(w)
 
     def _on_tasks_loaded(self, result: object) -> None:
-        tasks: List[Dict[str, Any]] = result if isinstance(result, list) else []
+        self._stop_spinner(self._shot_spinner_lbl)
+        if isinstance(result, dict) and result.get("_bpe_bundle"):
+            tasks = result.get("tasks") if isinstance(result.get("tasks"), list) else []
+            sc = result.get("status_counts")
+            self._status_counts_sg = sc if isinstance(sc, dict) else {}
+            try:
+                self._roster_total = int(result.get("total") or 0)
+            except (TypeError, ValueError):
+                self._roster_total = 0
+            try:
+                self._roster_total_all = int(result.get("total_all") or 0)
+            except (TypeError, ValueError):
+                self._roster_total_all = 0
+        else:
+            tasks = result if isinstance(result, list) else []
+            self._status_counts_sg = {}
+            self._roster_total = 0
+            self._roster_total_all = 0
+
         self._all_tasks = tasks
         self._reset_notes_header_to_default()
-        self._active_status = "all"
         self._version_cache.clear()
 
         if not tasks:
@@ -1639,11 +1962,22 @@ class MyTasksTab(QWidget):
         self._last_shot_ids = shot_ids
         if not shot_ids:
             self._clear_notes()
-            self._add_note_placeholder("조회된 샷이 없습니다.")
-            self._reset_notes_header_to_default()
+            if not (self._assignee_all_mode and self._project_combo.currentData() is not None):
+                self._add_note_placeholder("조회된 샷이 없습니다.")
+                self._reset_notes_header_to_default()
 
         self._build_status_buttons()
         self._apply_filter_and_sort()
+        self._update_roster_pager_ui()
+
+        pid_notes = self._project_combo.currentData()
+        if (
+            self._assignee_all_mode
+            and pid_notes is not None
+            and not self._skip_project_notes_on_next_tasks_load
+        ):
+            self._load_project_notes(int(pid_notes))
+        self._skip_project_notes_on_next_tasks_load = False
 
         # Local comp NK 기준 Version 라벨 (백그라운드, 전체 태스크 기준 캐시)
         self._version_req_seq += 1
@@ -1832,6 +2166,23 @@ class MyTasksTab(QWidget):
     # ── Notes panel ──────────────────────────────────────────────────
 
     def _refresh_notes_clicked(self) -> None:
+        if self._assignee_all_mode:
+            pid = self._project_combo.currentData()
+            if pid is None:
+                self._loading_label.setText("All Tasks 조회는 프로젝트를 선택해야 합니다.")
+                return
+            if self._selected_shot_card is not None:
+                self._selected_shot_card.set_selected(False)
+                self._selected_shot_card = None
+            self._reset_notes_header_to_default()
+            self._note_sub_lbl.setText("프로젝트 전체 · 최근 2주")
+            self._clear_versions_panel()
+            if self._right_stack.currentIndex() == 1:
+                self._versions_shot_lbl.setText("")
+                self._add_version_placeholder("샷을 선택하세요.")
+            self._switch_right_panel(0)
+            self._load_project_notes(int(pid))
+            return
         if not self._last_shot_ids:
             self._loading_label.setText("먼저 조회를 실행하세요.")
             return
@@ -1871,6 +2222,40 @@ class MyTasksTab(QWidget):
             self._loading_label.setText("")
             self._stop_spinner(self._note_spinner_lbl)
             logger.warning("노트 로드 실패: %s", msg)
+            self._clear_notes()
+            self._add_note_placeholder("노트 로드 실패")
+
+        w = ShotGridWorker(_fetch)
+        w.finished.connect(_on_done)
+        w.error.connect(_on_error)
+        w.start()
+        self._workers.append(w)
+
+    def _load_project_notes(self, project_id: int) -> None:
+        self._notes_req_seq += 1
+        seq = self._notes_req_seq
+        self._loading_label.setText("노트 불러오는 중...")
+        self._note_sub_lbl.setText("프로젝트 전체 · 최근 2주")
+        self._start_spinner(self._note_spinner_lbl)
+
+        def _fetch() -> List[Dict[str, Any]]:
+            sg = get_default_sg()
+            return list_notes_for_project(sg, int(project_id), days_back=14)
+
+        def _on_done(result: object) -> None:
+            if seq != self._notes_req_seq:
+                return
+            notes: List[Dict[str, Any]] = result if isinstance(result, list) else []
+            self._loading_label.setText("")
+            self._stop_spinner(self._note_spinner_lbl)
+            self._render_notes(notes)
+
+        def _on_error(msg: str) -> None:
+            if seq != self._notes_req_seq:
+                return
+            self._loading_label.setText("")
+            self._stop_spinner(self._note_spinner_lbl)
+            logger.warning("프로젝트 노트 로드 실패: %s", msg)
             self._clear_notes()
             self._add_note_placeholder("노트 로드 실패")
 
@@ -2234,11 +2619,21 @@ class MyTasksTab(QWidget):
     def _open_publish_dialog(self, task_data: Dict[str, Any]) -> None:
         from bpe.gui.tabs.publish_tab import PublishTab
 
-        if self._user_id is None:
-            QMessageBox.warning(self, "담당자 미선택", "담당자를 먼저 선택하세요.")
+        pub_uid: Optional[int] = self._user_id
+        if pub_uid is None and self._me_sg_user and self._me_sg_user.get("id") is not None:
+            pub_uid = int(self._me_sg_user["id"])
+        if pub_uid is None:
+            QMessageBox.warning(
+                self,
+                "담당자 미선택",
+                "퍼블리쉬할 ShotGrid 사용자가 없습니다.\n"
+                "담당자를 선택하거나 My Tasks로 이 PC 사용자를 먼저 인식해 주세요.",
+            )
             return
 
         user_name = self._user_edit.text().strip()
+        if not user_name and self._me_sg_user:
+            user_name = _format_human_user_display(self._me_sg_user)
 
         dlg = QDialog(self)
         dlg.setWindowTitle("퍼블리쉬")
@@ -2248,7 +2643,7 @@ class MyTasksTab(QWidget):
         lay = QVBoxLayout(dlg)
         lay.setContentsMargins(0, 0, 0, 0)
 
-        pub = PublishTab(task_data, self._user_id, user_name=user_name)
+        pub = PublishTab(task_data, pub_uid, user_name=user_name)
         lay.addWidget(pub)
 
         dlg.exec()

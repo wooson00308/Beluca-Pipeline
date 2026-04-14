@@ -325,6 +325,25 @@ def build_stylesheet() -> str:
         border-color: {BORDER};
     }}
 
+    /* My Tasks: 프로젝트 ShotGrid 오버뷰 (본문은 기본 버튼, 글자만 accent) */
+    QPushButton#my_tasks_project_shotgrid_btn {{
+        color: {ACCENT};
+    }}
+    QPushButton#my_tasks_project_shotgrid_btn:hover {{
+        color: {ACCENT};
+        background-color: {INPUT_BG};
+        border-color: {TEXT_DIM};
+    }}
+    QPushButton#my_tasks_project_shotgrid_btn:pressed {{
+        color: {ACCENT};
+        background-color: {BORDER};
+    }}
+    QPushButton#my_tasks_project_shotgrid_btn:disabled {{
+        color: {TEXT_DIM};
+        background-color: {SIDEBAR_BG};
+        border-color: {BORDER};
+    }}
+
     /* Primary: outline accent (like original "Create Version") */
     QPushButton[primary="true"] {{
         background-color: transparent;

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from collections import defaultdict
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
@@ -43,8 +44,25 @@ class MockShotgun:
         limit: int = 0,
         **kwargs: Any,
     ) -> List[Dict[str, Any]]:
+        page = int(kwargs.pop("page", 0) or 0)
+        offset = int(kwargs.pop("offset", 0) or 0)
+        if page > 0 and limit > 0:
+            offset = (page - 1) * limit
         pool = self._entities.get(entity_type, [])
         matched = [e for e in pool if _match_filters(e, filters)]
+        if order and isinstance(order, list) and order:
+            o0 = order[0]
+            if isinstance(o0, dict):
+                fn = str(o0.get("field_name") or "id")
+                rev = str(o0.get("direction", "asc")).lower() == "desc"
+
+                def _sort_key(ent: Dict[str, Any]) -> Any:
+                    v = ent.get(fn)
+                    return v if v is not None else 0
+
+                matched = sorted(matched, key=_sort_key, reverse=rev)
+        if offset > 0:
+            matched = matched[offset:]
         if limit > 0:
             matched = matched[:limit]
         return [_project_fields(e, fields) for e in matched]
@@ -58,6 +76,38 @@ class MockShotgun:
     ) -> Optional[Dict[str, Any]]:
         results = self.find(entity_type, filters, fields, limit=1, **kwargs)
         return results[0] if results else None
+
+    def summarize(
+        self,
+        entity_type: str,
+        filters: Any,
+        *,
+        summary_fields: Any = None,
+        grouping: Any = None,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        pool = self._entities.get(entity_type, [])
+        matched = [e for e in pool if _match_filters(e, filters)]
+        group_field = "sg_status_list"
+        if grouping and isinstance(grouping, list) and grouping:
+            g0 = grouping[0]
+            if isinstance(g0, dict) and g0.get("field"):
+                group_field = str(g0["field"])
+        counts: Dict[str, int] = defaultdict(int)
+        for e in matched:
+            gv = e.get(group_field)
+            if isinstance(gv, dict):
+                key = str(gv.get("name") or gv.get("code") or gv.get("value") or "").strip().lower()
+            else:
+                key = str(gv or "").strip().lower()
+            if not key:
+                key = "(empty)"
+            counts[key] += 1
+        groups: List[Dict[str, Any]] = []
+        for k, v in sorted(counts.items()):
+            groups.append({"group_value": k, "summaries": {"id": int(v)}})
+        total = len(matched)
+        return {"summaries": {"id": total}, "groups": groups}
 
     def create(self, entity_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
         record = {"type": entity_type, "id": self._next_id, **copy.deepcopy(data)}
@@ -171,6 +221,34 @@ def _match_single_clause(entity: Dict[str, Any], field: Any, op: Any, value: Any
                 for lk in ev:
                     if isinstance(lk, dict) and lk.get("type") == rt and lk.get("id") == rid:
                         return True
+            return False
+        if field == "task_assignees" and isinstance(ev, list) and isinstance(value, list):
+            want_ids = set()
+            for req in value:
+                if not isinstance(req, dict):
+                    continue
+                if (req.get("type") or "").lower() != "humanuser":
+                    continue
+                rid = req.get("id")
+                if rid is None:
+                    continue
+                try:
+                    want_ids.add(int(rid))
+                except (TypeError, ValueError):
+                    continue
+            for x in ev:
+                if not isinstance(x, dict):
+                    continue
+                if (x.get("type") or "").lower() != "humanuser":
+                    continue
+                xid = x.get("id")
+                if xid is None:
+                    continue
+                try:
+                    if int(xid) in want_ids:
+                        return True
+                except (TypeError, ValueError):
+                    continue
             return False
         if isinstance(value, list):
             return ev in value

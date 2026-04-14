@@ -55,6 +55,10 @@ datas = [
     (str(ROOT / "VERSION.txt"), "."),
     (str(ROOT / "installer" / "icon.png"), "."),
 ]
+# My Tasks ShotGrid 버튼 PNG — 전체 bpe 트리와 중복되어도 명시로 한 번 더 넣어 onefile에서 누락 방지
+_my_tasks_sg_icon = SRC / "bpe" / "gui" / "resources" / "shotgrid_open.png"
+if _my_tasks_sg_icon.is_file():
+    datas.append((str(_my_tasks_sg_icon), "bpe/gui/resources"))
 
 # 템플릿이 있으면 포함
 templates_dir = ROOT / "templates"
