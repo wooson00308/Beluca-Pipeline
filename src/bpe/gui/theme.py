@@ -283,6 +283,22 @@ def build_stylesheet() -> str:
         border: none;
     }}
 
+    /* My Tasks: 샷 자동완성 — 레거시 QComboBox 경로용(숨김 본체) */
+    QComboBox#shot_autocomplete_combo {{
+        border: none;
+        background: transparent;
+        min-height: 0px;
+        max-height: 0px;
+        padding: 0px;
+        margin: 0px;
+        color: transparent;
+    }}
+    QComboBox#shot_autocomplete_combo::drop-down {{
+        width: 0px;
+        height: 0px;
+        border: none;
+    }}
+
     /* My Tasks filter: Assigned To — 콤보박스와 동일한 느낌(우측 ▼) */
     QPushButton#filter_combo_like_btn {{
         background-color: {INPUT_BG};

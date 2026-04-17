@@ -64,7 +64,7 @@ from bpe.shotgrid.notes import (
     list_notes_for_shots,
 )
 from bpe.shotgrid.projects import list_active_projects
-from bpe.shotgrid.shots import find_shot, search_shots_by_code_prefix
+from bpe.shotgrid.shots import search_shots_by_code_for_autocomplete
 from bpe.shotgrid.tasks import (
     BELUCA_TASK_STATUS_PRESETS,
     fetch_representative_my_tasks_row_for_project_shot,
@@ -77,6 +77,7 @@ from bpe.shotgrid.versions import list_versions_for_shot
 logger = get_logger("gui.tabs.my_tasks_tab")
 
 _AUTOCOMPLETE_DELAY = 350
+_SHOT_AUTOCOMPLETE_DELAY = 280
 # 담당자 입력란: 기본 너비 + ~1.5cm @ 96dpi (대략 57px)
 _ASSIGNEE_EDIT_WIDTH = 200 + int(round(96 / 2.54 * 1.5))
 _THUMB_W = 160
@@ -249,6 +250,22 @@ def _filter_tasks_by_tag(
         if not isinstance(tags, list):
             continue
         if any(str(x).strip().lower() == needle for x in tags):
+            out.append(t)
+    return out
+
+
+def _filter_tasks_by_shot_substring(
+    tasks: List[Dict[str, Any]], needle: Optional[str]
+) -> List[Dict[str, Any]]:
+    if not needle:
+        return list(tasks)
+    n = needle.strip().lower()
+    if len(n) < 2:
+        return list(tasks)
+    out: List[Dict[str, Any]] = []
+    for t in tasks:
+        sc = (t.get("shot_code") or "").strip().lower()
+        if n in sc:
             out.append(t)
     return out
 
@@ -786,6 +803,9 @@ class MyTasksTab(QWidget):
         self._shot_focus_shot_id: Optional[int] = None
         self._shot_extra_task: Optional[Dict[str, Any]] = None
         self._shot_inject_seq = 0
+        self._shot_substring_query: Optional[str] = None
+        self._shot_suggest_popup: Optional[QFrame] = None
+        self._shot_suggest_list: Optional[QListWidget] = None
         self._tag_filter_value: Optional[str] = None
         self._tag_filter_popup: Optional[QFrame] = None
 
@@ -937,22 +957,16 @@ class MyTasksTab(QWidget):
         shot_hdr.addStretch()
 
         self._shot_search_edit = QLineEdit()
-        self._shot_search_edit.setPlaceholderText("샷 코드 (2자 이상 자동완성, Enter 확정)")
+        self._shot_search_edit.setPlaceholderText(
+            "샷 코드 (2자 이상 자동완성, Enter 시 이름 포함 태스크만 표시)"
+        )
         self._shot_search_edit.setFixedWidth(_ASSIGNEE_EDIT_WIDTH)
         self._shot_search_edit.setFixedHeight(34)
         self._shot_search_edit.textChanged.connect(
-            lambda: self._shot_search_timer.start(_AUTOCOMPLETE_DELAY)
+            lambda: self._shot_search_timer.start(_SHOT_AUTOCOMPLETE_DELAY)
         )
         self._shot_search_edit.returnPressed.connect(self._on_shot_search_immediate)
         shot_hdr.addWidget(self._shot_search_edit, 0, Qt.AlignmentFlag.AlignVCenter)
-
-        self._shot_combo = QComboBox(self)
-        self._shot_combo.setObjectName("shot_autocomplete_combo")
-        self._shot_combo.setVisible(False)
-        self._shot_combo.setEditable(False)
-        self._shot_combo.setMaxVisibleItems(12)
-        self._shot_combo.setFixedHeight(0)
-        self._shot_combo.currentIndexChanged.connect(self._on_shot_suggest_selected)
 
         self._tag_filter_btn = QPushButton(f"태그  {chr(0x25BE)}")
         self._tag_filter_btn.setObjectName("filter_combo_like_btn")
@@ -1165,8 +1179,9 @@ class MyTasksTab(QWidget):
         super().resizeEvent(event)
         if self._user_combo.isVisible():
             self._position_user_results_combo()
-        if getattr(self, "_shot_combo", None) is not None and self._shot_combo.isVisible():
-            self._position_shot_results_combo()
+        pop = getattr(self, "_shot_suggest_popup", None)
+        if pop is not None and pop.isVisible():
+            self._position_shot_suggest_popup()
         if self._user_info.isVisible():
             self._position_user_info()
 
@@ -1207,24 +1222,65 @@ class MyTasksTab(QWidget):
 
         _maybe_hide(self._user_assignee_popup)
         _maybe_hide(getattr(self, "_tag_filter_popup", None))
+        _maybe_hide(getattr(self, "_shot_suggest_popup", None))
 
-    def _position_shot_results_combo(self) -> None:
+    def _ensure_shot_suggest_widgets(self) -> Tuple[QFrame, QListWidget]:
+        if self._shot_suggest_popup is not None and self._shot_suggest_list is not None:
+            return self._shot_suggest_popup, self._shot_suggest_list
+        popup = QFrame(self)
+        popup.setObjectName("user_assignee_popup")
+        popup.setStyleSheet(
+            f"QFrame#user_assignee_popup {{ background-color: {theme.PANEL_BG}; "
+            f"border: 1px solid {theme.BORDER}; border-radius: 4px; }}"
+        )
+        popup.setWindowFlags(Qt.WindowType.Popup)
+        lay = QVBoxLayout(popup)
+        lay.setContentsMargins(4, 4, 4, 4)
+        lay.setSpacing(0)
+        lst = QListWidget(popup)
+        lst.setObjectName("shot_suggest_list")
+        lst.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        lst.setMaximumHeight(220)
+        lst.setStyleSheet(
+            f"QListWidget#shot_suggest_list {{ background-color: {theme.PANEL_BG}; "
+            f"color: {theme.TEXT}; border: none; outline: none; "
+            f"font-size: {theme.FONT_SIZE}px; }}"
+            f"QListWidget#shot_suggest_list::item {{ padding: 6px 8px; }}"
+            f"QListWidget#shot_suggest_list::item:selected {{ "
+            f"background-color: {theme.ACCENT}; color: #ffffff; }}"
+        )
+        lay.addWidget(lst)
+        lst.itemClicked.connect(self._on_shot_suggest_item_clicked)
+        self._shot_suggest_popup = popup
+        self._shot_suggest_list = lst
+        return popup, lst
+
+    def _position_shot_suggest_popup(self) -> None:
+        popup = self._shot_suggest_popup
+        if popup is None:
+            return
         w = max(220, self._shot_search_edit.width())
-        self._shot_combo.setFixedWidth(w)
-        top_left = self._shot_search_edit.mapTo(self, QPoint(0, self._shot_search_edit.height()))
-        self._shot_combo.move(top_left.x(), top_left.y())
-        self._shot_combo.raise_()
+        popup.setFixedWidth(w)
+        gp = self._shot_search_edit.mapToGlobal(QPoint(0, self._shot_search_edit.height()))
+        popup.move(gp)
+        popup.raise_()
+
+    def _hide_shot_suggest_popup(self) -> None:
+        """조회 시작·Enter 등 — 늦게 도착한 자동완성이 목록을 다시 띄우지 않도록 시퀀스 무효화."""
+        self._shot_ac_seq += 1
+        self._shot_search_timer.stop()
+        if self._shot_suggest_list is not None:
+            self._shot_suggest_list.clear()
+        if self._shot_suggest_popup is not None:
+            self._shot_suggest_popup.hide()
 
     def _clear_shot_focus_only(self) -> None:
         self._shot_focus_shot_id = None
         self._shot_extra_task = None
+        self._shot_substring_query = None
         if getattr(self, "_shot_search_edit", None) is not None:
             self._shot_search_edit.clear()
-        if getattr(self, "_shot_combo", None) is not None:
-            self._shot_combo.blockSignals(True)
-            self._shot_combo.hide()
-            self._shot_combo.clear()
-            self._shot_combo.blockSignals(False)
+        self._hide_shot_suggest_popup()
 
     def _clear_shot_and_tag_filters(self) -> None:
         self._clear_shot_focus_only()
@@ -1340,17 +1396,18 @@ class MyTasksTab(QWidget):
         self._tag_filter_popup = popup
 
     def _do_shot_autocomplete(self) -> None:
-        self._shot_ac_seq += 1
-        seq = self._shot_ac_seq
         q = self._shot_search_edit.text().strip()
         pid = self._project_combo.currentData()
         if pid is None or len(q) < 2:
-            self._shot_combo.hide()
+            self._hide_shot_suggest_popup()
             return
+
+        self._shot_ac_seq += 1
+        seq = self._shot_ac_seq
 
         def _search() -> List[Dict[str, Any]]:
             sg = get_default_sg()
-            return search_shots_by_code_prefix(sg, int(pid), q, limit=20)
+            return search_shots_by_code_for_autocomplete(sg, int(pid), q, limit=20)
 
         w = ShotGridWorker(_search)
         w.finished.connect(lambda r: self._on_shot_autocomplete_results(r, seq))
@@ -1362,44 +1419,43 @@ class MyTasksTab(QWidget):
         if seq != self._shot_ac_seq:
             return
         rows = result if isinstance(result, list) else []
-        self._shot_combo.blockSignals(True)
-        self._shot_combo.clear()
+        popup, lst = self._ensure_shot_suggest_widgets()
+        lst.clear()
         for s in rows:
             code = (s.get("code") or "").strip()
             sid = s.get("id")
             if not code or sid is None:
                 continue
-            self._shot_combo.addItem(code, int(sid))
-        self._shot_combo.blockSignals(False)
+            try:
+                sid_i = int(sid)
+            except (TypeError, ValueError):
+                continue
+            it = QListWidgetItem(code)
+            it.setData(Qt.ItemDataRole.UserRole, sid_i)
+            lst.addItem(it)
         if rows:
-            self._shot_combo.setVisible(True)
-            self._position_shot_results_combo()
-            QTimer.singleShot(0, self._position_shot_results_combo)
-            self._shot_combo.showPopup()
+            popup.adjustSize()
+            self._position_shot_suggest_popup()
+            QTimer.singleShot(0, self._position_shot_suggest_popup)
+            popup.show()
         else:
-            self._shot_combo.setVisible(False)
+            popup.hide()
 
-    def _on_shot_suggest_selected(self, idx: int) -> None:
-        if idx < 0:
-            return
-        sid = self._shot_combo.itemData(idx)
-        code = self._shot_combo.itemText(idx)
+    def _on_shot_suggest_item_clicked(self, item: QListWidgetItem) -> None:
+        sid = item.data(Qt.ItemDataRole.UserRole)
+        code = (item.text() or "").strip()
         if sid is None:
             return
         try:
             sid_i = int(sid)
         except (TypeError, ValueError):
             return
-        self._shot_combo.blockSignals(True)
-        self._shot_combo.hide()
-        self._shot_combo.clear()
-        self._shot_combo.blockSignals(False)
+        self._hide_shot_suggest_popup()
         self._shot_search_edit.setText(code)
         self._commit_shot_focus(sid_i, code)
 
     def _on_shot_search_immediate(self) -> None:
-        self._shot_search_timer.stop()
-        self._shot_ac_seq += 1
+        self._hide_shot_suggest_popup()
         pid = self._project_combo.currentData()
         if pid is None:
             QMessageBox.information(self, "샷 검색", "프로젝트를 먼저 선택하세요.")
@@ -1409,35 +1465,32 @@ class MyTasksTab(QWidget):
             self._clear_shot_and_tag_filters()
             self._apply_filter_and_sort()
             return
+        if len(raw) < 2:
+            QMessageBox.information(
+                self, "샷 검색", "2자 이상 입력한 뒤 Enter로 필터할 수 있습니다."
+            )
+            return
 
-        def _fetch() -> Optional[Dict[str, Any]]:
-            sg = get_default_sg()
-            return find_shot(sg, int(pid), raw)
+        self._shot_focus_shot_id = None
+        self._shot_extra_task = None
+        self._shot_substring_query = raw.strip()
 
-        w = ShotGridWorker(_fetch)
-        w.finished.connect(lambda r: self._on_shot_find_for_enter(r, raw))
-        w.error.connect(lambda _: None)
-        w.start()
-        self._workers.append(w)
+        merged = self._merged_tasks_for_display()
+        filtered = _filter_tasks_by_status(merged, self._active_status)
+        filtered = _filter_tasks_by_tag(filtered, self._tag_filter_value)
+        filtered = _filter_tasks_by_shot_substring(filtered, self._shot_substring_query)
 
-    def _on_shot_find_for_enter(self, shot: object, typed: str) -> None:
-        s = shot if isinstance(shot, dict) else None
-        if s is None or s.get("id") is None:
+        self._apply_filter_and_sort()
+
+        if not filtered:
             QMessageBox.information(
                 self,
                 "샷 검색",
-                f"프로젝트에서 '{typed}' 샷을 찾지 못했습니다.",
+                f"조회된 태스크 중 샷 코드에 '{raw}'가 포함된 항목이 없습니다.",
             )
-            return
-        try:
-            sid_i = int(s.get("id"))
-        except (TypeError, ValueError):
-            return
-        code = (s.get("code") or typed).strip()
-        self._shot_search_edit.setText(code)
-        self._commit_shot_focus(sid_i, code)
 
     def _commit_shot_focus(self, shot_id: int, shot_code: str) -> None:
+        self._shot_substring_query = None
         self._shot_focus_shot_id = int(shot_id)
         self._shot_extra_task = None
         have = False
@@ -2114,6 +2167,7 @@ class MyTasksTab(QWidget):
 
         filtered = _filter_tasks_by_status(merged, self._active_status)
         filtered = _filter_tasks_by_tag(filtered, self._tag_filter_value)
+        filtered = _filter_tasks_by_shot_substring(filtered, self._shot_substring_query)
         if self._shot_focus_shot_id is not None:
             try:
                 fid = int(self._shot_focus_shot_id)
@@ -2146,7 +2200,12 @@ class MyTasksTab(QWidget):
             self._apply_cached_version_to_card(card)
 
         tag_note = " · 태그 필터" if (self._tag_filter_value or "").strip() else ""
-        shot_note = " · 샷 검색" if self._shot_focus_shot_id is not None else ""
+        shot_note = (
+            " · 샷 검색"
+            if self._shot_focus_shot_id is not None
+            or bool((self._shot_substring_query or "").strip())
+            else ""
+        )
 
         if self._assignee_all_mode:
             max_page = max(
@@ -2202,6 +2261,7 @@ class MyTasksTab(QWidget):
 
     def _refresh(self, *, reset_status: bool = True) -> None:
         self._hide_user_autocomplete_combo()
+        self._hide_shot_suggest_popup()
         if reset_status:
             self._clear_shot_and_tag_filters()
         project_id = self._project_combo.currentData()
@@ -2517,7 +2577,9 @@ class MyTasksTab(QWidget):
             if pid is None:
                 self._loading_label.setText("All Tasks 조회는 프로젝트를 선택해야 합니다.")
                 return
-            had_shot_focus = self._shot_focus_shot_id is not None
+            had_shot_focus = self._shot_focus_shot_id is not None or bool(
+                (self._shot_substring_query or "").strip()
+            )
             if had_shot_focus:
                 self._clear_shot_focus_only()
             if self._selected_shot_card is not None:
@@ -2534,7 +2596,7 @@ class MyTasksTab(QWidget):
             if had_shot_focus:
                 self._apply_filter_and_sort()
             return
-        if self._shot_focus_shot_id is not None:
+        if self._shot_focus_shot_id is not None or bool((self._shot_substring_query or "").strip()):
             self._clear_shot_focus_only()
             self._apply_filter_and_sort()
             return

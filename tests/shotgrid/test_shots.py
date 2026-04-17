@@ -6,6 +6,7 @@ import bpe.shotgrid.shots as shots_mod
 from bpe.shotgrid.shots import (
     detect_shot_tags_field,
     normalize_shot_tag_values,
+    search_shots_by_code_for_autocomplete,
     search_shots_by_code_prefix,
     shot_tag_strings_from_task_row,
 )
@@ -20,6 +21,17 @@ def test_search_shots_by_code_prefix() -> None:
     rows = search_shots_by_code_prefix(sg, 1, "AB", limit=10)
     codes = [r.get("code") for r in rows]
     assert codes == ["ABC_001", "ABC_002"]
+
+
+def test_search_shots_by_code_for_autocomplete_includes_middle_match() -> None:
+    sg = MockShotgun()
+    sg._add_entity("Project", {"id": 1, "code": "P"})
+    sg._add_entity(
+        "Shot", {"id": 10, "code": "E109_S002_0010", "project": {"type": "Project", "id": 1}}
+    )
+    rows = search_shots_by_code_for_autocomplete(sg, 1, "S002", limit=10)
+    codes = [r.get("code") for r in rows]
+    assert "E109_S002_0010" in codes
 
 
 def test_detect_shot_tags_field_prefers_listish() -> None:

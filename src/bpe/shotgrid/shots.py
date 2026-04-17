@@ -202,3 +202,80 @@ def search_shots_by_code_prefix(
             )
         )
         return rows[:lim]
+
+
+def search_shots_by_code_for_autocomplete(
+    sg: Any,
+    project_id: int,
+    needle: str,
+    *,
+    limit: int = 20,
+) -> List[Dict[str, Any]]:
+    """Autocomplete: merge prefix and substring matches so middle-of-code queries work.
+
+    Combines ``starts_with`` and ``contains`` (dedup by id), sorts with prefix matches first.
+    """
+    p = (needle or "").strip()
+    if len(p) < 2:
+        return []
+    pid = int(project_id)
+    lim = max(1, int(limit))
+    pref_l = p.lower()
+    by_id: Dict[int, Dict[str, Any]] = {}
+
+    def _take(rows: List[Dict[str, Any]]) -> None:
+        for r in rows:
+            rid = r.get("id")
+            if rid is None:
+                continue
+            try:
+                i = int(rid)
+            except (TypeError, ValueError):
+                continue
+            by_id[i] = r
+
+    try:
+        sw = list(
+            sg.find(
+                "Shot",
+                [
+                    ["project", "is", {"type": "Project", "id": pid}],
+                    ["code", "starts_with", p],
+                ],
+                ["id", "code"],
+                order=[{"field_name": "code", "direction": "asc"}],
+                limit=lim,
+            )
+            or []
+        )
+        _take(sw)
+    except Exception as e:
+        logger.debug("search_shots_by_code_for_autocomplete starts_with failed: %s", e)
+
+    if len(by_id) < lim:
+        try:
+            cn = list(
+                sg.find(
+                    "Shot",
+                    [
+                        ["project", "is", {"type": "Project", "id": pid}],
+                        ["code", "contains", p],
+                    ],
+                    ["id", "code"],
+                    order=[{"field_name": "code", "direction": "asc"}],
+                    limit=max(lim * 3, 60),
+                )
+                or []
+            )
+            _take(cn)
+        except Exception as e2:
+            logger.debug("search_shots_by_code_for_autocomplete contains failed: %s", e2)
+
+    rows = list(by_id.values())
+    rows.sort(
+        key=lambda r: (
+            0 if str(r.get("code") or "").lower().startswith(pref_l) else 1,
+            str(r.get("code") or "").lower(),
+        )
+    )
+    return rows[:lim]
