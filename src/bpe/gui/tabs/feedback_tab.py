@@ -40,6 +40,9 @@ from PySide6.QtWidgets import (
 )
 
 from bpe.core.feedback_file_log import append_feedback_log_verbose
+from bpe.core.feedback_project_paths import (
+    effective_project_for_paths as _effective_project_for_paths_impl,
+)
 from bpe.core.logging import get_logger
 from bpe.core.nk_finder import (
     find_server_root_auto,
@@ -125,10 +128,7 @@ def _sanitize_feedback_filename_part(s: str, max_len: int = 48) -> str:
 
 def _effective_project_for_paths(task: Dict[str, Any]) -> str:
     """SG Project.code가 비어 있을 때 로컬 vfx/project_연도/<폴더명> 탐색용 문자열."""
-    code = (task.get("project_code") or "").strip()
-    folder = (task.get("project_folder") or "").strip()
-    name = (task.get("project_name") or "").strip()
-    return code or folder or name
+    return _effective_project_for_paths_impl(task)
 
 
 def _shot_card_primary_title(task: Dict[str, Any]) -> str:

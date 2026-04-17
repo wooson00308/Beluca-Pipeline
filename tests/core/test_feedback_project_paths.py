@@ -1,10 +1,10 @@
-"""Tests for Feedback tab project path helpers."""
+"""Tests for bpe.core.feedback_project_paths (no GUI / QtMultimedia)."""
 
 from __future__ import annotations
 
 from typing import Any, Dict
 
-from bpe.gui.tabs.feedback_tab import _effective_project_for_paths
+from bpe.core.feedback_project_paths import effective_project_for_paths
 
 
 def test_effective_prefers_code() -> None:
@@ -13,7 +13,7 @@ def test_effective_prefers_code() -> None:
         "project_folder": "FOLDER",
         "project_name": "NAME",
     }
-    assert _effective_project_for_paths(t) == "CODE"
+    assert effective_project_for_paths(t) == "CODE"
 
 
 def test_effective_falls_back_to_folder() -> None:
@@ -22,7 +22,7 @@ def test_effective_falls_back_to_folder() -> None:
         "project_folder": "FOLDER",
         "project_name": "NAME",
     }
-    assert _effective_project_for_paths(t) == "FOLDER"
+    assert effective_project_for_paths(t) == "FOLDER"
 
 
 def test_effective_falls_back_to_name() -> None:
@@ -31,4 +31,4 @@ def test_effective_falls_back_to_name() -> None:
         "project_folder": "",
         "project_name": "NAME",
     }
-    assert _effective_project_for_paths(t) == "NAME"
+    assert effective_project_for_paths(t) == "NAME"
