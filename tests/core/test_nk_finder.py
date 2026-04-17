@@ -21,10 +21,12 @@ from bpe.core.nk_finder import (
     find_plate_mov,
     find_server_root_auto,
     find_shot_folder,
+    parse_sg_path_to_movie_string,
     patch_nk_string_trim_in_place,
     patch_string_trim_file_knob_script,
     patch_string_trim_in_nk_text,
     patch_string_trim_tcl_source,
+    resolve_comp_renders_dir,
 )
 
 # ── _nk_is_junk_file ────────────────────────────────────────────
@@ -624,3 +626,25 @@ class TestPatchStringTrimAllExtensions:
         out = patch_string_trim_file_knob_script(s)
         assert "string trim" not in out
         assert ".%05d.tif" in out
+
+
+class TestParseSgPathToMovieString:
+    def test_none_and_empty(self) -> None:
+        assert parse_sg_path_to_movie_string(None) == ""
+        assert parse_sg_path_to_movie_string("") == ""
+
+    def test_plain_path(self) -> None:
+        assert parse_sg_path_to_movie_string("W:/renders/x.mov") == "W:/renders/x.mov"
+
+
+class TestResolveCompRendersDir:
+    def test_returns_comp_devl_renders_when_present(self, tmp_path) -> None:
+        server_root = tmp_path / "srv"
+        project_code = "SNO_015"
+        shot_name = "S010_0020"
+        shot_root = server_root / project_code / "04_sq" / "S010" / "S010_0020"
+        target = shot_root / "comp" / "devl" / "renders"
+        target.mkdir(parents=True)
+        got = resolve_comp_renders_dir(shot_name, project_code, str(server_root))
+        assert got is not None
+        assert got.resolve() == target.resolve()

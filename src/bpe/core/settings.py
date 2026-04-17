@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -130,3 +131,23 @@ def get_shot_builder_settings() -> Dict[str, Any]:
 def save_shot_builder_settings(data: Dict[str, Any]) -> None:
     cfg.APP_DIR.mkdir(parents=True, exist_ok=True)
     write_json_file(cfg.SHOT_BUILDER_FILE, data)
+
+
+def get_feedback_frame_start(settings_file: Optional[Path] = None) -> int:
+    """MOV file frame index 0 displays as this frame number (team default 1001)."""
+    env = (os.environ.get("BPE_FEEDBACK_FRAME_START") or "").strip()
+    if env:
+        try:
+            return max(0, int(env))
+        except ValueError:
+            pass
+    settings = load_settings(settings_file)
+    fb = settings.get("feedback")
+    if isinstance(fb, dict):
+        v = fb.get("frame_start")
+        try:
+            if v is not None:
+                return max(0, int(v))
+        except (TypeError, ValueError):
+            pass
+    return 1001

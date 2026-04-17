@@ -40,3 +40,6 @@ shotgrid_studio.json
 
 # Packages
 *.zip
+
+# Bundled FFmpeg (fetch via scripts/fetch_ffmpeg_windows.ps1)
+installer/ffmpeg-bin/*.exe

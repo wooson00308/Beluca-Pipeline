@@ -259,6 +259,10 @@ def _match_single_clause(entity: Dict[str, Any], field: Any, op: Any, value: Any
         if isinstance(ev, list):
             return value in ev
         return False
+    if op_lower == "starts_with":
+        if isinstance(ev, str) and isinstance(value, str):
+            return ev.lower().startswith(value.lower())
+        return False
     if op_lower == "type_is":
         if isinstance(ev, dict):
             return (ev.get("type") or "").lower() == str(value).lower()

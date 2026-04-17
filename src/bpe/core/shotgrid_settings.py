@@ -24,6 +24,10 @@ _DEFAULT_SHOTGRID: Dict[str, Any] = {
     "shot_browser_page_id": 14100,
     # 비어 있으면 자동 탐지; 필요 시 전체 경로 (또는 환경 변수 BPE_CHROME_PATH)
     "chrome_executable": "",
+    # corporate HTTP proxy for ShotGrid + S3 uploads (shotgun_api3 Shotgun http_proxy); optional
+    "http_proxy": "",
+    # PEM path for Shotgun(ca_certs=...); empty = bundled bpe_sg_merged.pem if present
+    "ca_certs": "",
 }
 
 
@@ -129,6 +133,12 @@ def get_shotgrid_settings(settings_file: Optional[Path] = None) -> Dict[str, Any
     sk = os.environ.get("BPE_SHOTGRID_SCRIPT_KEY", "").strip()
     if sk:
         merged["script_key"] = sk
+    hp = os.environ.get("BPE_SHOTGRID_HTTP_PROXY", "").strip()
+    if hp:
+        merged["http_proxy"] = hp
+    cac = os.environ.get("BPE_SHOTGRID_CACERTS", "").strip()
+    if cac:
+        merged["ca_certs"] = cac
 
     return merged
 

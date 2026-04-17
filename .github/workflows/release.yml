@@ -72,6 +72,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
 
+      - name: Fetch FFmpeg for Windows bundle
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\scripts\fetch_ffmpeg_windows.ps1
+
       - name: Build with PyInstaller
         run: pyinstaller installer/bpe.spec
 

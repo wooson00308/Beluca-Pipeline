@@ -8,7 +8,14 @@ from typing import Any, Dict, List
 import pytest
 
 from bpe.shotgrid.errors import ShotGridError
-from bpe.shotgrid.notes import create_note, list_notes_for_project, list_notes_for_shots
+from bpe.shotgrid.notes import (
+    build_native_style_note_subject,
+    create_note,
+    create_note_with_result,
+    list_notes_for_project,
+    list_notes_for_shots,
+    note_addressings_from_assignees,
+)
 from tests.shotgrid.mock_sg import MockShotgun
 
 
@@ -166,6 +173,53 @@ class TestGetNoteAttachments:
         )
         assert get_note_attachments(sg, 8) == []
 
+    def test_fallback_skips_when_note_field_missing_on_schema(self) -> None:
+        """Sites without Attachment.note should not treat API 103 as fatal warning."""
+
+        from bpe.shotgrid.notes import get_note_attachments
+
+        class SiteWithoutNoteField:
+            def find(self, entity_type: str, filters: Any, fields: Any, **kwargs: Any) -> List[Any]:
+                fs = str(filters)
+                if "attachment_links" in fs:
+                    return []
+                if "note" in fs and "Note" in fs:
+                    raise RuntimeError(
+                        "API read() Attachment.note doesn't exist: "
+                        '{"path" => "note", "relation" => "is", ...}'
+                    )
+                return []
+
+        assert get_note_attachments(SiteWithoutNoteField(), 999) == []
+
+
+class TestBuildNativeStyleNoteSubject:
+    def test_with_version_and_shot(self) -> None:
+        s = build_native_style_note_subject("Alice Kim", "S010_v003", "SH010")
+        assert s == "Alice Kim's Note on S010_v003 and SH010"
+
+    def test_without_version(self) -> None:
+        s = build_native_style_note_subject("Bob", None, "SH020")
+        assert s == "Bob's Note on SH020"
+
+    def test_blank_author_uses_user(self) -> None:
+        s = build_native_style_note_subject("", None, "SH030")
+        assert s == "User's Note on SH030"
+
+
+class TestNoteAddressingsFromAssignees:
+    def test_extracts_human_users(self) -> None:
+        raw = [
+            {"type": "HumanUser", "id": 10, "name": "A"},
+            {"type": "Group", "id": 2},
+            "bad",
+        ]
+        assert note_addressings_from_assignees(raw) == [{"type": "HumanUser", "id": 10}]
+
+    def test_empty(self) -> None:
+        assert note_addressings_from_assignees([]) == []
+        assert note_addressings_from_assignees(None) == []
+
 
 class TestCreateNote:
     def test_create_note_minimal(self) -> None:
@@ -187,6 +241,81 @@ class TestCreateNote:
         assert row.get("subject") == "Hello"
         assert row.get("content") == "Body text"
         assert row.get("note_links") == [{"type": "Shot", "id": 50}]
+
+    def test_create_note_with_author_and_addressings(self) -> None:
+        sg = MockShotgun()
+        sg._add_entity("Project", {"id": 1})
+        author = {"type": "HumanUser", "id": 7, "login": "me"}
+        addr = [{"type": "HumanUser", "id": 8}]
+        note = create_note(
+            sg,
+            project_id=1,
+            shot_id=50,
+            subject="H",
+            content="B",
+            author_user=author,
+            addressings_to=addr,
+        )
+        nid = note["id"]
+        row = next(e for e in sg._entities["Note"] if e["id"] == nid)
+        assert row.get("user") == {"type": "HumanUser", "id": 7}
+        assert row.get("addressings_to") == addr
+        assert row.get("addressings_cc") == addr
+
+    def test_create_note_explicit_cc_differs_from_to(self) -> None:
+        sg = MockShotgun()
+        sg._add_entity("Project", {"id": 1})
+        to = [{"type": "HumanUser", "id": 8}]
+        cc = [{"type": "HumanUser", "id": 9}]
+        note = create_note(
+            sg,
+            project_id=1,
+            shot_id=50,
+            subject="H",
+            content="B",
+            addressings_to=to,
+            addressings_cc=cc,
+        )
+        nid = note["id"]
+        row = next(e for e in sg._entities["Note"] if e["id"] == nid)
+        assert row.get("addressings_to") == to
+        assert row.get("addressings_cc") == cc
+
+    def test_create_note_upload_fallback_after_attachments_fails(self, tmp_path) -> None:
+        """attachments 전략만 실패할 때 field 없이 업로드로 성공하는지."""
+
+        try:
+            from shotgun_api3 import ShotgunError as _SGErr
+        except ImportError:
+            _SGErr = RuntimeError  # pragma: no cover
+
+        class AttachmentsFail(MockShotgun):
+            def upload(
+                self,
+                entity_type: str,
+                entity_id: int,
+                path: str,
+                field_name: str = "sg_uploaded_movie",
+                **kwargs: Any,
+            ) -> int:
+                if entity_type == "Note" and field_name == "attachments":
+                    raise _SGErr("simulated attachments fail")
+                return super().upload(entity_type, entity_id, path, field_name, **kwargs)
+
+        sg = AttachmentsFail()
+        sg._add_entity("Project", {"id": 1})
+        png = tmp_path / "x.png"
+        png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 20)
+        res = create_note_with_result(
+            sg,
+            project_id=1,
+            shot_id=50,
+            subject="S",
+            content="C",
+            attachment_path=str(png),
+        )
+        assert res.attachment_ok is True
+        assert res.note.get("type") == "Note"
 
     def test_create_note_with_version_and_attachment(self, tmp_path) -> None:
         sg = MockShotgun()
@@ -225,3 +354,56 @@ class TestCreateNote:
                 subject="x",
                 content="y",
             )
+
+    def test_create_note_with_result_multiple_attachment_paths(self, tmp_path) -> None:
+        """한 노트에 attachment_paths로 여러 PNG를 순서대로 업로드한다."""
+
+        class CountUpload(MockShotgun):
+            def __init__(self) -> None:
+                super().__init__()
+                self.upload_calls = 0
+
+            def upload(self, *a: Any, **kw: Any) -> int:
+                self.upload_calls += 1
+                return super().upload(*a, **kw)
+
+        sg = CountUpload()
+        sg._add_entity("Project", {"id": 1})
+        paths = []
+        for i in (1, 2):
+            p = tmp_path / f"m{i}.png"
+            p.write_bytes(b"\x89PNG\r\n\x1a\n" + bytes([i]) * 16)
+            paths.append(str(p))
+        res = create_note_with_result(
+            sg,
+            project_id=1,
+            shot_id=50,
+            subject="S",
+            content="C",
+            attachment_paths=paths,
+        )
+        assert res.attachment_requested is True
+        assert res.attachment_ok is True
+        assert sg.upload_calls == 2
+
+    def test_create_note_with_result_attachment_failure(self, tmp_path) -> None:
+        class UploadFail(MockShotgun):
+            def upload(self, *a: Any, **k: Any) -> int:
+                raise RuntimeError("upload dead")
+
+        sg = UploadFail()
+        sg._add_entity("Project", {"id": 1})
+        png = tmp_path / "x.png"
+        png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 20)
+        res = create_note_with_result(
+            sg,
+            project_id=1,
+            shot_id=50,
+            subject="S",
+            content="C",
+            attachment_path=str(png),
+        )
+        assert res.attachment_requested is True
+        assert res.attachment_ok is False
+        assert res.attachment_error is not None
+        assert res.note.get("type") == "Note"

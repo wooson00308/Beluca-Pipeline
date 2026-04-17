@@ -31,10 +31,26 @@ def _find_icon() -> str:
     return ""
 
 
+def _ensure_pyinstaller_qt_plugins() -> None:
+    """onefile 번들에서 Qt 멀티미디어 등 플러그인 경로를 잡는다."""
+    if not getattr(sys, "frozen", False):
+        return
+    meipass = getattr(sys, "_MEIPASS", None)
+    if not meipass:
+        return
+    import os
+
+    plug = os.path.join(meipass, "PySide6", "plugins")
+    if os.path.isdir(plug):
+        QCoreApplication.addLibraryPath(plug)
+
+
 def run_app(argv: List[str] | None = None) -> int:
     """Create QApplication, show splash, then main window."""
     if argv is None:
         argv = sys.argv
+
+    _ensure_pyinstaller_qt_plugins()
 
     # Qt가 부팅 시 AppUserModelID를 다시 잡는 경우가 있어, 인스턴스 생성 직후 셸 ID를 재적용한다.
     QCoreApplication.setOrganizationName("Beluca")

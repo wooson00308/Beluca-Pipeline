@@ -2,11 +2,35 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from bpe.core.logging import get_logger
+from bpe.shotgrid.shots import detect_shot_tags_field, shot_tag_strings_from_task_row
 
 logger = get_logger("shotgrid.tasks")
+
+
+def _parse_sg_optional_datetime(val: Any) -> Optional[float]:
+    """ShotGrid 날짜·문자열·dict → UTC 근사 timestamp (실패 시 None)."""
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return val.timestamp()
+    if isinstance(val, str):
+        s = val.strip()
+        if not s:
+            return None
+        try:
+            return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    if isinstance(val, dict):
+        inner = val.get("value") or val.get("name")
+        if inner is not None:
+            return _parse_sg_optional_datetime(inner)
+    return None
+
 
 # My Tasks All Tasks: paginated Task.find over project Shot tasks (no single-find cap)
 _ALL_TASKS_FIND_CHUNK = 500
@@ -328,6 +352,7 @@ def list_comp_tasks_for_assignee(
 
     vfx_field = _detect_shot_vfx_field(sg)
     delivery_field = _detect_shot_delivery_date_field(sg)
+    tags_field = detect_shot_tags_field(sg)
 
     def _task_fields_for_due(due_col: str) -> List[str]:
         out = [
@@ -347,6 +372,8 @@ def list_comp_tasks_for_assignee(
             out.append(f"entity.Shot.{vfx_field}")
         if delivery_field:
             out.append(f"entity.Shot.{delivery_field}")
+        if tags_field:
+            out.append(f"entity.Shot.{tags_field}")
         return out
 
     fields: List[str] = _task_fields_for_due(due_fn_effective)
@@ -439,6 +466,7 @@ def list_comp_tasks_for_assignee(
         proj_name = (proj.get("name") or "").strip()
         due_val = t.get(due_read_col)
         folder = (proj_code or proj_name).strip()
+        stags = shot_tag_strings_from_task_row(t, tags_field) if tags_field else []
         out.append(
             {
                 "task_id": t.get("id"),
@@ -457,6 +485,7 @@ def list_comp_tasks_for_assignee(
                 "project_name": proj_name,
                 "project_folder": folder,
                 "latest_version_code": "",
+                "shot_tags": stags,
             }
         )
     return out
@@ -469,6 +498,7 @@ def _my_tasks_dict_from_task_row(
     due_read_col: str,
     delivery_field: str,
     vfx_field: str,
+    tags_field: str = "",
 ) -> Optional[Dict[str, Any]]:
     """One Task row to My Tasks dict, or None if entity is not a Shot."""
     ent = t.get("entity") or {}
@@ -482,6 +512,7 @@ def _my_tasks_dict_from_task_row(
     latest_ver = ""
     if isinstance(ver, dict):
         latest_ver = (ver.get("code") or ver.get("name") or "").strip()
+    stags = shot_tag_strings_from_task_row(t, tags_field) if tags_field else []
     return {
         "task_id": t.get("id"),
         "task_content": (t.get("content") or "").strip(),
@@ -499,6 +530,7 @@ def _my_tasks_dict_from_task_row(
         "project_name": proj_name,
         "project_folder": (proj_code or proj_name).strip(),
         "latest_version_code": latest_ver,
+        "shot_tags": stags,
     }
 
 
@@ -575,6 +607,7 @@ def _project_all_tasks_collect_deduped_rows(
     due_fn_effective = (due_date_field or "").strip() or "due_date"
     vfx_field = _detect_shot_vfx_field(sg)
     delivery_field = _detect_shot_delivery_date_field(sg)
+    tags_field = detect_shot_tags_field(sg)
 
     def _fields() -> List[str]:
         base = [
@@ -597,6 +630,8 @@ def _project_all_tasks_collect_deduped_rows(
             base.append(f"entity.Shot.{vfx_field}")
         if delivery_field:
             base.append(f"entity.Shot.{delivery_field}")
+        if tags_field:
+            base.append(f"entity.Shot.{tags_field}")
         return base
 
     def _fields_with_version() -> List[str]:
@@ -633,6 +668,8 @@ def _project_all_tasks_collect_deduped_rows(
         fb_fields.append(f"entity.Shot.{vfx_field}")
     if delivery_field:
         fb_fields.append(f"entity.Shot.{delivery_field}")
+    if tags_field:
+        fb_fields.append(f"entity.Shot.{tags_field}")
 
     working_fields: Optional[List[str]] = None
     last_exc: Optional[Exception] = None
@@ -732,6 +769,7 @@ def _project_all_tasks_collect_deduped_rows(
             due_read_col=due_read_col,
             delivery_field=delivery_field,
             vfx_field=vfx_field,
+            tags_field=tags_field,
         )
         if row is not None:
             my_rows.append(row)
@@ -830,6 +868,7 @@ def list_comp_tasks_for_project_user(
 
     vfx_field = _detect_shot_vfx_field(sg)
     delivery_field = _detect_shot_delivery_date_field(sg)
+    tags_field = detect_shot_tags_field(sg)
 
     def _fields() -> List[str]:
         base = [
@@ -851,6 +890,8 @@ def list_comp_tasks_for_project_user(
             base.append(f"entity.Shot.{vfx_field}")
         if delivery_field:
             base.append(f"entity.Shot.{delivery_field}")
+        if tags_field:
+            base.append(f"entity.Shot.{tags_field}")
         return base
 
     tc_raw = (task_content or "").strip()
@@ -895,6 +936,8 @@ def list_comp_tasks_for_project_user(
                     fb_fields.append(f"entity.Shot.{vfx_field}")
                 if delivery_field:
                     fb_fields.append(f"entity.Shot.{delivery_field}")
+                if tags_field:
+                    fb_fields.append(f"entity.Shot.{tags_field}")
                 try:
                     rows = sg.find("Task", list(base_filters), fb_fields, limit=limit)
                 except Exception as e3:
@@ -913,10 +956,98 @@ def list_comp_tasks_for_project_user(
             due_read_col=due_read_col,
             delivery_field=delivery_field,
             vfx_field=vfx_field,
+            tags_field=tags_field,
         )
         if row is not None:
             out.append(row)
     return out
+
+
+def fetch_representative_my_tasks_row_for_project_shot(
+    sg: Any,
+    project_id: int,
+    shot_id: int,
+) -> Optional[Dict[str, Any]]:
+    """One My Tasks row for a Shot not on the current page: prefer *comp* Task, any assignee."""
+    pid = int(project_id)
+    sid = int(shot_id)
+    status_fn = detect_task_status_field(sg) or "sg_status_list"
+    due_read_col = "due_date"
+    vfx_field = _detect_shot_vfx_field(sg)
+    delivery_field = _detect_shot_delivery_date_field(sg)
+    tags_field = detect_shot_tags_field(sg)
+
+    def build_fields(with_ver: bool) -> List[str]:
+        base = [
+            "id",
+            "content",
+            status_fn,
+            due_read_col,
+            "project",
+            "entity",
+            "entity.Shot.code",
+            "entity.Shot.description",
+            "entity.Shot.image",
+            "project.Project.code",
+            "project.Project.name",
+        ]
+        if vfx_field:
+            base.append(f"entity.Shot.{vfx_field}")
+        if delivery_field:
+            base.append(f"entity.Shot.{delivery_field}")
+        if tags_field:
+            base.append(f"entity.Shot.{tags_field}")
+        if with_ver:
+            base.extend(["sg_latest_version", "sg_latest_version.Version.code"])
+        return base
+
+    bf: List[Any] = [
+        ["project", "is", {"type": "Project", "id": pid}],
+        ["entity", "is", {"type": "Shot", "id": sid}],
+    ]
+    variants: List[List[Any]] = [
+        bf + [["content", "is", "comp"]],
+        bf + [["content", "contains", "comp"]],
+        bf,
+    ]
+    rows: List[Dict[str, Any]] = []
+    for fl in variants:
+        for with_ver in (True, False):
+            flds = build_fields(with_ver)
+            try:
+                rows = list(
+                    sg.find(
+                        "Task",
+                        fl,
+                        flds,
+                        order=[{"field_name": "id", "direction": "desc"}],
+                        limit=50,
+                    )
+                    or []
+                )
+            except Exception:
+                rows = []
+            if rows:
+                break
+        if rows:
+            break
+
+    my_rows: List[Dict[str, Any]] = []
+    for t in rows:
+        row = _my_tasks_dict_from_task_row(
+            t,
+            status_fn=status_fn,
+            due_read_col=due_read_col,
+            delivery_field=delivery_field,
+            vfx_field=vfx_field,
+            tags_field=tags_field,
+        )
+        if row is not None:
+            my_rows.append(row)
+    if not my_rows:
+        return None
+    deduped = _dedupe_my_tasks_rows_by_shot(my_rows)
+    return deduped[0] if deduped else None
 
 
 def summarize_shot_tasks_for_project(
@@ -1009,6 +1140,7 @@ def list_review_tasks_for_project(
         base = [
             "id",
             "content",
+            "task_assignees",
             status_fn,
             due_fn_effective,
             "project",
@@ -1032,6 +1164,9 @@ def list_review_tasks_for_project(
             "sg_latest_version",
             "sg_latest_version.Version.code",
             "sg_latest_version.Version.sg_path_to_movie",
+            "sg_latest_version.Version.user",
+            "sg_latest_version.Version.created_by",
+            "sg_latest_version.Version.created_at",
         ]
 
     base_filters: List[Any] = [
@@ -1043,16 +1178,45 @@ def list_review_tasks_for_project(
 
     rows: List[Dict[str, Any]] = []
     due_read_col = due_fn_effective
+    order = [{"field_name": "id", "direction": "asc"}]
+    lim = int(limit)
+    find_ok: List[bool] = [False]
+    last_exc: List[Optional[BaseException]] = [None]
 
-    def _find_with_fields(field_list: List[str], extra: List[Any]) -> List[Dict[str, Any]]:
-        return list(sg.find("Task", base_filters + extra, field_list, limit=int(limit)) or [])
+    def _find_pair(extra: List[Any]) -> List[Dict[str, Any]]:
+        """Try version fields; on failure retry without nested Version fields."""
+        try:
+            raw = sg.find(
+                "Task",
+                base_filters + extra,
+                _fields_with_version(),
+                order=order,
+                limit=lim,
+            )
+            find_ok[0] = True
+            return list(raw or [])
+        except Exception as exc:
+            logger.debug("list_review_tasks_for_project find (with version fields) failed: %s", exc)
+            last_exc[0] = exc
+            try:
+                raw = sg.find(
+                    "Task",
+                    base_filters + extra,
+                    _fields(),
+                    order=order,
+                    limit=lim,
+                )
+                find_ok[0] = True
+                return list(raw or [])
+            except Exception as exc2:
+                logger.debug(
+                    "list_review_tasks_for_project find (without version fields) failed: %s", exc2
+                )
+                last_exc[0] = exc2
+                return []
 
     # 1) "in" list
-    try:
-        rows = _find_with_fields(_fields_with_version(), [[status_fn, "in", st_list]])
-    except Exception as exc:
-        logger.debug("list_review_tasks_for_project 'in' filter failed: %s", exc)
-        rows = []
+    rows = _find_pair([[status_fn, "in", st_list]])
 
     # 2) OR via filter_operator any
     if not rows and len(st_list) > 1:
@@ -1060,21 +1224,13 @@ def list_review_tasks_for_project(
             "filter_operator": "any",
             "filters": [[status_fn, "is", s] for s in st_list],
         }
-        try:
-            rows = _find_with_fields(_fields_with_version(), [any_clause])
-        except Exception as exc2:
-            logger.debug("list_review_tasks_for_project 'any' fallback failed: %s", exc2)
-            rows = []
+        rows = _find_pair([any_clause])
 
     # 3) Per-status merge
     if not rows:
         seen: Dict[int, Dict[str, Any]] = {}
         for st in st_list:
-            try:
-                part = _find_with_fields(_fields_with_version(), [[status_fn, "is", st]])
-            except Exception as exc3:
-                logger.debug("list_review_tasks_for_project per-status find failed: %s", exc3)
-                part = []
+            part = _find_pair([[status_fn, "is", st]])
             for t in part:
                 tid = t.get("id")
                 if tid is not None:
@@ -1083,12 +1239,25 @@ def list_review_tasks_for_project(
                     except (TypeError, ValueError):
                         pass
         rows = list(seen.values())
+        rows.sort(key=lambda t: int(t.get("id") or 0), reverse=False)
 
-    # due_date column fallback (match list_comp_tasks_for_project_user)
+    if not rows and not find_ok[0] and last_exc[0] is not None:
+        logger.warning(
+            "list_review_tasks_for_project: ShotGrid Task 조회 실패 (결과 없음): %s", last_exc[0]
+        )
+        return []
+
     if not rows:
         return []
 
+    rows.sort(key=lambda t: int(t.get("id") or 0), reverse=False)
+
     def _map_rows(task_rows: List[Dict[str, Any]], read_col: str) -> List[Dict[str, Any]]:
+        def _human_name(val: Any) -> str:
+            if isinstance(val, dict):
+                return str(val.get("name") or "").strip()
+            return ""
+
         out: List[Dict[str, Any]] = []
         for t in task_rows:
             ent = t.get("entity") or {}
@@ -1096,8 +1265,8 @@ def list_review_tasks_for_project(
                 continue
             proj = t.get("project") or {}
             due_val = t.get(read_col)
-            proj_code = (proj.get("code") or "").strip()
-            proj_name = (proj.get("name") or "").strip()
+            proj_code = (proj.get("code") or t.get("project.Project.code") or "").strip()
+            proj_name = (proj.get("name") or t.get("project.Project.name") or "").strip()
             ver = t.get("sg_latest_version")
             latest_ver = ""
             latest_ver_id: Optional[int] = None
@@ -1111,6 +1280,12 @@ def list_review_tasks_for_project(
                         latest_ver_id = None
             sg_movie_path = t.get("sg_latest_version.Version.sg_path_to_movie")
             latest_sg_path = str(sg_movie_path).strip() if sg_movie_path is not None else ""
+
+            vu = _human_name(t.get("sg_latest_version.Version.user"))
+            vc_by = _human_name(t.get("sg_latest_version.Version.created_by"))
+            version_uploader_name = vu or vc_by
+            latest_v_created = t.get("sg_latest_version.Version.created_at")
+
             out.append(
                 {
                     "task_id": t.get("id"),
@@ -1131,8 +1306,23 @@ def list_review_tasks_for_project(
                     "latest_version_code": latest_ver,
                     "latest_version_id": latest_ver_id,
                     "latest_version_sg_path": latest_sg_path,
+                    "latest_version_created_at": latest_v_created,
+                    "version_uploader_name": version_uploader_name,
+                    "task_assignees": t.get("task_assignees") or [],
                 }
             )
         return out
 
-    return _map_rows(rows, due_read_col)
+    mapped = _map_rows(rows, due_read_col)
+
+    def _feedback_queue_sort_key(r: Dict[str, Any]) -> Tuple[float, int]:
+        """먼저 올린(오래된) 버전이 목록 상단 — ``created_at`` 오름차순."""
+        ts = _parse_sg_optional_datetime(r.get("latest_version_created_at"))
+        try:
+            tid = int(r.get("task_id") or 0)
+        except (TypeError, ValueError):
+            tid = 0
+        return (ts if ts is not None else float("inf"), tid)
+
+    mapped.sort(key=_feedback_queue_sort_key)
+    return mapped

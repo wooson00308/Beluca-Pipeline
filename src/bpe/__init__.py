@@ -5,6 +5,10 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from bpe.core.shotgun_python_api_path import prepend_studio_shotgun_api_if_available
+
+prepend_studio_shotgun_api_if_available()
+
 
 def _read_version() -> str:
     # PyInstaller 번들: sys._MEIPASS 루트에 VERSION.txt

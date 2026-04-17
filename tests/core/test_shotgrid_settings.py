@@ -21,6 +21,8 @@ def test_defaults(tmp_app_dir: Path) -> None:
     assert sg["task_content"] == "comp"
     assert sg.get("shot_browser_page_id") == 14100
     assert sg.get("chrome_executable") == ""
+    assert sg.get("http_proxy") == ""
+    assert sg.get("ca_certs") == ""
 
 
 def test_studio_json_override(tmp_app_dir: Path) -> None:
@@ -57,6 +59,27 @@ def test_env_var_override(tmp_app_dir: Path, monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("BPE_SHOTGRID_BASE_URL", "https://env.shotgrid.autodesk.com")
     sg = get_shotgrid_settings()
     assert sg["base_url"] == "https://env.shotgrid.autodesk.com"
+
+
+def test_http_proxy_settings_json(tmp_app_dir: Path) -> None:
+    save_settings({"shotgrid": {"http_proxy": "proxy.example.com:8080"}})
+    sg = get_shotgrid_settings()
+    assert sg["http_proxy"] == "proxy.example.com:8080"
+
+
+def test_http_proxy_env_overrides_settings(
+    tmp_app_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    save_settings({"shotgrid": {"http_proxy": "https://settings-proxy:8080"}})
+    monkeypatch.setenv("BPE_SHOTGRID_HTTP_PROXY", "https://env-proxy:9090")
+    sg = get_shotgrid_settings()
+    assert sg["http_proxy"] == "https://env-proxy:9090"
+
+
+def test_ca_certs_env_override(tmp_app_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BPE_SHOTGRID_CACERTS", "W:\\fake\\merged.pem")
+    sg = get_shotgrid_settings()
+    assert sg["ca_certs"] == "W:\\fake\\merged.pem"
 
 
 def test_empty_script_key_ignored(tmp_app_dir: Path) -> None:

@@ -2,13 +2,158 @@
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
+from bpe.core.feedback_file_log import append_feedback_log_verbose
 from bpe.core.logging import get_logger
+from bpe.core.nuke_render_paths import normalize_path_str
+from bpe.core.shotgun_upload_trace import (
+    ensure_shotgun_upload_trace_logging_configured,
+    exception_trace_preview,
+    is_shotgun_upload_trace_enabled,
+    upload_source_path_meta,
+)
+from bpe.core.upload_exc_diag import sg_upload_exception_diag
 from bpe.shotgrid.errors import ShotGridError
 
 logger = get_logger("shotgrid.notes")
+
+_NOTE_UPLOAD_RETRIES = 4
+# 먼저 표준 attachments 필드, 실패 시 field 없이 클래식 업로드
+# (S3 직접 업로드와 경로가 달라질 수 있음).
+_NOTE_UPLOAD_FIELD_STRATEGIES: Tuple[Optional[str], ...] = ("attachments", None)
+
+
+def build_native_style_note_subject(
+    author_display_name: str,
+    version_code: Optional[str],
+    shot_code: str,
+) -> str:
+    """ShotGrid 웹과 유사한 Note subject (예: Name's Note on Version and Shot).
+
+    버전이 없으면 한 절만 사용한다.
+    """
+    name = (author_display_name or "").strip() or "User"
+    shot = (shot_code or "").strip() or "—"
+    ver = (version_code or "").strip()
+    if ver:
+        return f"{name}'s Note on {ver} and {shot}"
+    return f"{name}'s Note on {shot}"
+
+
+_NOTE_UPLOAD_RETRY_SLEEP_BASE = 2.0
+
+
+def _absolute_attachment_path_for_upload(raw: str) -> str:
+    """업로드용 절대 경로(UNC는 normalize_path_str로 드라이브 형태로)."""
+    p = Path((raw or "").strip())
+    try:
+        base = p.resolve()
+    except OSError:
+        base = p
+    return normalize_path_str(str(base))
+
+
+def _upload_note_file_with_strategies(
+    sg: Any,
+    note: Dict[str, Any],
+    attachment_path: str,
+    nid: int,
+) -> Tuple[bool, Optional[str]]:
+    """attachments 필드 업로드 실패 시 field 없이 재시도. 성공 시 (True, None)."""
+    abs_path = _absolute_attachment_path_for_upload(attachment_path)
+    try:
+        n = int(note["id"])
+    except (TypeError, ValueError, KeyError):
+        return False, "invalid note id"
+    last_err: Optional[str] = None
+    ensure_shotgun_upload_trace_logging_configured()
+    append_feedback_log_verbose(
+        "note_upload_precheck",
+        note_id=nid,
+        **upload_source_path_meta(abs_path),
+    )
+    for attempt in range(1, _NOTE_UPLOAD_RETRIES + 1):
+        for strat in _NOTE_UPLOAD_FIELD_STRATEGIES:
+            label = strat if strat is not None else "field_none"
+            append_feedback_log_verbose(
+                "note_attachment_try",
+                note_id=nid,
+                attempt=attempt,
+                max_attempts=_NOTE_UPLOAD_RETRIES,
+                strategy=label,
+            )
+            try:
+                if strat is None:
+                    sg.upload("Note", n, abs_path)
+                else:
+                    sg.upload("Note", n, abs_path, strat)
+                append_feedback_log_verbose(
+                    "note_attachment_ok",
+                    note_id=nid,
+                    attempt=attempt,
+                    strategy=label,
+                )
+                return True, None
+            except Exception as exc:
+                last_err = str(exc)
+                _prev = (last_err or "").replace("\r", " ").replace("\n", " ")[:240]
+                _fail_payload: Dict[str, Any] = {
+                    "note_id": nid,
+                    "attempt": attempt,
+                    "strategy": label,
+                    "err_type": type(exc).__name__,
+                    "err_len": len(last_err or ""),
+                    "err_preview": _prev,
+                    "upload_diag": sg_upload_exception_diag(exc),
+                }
+                if is_shotgun_upload_trace_enabled():
+                    _fail_payload["exc_trace_preview"] = exception_trace_preview(exc)
+                append_feedback_log_verbose("note_attachment_try_failed", **_fail_payload)
+                logger.warning(
+                    "Note 첨부 업로드 실패 (attempt=%d strategy=%s): %s",
+                    attempt,
+                    label,
+                    exc,
+                )
+        if attempt < _NOTE_UPLOAD_RETRIES:
+            time.sleep(float(attempt) * _NOTE_UPLOAD_RETRY_SLEEP_BASE)
+    return False, last_err
+
+
+def note_addressings_from_assignees(assignees: Any) -> List[Dict[str, Any]]:
+    """Task.task_assignees 등에서 Note.addressings_to 용 HumanUser 링크만 추린다."""
+    out: List[Dict[str, Any]] = []
+    if not assignees:
+        return out
+    if not isinstance(assignees, list):
+        return out
+    for a in assignees:
+        if not isinstance(a, dict):
+            continue
+        if (a.get("type") or "").strip() != "HumanUser":
+            continue
+        i = a.get("id")
+        if i is None:
+            continue
+        try:
+            out.append({"type": "HumanUser", "id": int(i)})
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+class CreateNoteResult(NamedTuple):
+    """Result of creating a Note with optional attachment upload."""
+
+    note: Dict[str, Any]
+    attachment_requested: bool
+    attachment_ok: bool
+    attachment_error: Optional[str]
+
 
 _NOTE_FIELDS = [
     "id",
@@ -93,7 +238,7 @@ def list_notes_for_project(
     return [_format_note(n) for n in (raw or [])]
 
 
-def create_note(
+def create_note_with_result(
     sg: Any,
     *,
     project_id: int,
@@ -102,8 +247,16 @@ def create_note(
     content: str,
     version_id: Optional[int] = None,
     attachment_path: Optional[str] = None,
-) -> Dict[str, Any]:
-    """ShotGrid에 Note를 생성하고 선택적으로 이미지를 첨부한다."""
+    attachment_paths: Optional[List[str]] = None,
+    author_user: Optional[Dict[str, Any]] = None,
+    addressings_to: Optional[List[Dict[str, Any]]] = None,
+    addressings_cc: Optional[List[Dict[str, Any]]] = None,
+) -> CreateNoteResult:
+    """ShotGrid에 Note를 생성하고 선택적으로 이미지를 첨부한다. 첨부 실패 여부를 반환한다.
+
+    ``attachment_paths``가 비어 있지 않으면 여러 파일을 순서대로 업로드한다.
+    그렇지 않고 ``attachment_path``만 있으면 단일 첨부와 동일하다.
+    """
     links: List[Dict[str, Any]] = [{"type": "Shot", "id": int(shot_id)}]
     if version_id is not None:
         links.append({"type": "Version", "id": int(version_id)})
@@ -113,16 +266,74 @@ def create_note(
         "subject": (subject.strip() or "(BPE 피드백)"),
         "content": (content or "").strip(),
     }
+    if author_user and author_user.get("id") is not None:
+        try:
+            data["user"] = {"type": "HumanUser", "id": int(author_user["id"])}
+        except (TypeError, ValueError):
+            pass
+    if addressings_to:
+        data["addressings_to"] = addressings_to
+    if addressings_cc is not None:
+        data["addressings_cc"] = addressings_cc
+    elif addressings_to:
+        data["addressings_cc"] = addressings_to
     try:
         note = sg.create("Note", data)
     except Exception as exc:
         raise ShotGridError(f"Note 생성 실패: {exc}") from exc
-    if attachment_path:
-        try:
-            sg.upload("Note", note["id"], attachment_path, "attachments")
-        except Exception as exc:
-            logger.warning("Note 첨부 업로드 실패: %s", exc)
-    return note
+    try:
+        nid = int(note["id"])
+    except (TypeError, ValueError, KeyError):
+        nid = 0
+    append_feedback_log_verbose("note_sg_create_ok", note_id=nid)
+    att_err: Optional[str] = None
+    att_ok = True
+    paths: List[str] = []
+    if attachment_paths:
+        paths = [str(p).strip() for p in attachment_paths if p and str(p).strip()]
+    elif attachment_path and str(attachment_path).strip():
+        paths = [str(attachment_path).strip()]
+    requested = bool(paths)
+    for pth in paths:
+        att_ok, att_err = _upload_note_file_with_strategies(sg, note, pth, nid)
+        if not att_ok:
+            if att_err is None:
+                att_err = "upload failed"
+            break
+    return CreateNoteResult(
+        note=note,
+        attachment_requested=requested,
+        attachment_ok=att_ok if requested else True,
+        attachment_error=att_err,
+    )
+
+
+def create_note(
+    sg: Any,
+    *,
+    project_id: int,
+    shot_id: int,
+    subject: str,
+    content: str,
+    version_id: Optional[int] = None,
+    attachment_path: Optional[str] = None,
+    author_user: Optional[Dict[str, Any]] = None,
+    addressings_to: Optional[List[Dict[str, Any]]] = None,
+    addressings_cc: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """ShotGrid에 Note를 생성하고 선택적으로 이미지를 첨부한다."""
+    return create_note_with_result(
+        sg,
+        project_id=project_id,
+        shot_id=shot_id,
+        subject=subject,
+        content=content,
+        version_id=version_id,
+        attachment_path=attachment_path,
+        author_user=author_user,
+        addressings_to=addressings_to,
+        addressings_cc=addressings_cc,
+    ).note
 
 
 def _build_filters(
@@ -262,6 +473,12 @@ def _format_attachment_meta(att: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     }
 
 
+def _is_missing_attachment_note_field_error(exc: BaseException) -> bool:
+    """Some sites have no Attachment.note; API returns read() field missing."""
+    msg = str(exc).lower()
+    return "doesn't exist" in msg or "does not exist" in msg
+
+
 def get_note_attachments(sg: Any, note_id: int) -> List[Dict[str, Any]]:
     """Return image Attachment metadata for a Note (newest API filter first)."""
     nid = int(note_id)
@@ -281,6 +498,9 @@ def get_note_attachments(sg: Any, note_id: int) -> List[Dict[str, Any]]:
         try:
             raw = list(sg.find("Attachment", fallback, _ATTACHMENT_FIELDS) or [])
         except Exception as exc2:
+            if _is_missing_attachment_note_field_error(exc2):
+                logger.debug("get_note_attachments: skip note filter (schema): %s", exc2)
+                return []
             logger.warning("get_note_attachments failed: %s", exc2)
             return []
     out: List[Dict[str, Any]] = []

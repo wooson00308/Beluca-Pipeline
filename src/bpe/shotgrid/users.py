@@ -3,22 +3,43 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any, Dict, List, Optional
 
 from bpe.core.logging import get_logger
 
 logger = get_logger("shotgrid.users")
 
+# My Tasks 담당자 표시 문자열 "이름 로그인 (이메일)" 등에서 이메일 추출
+_EMAIL_TOKEN_RE = re.compile(
+    r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
+)
+
+
+def normalize_human_user_search_query(raw: str) -> str:
+    """검색어가 UI 표시용 긴 문자열이면 이메일 등 짧은 토큰으로 줄인다 (My Tasks 자동완성).
+
+    일반 이름/로그인 검색(짧은 문자열, 이메일 없음)은 그대로 둔다.
+    """
+    s = (raw or "").strip()
+    if not s:
+        return ""
+    emails = _EMAIL_TOKEN_RE.findall(s)
+    if emails:
+        return emails[0].strip()
+    return s
+
 
 def search_human_users(sg: Any, query: str, limit: int = 15) -> List[Dict[str, Any]]:
     """Search HumanUsers by name or login (for artist autocomplete)."""
-    q = (query or "").strip()
+    q = normalize_human_user_search_query((query or "").strip())
     if not q:
         return []
+    fields = ["id", "name", "login", "email"]
     results = sg.find(
         "HumanUser",
         [["name", "contains", q]],
-        ["id", "name", "login", "email"],
+        fields,
         limit=limit,
     )
     if not results:
@@ -26,7 +47,17 @@ def search_human_users(sg: Any, query: str, limit: int = 15) -> List[Dict[str, A
             results = sg.find(
                 "HumanUser",
                 [["login", "contains", q]],
-                ["id", "name", "login", "email"],
+                fields,
+                limit=limit,
+            )
+        except Exception:
+            pass
+    if not results and "@" in q:
+        try:
+            results = sg.find(
+                "HumanUser",
+                [["email", "contains", q]],
+                fields,
                 limit=limit,
             )
         except Exception:

@@ -4,15 +4,12 @@ from __future__ import annotations
 
 import os
 import re
-import sys
 from datetime import date, datetime
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
-from PySide6.QtCore import QEvent, QPoint, QRect, QSize, Qt, QTimer, QUrl
+from PySide6.QtCore import QEvent, QPoint, QRect, Qt, QTimer, QUrl
 from PySide6.QtGui import (
     QDesktopServices,
-    QIcon,
     QIntValidator,
     QMouseEvent,
     QPixmap,
@@ -53,13 +50,10 @@ from bpe.core.nk_finder import (
     open_plate_in_rv,
 )
 from bpe.core.nuke_render_paths import normalize_path_str
-from bpe.core.shotgrid_browser import (
-    build_project_overview_url,
-    build_shot_canvas_url,
-    try_launch_chrome_app_url,
-)
+from bpe.core.shotgrid_browser import build_project_overview_url, try_launch_chrome_app_url
 from bpe.core.shotgrid_settings import get_shotgrid_settings
 from bpe.gui import theme
+from bpe.gui.shotgrid_open_shot import setup_copy_shot_name_button, setup_shotgrid_open_shot_button
 from bpe.gui.widgets.clickable_image import ClickableImage
 from bpe.gui.workers.sg_worker import ShotGridWorker
 from bpe.shotgrid.client import get_default_sg
@@ -70,8 +64,10 @@ from bpe.shotgrid.notes import (
     list_notes_for_shots,
 )
 from bpe.shotgrid.projects import list_active_projects
+from bpe.shotgrid.shots import find_shot, search_shots_by_code_prefix
 from bpe.shotgrid.tasks import (
     BELUCA_TASK_STATUS_PRESETS,
+    fetch_representative_my_tasks_row_for_project_shot,
     list_comp_tasks_for_project_user,
     load_my_tasks_all_tasks_bundle,
 )
@@ -100,29 +96,6 @@ _STATUS_ORDER = [code for code, _ in BELUCA_TASK_STATUS_PRESETS]
 
 _SORT_MODE_SHOT = 0
 _SORT_MODE_DELIVERY = 1
-
-# My Tasks 샷 카드 — ShotGrid 열기 버튼 아이콘 (PNG는 팀에서 교체 가능)
-_SHOTGRID_OPEN_BTN_PX = 27
-_SHOTGRID_OPEN_ICON_PX = 22
-
-
-def _my_tasks_shotgrid_icon_png_path() -> Path:
-    """소스 실행 또는 PyInstaller 번들에서 ShotGrid 열기 버튼 PNG 경로.
-
-    onefile 번들에서는 ``__file__`` 근처에 리소스가 없을 수 있어 ``_MEIPASS`` 아래
-    ``bpe/gui/resources/`` 를 먼저 본다 (``bpe.spec`` 의 ``datas`` 트리와 동일).
-    """
-    name = "shotgrid_open.png"
-    candidates: List[Path] = []
-    if getattr(sys, "frozen", False):
-        meipass = getattr(sys, "_MEIPASS", None)
-        if meipass:
-            candidates.append(Path(meipass) / "bpe" / "gui" / "resources" / name)
-    candidates.append(Path(__file__).resolve().parent.parent / "resources" / name)
-    for p in candidates:
-        if p.is_file():
-            return p
-    return candidates[-1]
 
 
 def _format_human_user_display(u: Dict[str, Any]) -> str:
@@ -260,6 +233,24 @@ def _filter_tasks_by_status(tasks: List[Dict[str, Any]], active: str) -> List[Di
     if active == "all":
         return list(tasks)
     return [t for t in tasks if _normalize_task_status(t) == active]
+
+
+def _filter_tasks_by_tag(
+    tasks: List[Dict[str, Any]], tag_sel: Optional[str]
+) -> List[Dict[str, Any]]:
+    if not tag_sel:
+        return list(tasks)
+    needle = tag_sel.strip().lower()
+    if not needle:
+        return list(tasks)
+    out: List[Dict[str, Any]] = []
+    for t in tasks:
+        tags = t.get("shot_tags")
+        if not isinstance(tags, list):
+            continue
+        if any(str(x).strip().lower() == needle for x in tags):
+            out.append(t)
+    return out
 
 
 def _sort_tasks_by_mode(
@@ -512,50 +503,12 @@ class _ShotCard(QFrame):
             shot_id_i = None
 
         sg_open_btn = QPushButton()
-        sg_open_btn.setFixedSize(_SHOTGRID_OPEN_BTN_PX, _SHOTGRID_OPEN_BTN_PX)
-        _sg_style = (
-            f"QPushButton {{ color: {theme.ACCENT}; background: transparent; "
-            f"border: 1px solid {theme.ACCENT}; border-radius: 5px; padding: 0; "
-            f"min-width: {_SHOTGRID_OPEN_BTN_PX}px; min-height: {_SHOTGRID_OPEN_BTN_PX}px; }}"
-            f"QPushButton:hover {{ background: {theme.ACCENT}; color: {theme.BG}; }}"
-            f"QPushButton:disabled {{ color: {theme.BORDER}; border-color: {theme.BORDER}; }}"
-        )
-        sg_open_btn.setStyleSheet(_sg_style)
-        _icon_png = _my_tasks_shotgrid_icon_png_path()
-        if _icon_png.is_file():
-            sg_open_btn.setIcon(QIcon(str(_icon_png)))
-            sg_open_btn.setIconSize(QSize(_SHOTGRID_OPEN_ICON_PX, _SHOTGRID_OPEN_ICON_PX))
-        else:
-            sg_open_btn.setText("SG")
-
-        if shot_id_i is None:
-            sg_open_btn.setEnabled(False)
-            sg_open_btn.setToolTip("ShotGrid 샷 ID가 없어 웹에서 열 수 없습니다")
-        else:
-            sg_open_btn.setToolTip("ShotGrid에서 이 샷 열기")
-
-        def _on_open_shotgrid_in_browser() -> None:
-            if shot_id_i is None:
-                return
-            sgset = get_shotgrid_settings()
-            base_u = (sgset.get("base_url") or "").strip()
-            page_raw = sgset.get("shot_browser_page_id", 14100)
-            page_id: Any = page_raw if page_raw is not None else 14100
-            chrome_ex = ""
-            cx = sgset.get("chrome_executable")
-            if isinstance(cx, str):
-                chrome_ex = cx.strip()
-            try:
-                url = build_shot_canvas_url(base_u, page_id, shot_id_i)
-            except ValueError as e:
-                logger.warning("ShotGrid URL 생성 실패: %s", e)
-                return
-            if not try_launch_chrome_app_url(url, chrome_executable=chrome_ex):
-                QDesktopServices.openUrl(QUrl(url))
-
-        sg_open_btn.clicked.connect(_on_open_shotgrid_in_browser)
-        title_row.addWidget(title)
-        title_row.addWidget(sg_open_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
+        setup_shotgrid_open_shot_button(sg_open_btn, shot_id_i)
+        copy_shot_btn = QPushButton()
+        setup_copy_shot_name_button(copy_shot_btn, str(shot_code).strip() if shot_code else "")
+        title_row.addWidget(title, alignment=Qt.AlignmentFlag.AlignTop)
+        title_row.addWidget(sg_open_btn, alignment=Qt.AlignmentFlag.AlignTop)
+        title_row.addWidget(copy_shot_btn, alignment=Qt.AlignmentFlag.AlignTop)
         title_row.addStretch()
         info.addLayout(title_row)
         task_line = QLabel(f"Task: {task_content}")
@@ -784,6 +737,8 @@ class MyTasksTab(QWidget):
         super().__init__(parent)
         self._projects: List[Dict[str, Any]] = []
         self._user_id: Optional[int] = None
+        # 선택 확정 후 입력란 전체 문자열. 동일하면 자동완성 팝업 생략(깜빡임 방지).
+        self._assignee_resolved_display: Optional[str] = None
         # PC에서 추정한 ShotGrid HumanUser (My Tasks 자동 인식 성공 시만). 담당자 필터와 별개.
         self._me_sg_user: Optional[Dict[str, Any]] = None
         self._timelog_resolve_busy: bool = False
@@ -823,6 +778,16 @@ class MyTasksTab(QWidget):
         self._user_timer = QTimer(self)
         self._user_timer.setSingleShot(True)
         self._user_timer.timeout.connect(self._do_user_search)
+
+        self._shot_search_timer = QTimer(self)
+        self._shot_search_timer.setSingleShot(True)
+        self._shot_search_timer.timeout.connect(self._do_shot_autocomplete)
+        self._shot_ac_seq = 0
+        self._shot_focus_shot_id: Optional[int] = None
+        self._shot_extra_task: Optional[Dict[str, Any]] = None
+        self._shot_inject_seq = 0
+        self._tag_filter_value: Optional[str] = None
+        self._tag_filter_popup: Optional[QFrame] = None
 
         self._build_ui()
         app = QApplication.instance()
@@ -970,6 +935,34 @@ class MyTasksTab(QWidget):
         self._shot_spinner_lbl.setVisible(False)
         shot_hdr.addWidget(self._shot_spinner_lbl)
         shot_hdr.addStretch()
+
+        self._shot_search_edit = QLineEdit()
+        self._shot_search_edit.setPlaceholderText("샷 코드 (2자 이상 자동완성, Enter 확정)")
+        self._shot_search_edit.setFixedWidth(_ASSIGNEE_EDIT_WIDTH)
+        self._shot_search_edit.setFixedHeight(34)
+        self._shot_search_edit.textChanged.connect(
+            lambda: self._shot_search_timer.start(_AUTOCOMPLETE_DELAY)
+        )
+        self._shot_search_edit.returnPressed.connect(self._on_shot_search_immediate)
+        shot_hdr.addWidget(self._shot_search_edit, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        self._shot_combo = QComboBox(self)
+        self._shot_combo.setObjectName("shot_autocomplete_combo")
+        self._shot_combo.setVisible(False)
+        self._shot_combo.setEditable(False)
+        self._shot_combo.setMaxVisibleItems(12)
+        self._shot_combo.setFixedHeight(0)
+        self._shot_combo.currentIndexChanged.connect(self._on_shot_suggest_selected)
+
+        self._tag_filter_btn = QPushButton(f"태그  {chr(0x25BE)}")
+        self._tag_filter_btn.setObjectName("filter_combo_like_btn")
+        self._tag_filter_btn.setMinimumWidth(130)
+        self._tag_filter_btn.setFixedHeight(34)
+        self._tag_filter_btn.setToolTip("샷 태그로 목록 좁히기")
+        self._tag_filter_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._tag_filter_btn.clicked.connect(self._toggle_tag_filter_popup)
+        shot_hdr.addWidget(self._tag_filter_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+
         _sort_lbl = QLabel("샷 정렬")
         _sort_lbl.setObjectName("page_subtitle")
         shot_hdr.addWidget(_sort_lbl, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -978,6 +971,7 @@ class MyTasksTab(QWidget):
         self._sort_combo.addItem("Delivery Date", _SORT_MODE_DELIVERY)
         self._sort_combo.setMinimumWidth(100)
         self._sort_combo.setMaximumWidth(140)
+        self._sort_combo.setFixedHeight(34)
         self._sort_combo.currentIndexChanged.connect(self._on_sort_combo_changed)
         shot_hdr.addWidget(self._sort_combo, 0, Qt.AlignmentFlag.AlignVCenter)
         self._sort_dir_btn = QPushButton("\u25b2")
@@ -1171,6 +1165,8 @@ class MyTasksTab(QWidget):
         super().resizeEvent(event)
         if self._user_combo.isVisible():
             self._position_user_results_combo()
+        if getattr(self, "_shot_combo", None) is not None and self._shot_combo.isVisible():
+            self._position_shot_results_combo()
         if self._user_info.isVisible():
             self._position_user_info()
 
@@ -1197,17 +1193,309 @@ class MyTasksTab(QWidget):
             self._spinner_timer.stop()
 
     def _on_app_focus_changed(self, _old: Optional[QWidget], new: Optional[QWidget]) -> None:
-        p = self._user_assignee_popup
-        if p is None or not p.isVisible():
-            return
-        if new is None:
-            return
-        w: Optional[QWidget] = new
-        while w is not None:
-            if w is p:
+        def _maybe_hide(pop: Optional[QFrame]) -> None:
+            if pop is None or not pop.isVisible():
                 return
-            w = w.parentWidget()
-        p.hide()
+            if new is None:
+                return
+            w: Optional[QWidget] = new
+            while w is not None:
+                if w is pop:
+                    return
+                w = w.parentWidget()
+            pop.hide()
+
+        _maybe_hide(self._user_assignee_popup)
+        _maybe_hide(getattr(self, "_tag_filter_popup", None))
+
+    def _position_shot_results_combo(self) -> None:
+        w = max(220, self._shot_search_edit.width())
+        self._shot_combo.setFixedWidth(w)
+        top_left = self._shot_search_edit.mapTo(self, QPoint(0, self._shot_search_edit.height()))
+        self._shot_combo.move(top_left.x(), top_left.y())
+        self._shot_combo.raise_()
+
+    def _clear_shot_focus_only(self) -> None:
+        self._shot_focus_shot_id = None
+        self._shot_extra_task = None
+        if getattr(self, "_shot_search_edit", None) is not None:
+            self._shot_search_edit.clear()
+        if getattr(self, "_shot_combo", None) is not None:
+            self._shot_combo.blockSignals(True)
+            self._shot_combo.hide()
+            self._shot_combo.clear()
+            self._shot_combo.blockSignals(False)
+
+    def _clear_shot_and_tag_filters(self) -> None:
+        self._clear_shot_focus_only()
+        self._tag_filter_value = None
+        self._update_tag_filter_button_label()
+        p = getattr(self, "_tag_filter_popup", None)
+        if p is not None and p.isVisible():
+            p.hide()
+
+    def _merged_tasks_for_display(self) -> List[Dict[str, Any]]:
+        rows = list(self._all_tasks)
+        if self._shot_extra_task is not None:
+            sid = self._shot_extra_task.get("shot_id")
+            if sid is not None:
+                try:
+                    sid_i = int(sid)
+                except (TypeError, ValueError):
+                    sid_i = None
+                if sid_i is not None:
+                    have = False
+                    for t in rows:
+                        ts = t.get("shot_id")
+                        if ts is None:
+                            continue
+                        try:
+                            if int(ts) == sid_i:
+                                have = True
+                                break
+                        except (TypeError, ValueError):
+                            continue
+                    if not have:
+                        rows.append(dict(self._shot_extra_task))
+        return rows
+
+    def _update_tag_filter_button_label(self) -> None:
+        btn = getattr(self, "_tag_filter_btn", None)
+        if btn is None:
+            return
+        tv = (self._tag_filter_value or "").strip()
+        if tv:
+            disp = tv if len(tv) <= 14 else tv[:13] + "…"
+            btn.setText(f"태그: {disp}  {chr(0x25BE)}")
+        else:
+            btn.setText(f"태그  {chr(0x25BE)}")
+
+    def _collect_union_shot_tags(self) -> List[str]:
+        seen: Set[str] = set()
+        out: List[str] = []
+        for t in self._all_tasks:
+            raw = t.get("shot_tags")
+            if not isinstance(raw, list):
+                continue
+            for x in raw:
+                s = str(x).strip()
+                if not s:
+                    continue
+                key = s.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(s)
+        out.sort(key=lambda s: s.lower())
+        return out
+
+    def _toggle_tag_filter_popup(self) -> None:
+        if not self._all_tasks:
+            QMessageBox.information(self, "태그", "먼저 조회를 실행하세요.")
+            return
+        p = self._tag_filter_popup
+        if p is not None and p.isVisible():
+            p.hide()
+            return
+        if p is not None:
+            p.deleteLater()
+        tags = self._collect_union_shot_tags()
+        popup = QFrame(self)
+        popup.setObjectName("user_assignee_popup")
+        popup.setStyleSheet(
+            f"QFrame#user_assignee_popup {{ background-color: {theme.PANEL_BG}; "
+            f"border: 1px solid {theme.BORDER}; border-radius: 4px; }}"
+        )
+        popup.setWindowFlags(Qt.WindowType.Popup)
+        lay = QVBoxLayout(popup)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(4)
+
+        def _pick(tag: Optional[str]) -> None:
+            self._tag_filter_value = tag
+            self._update_tag_filter_button_label()
+            popup.hide()
+            self._apply_filter_and_sort()
+
+        all_btn = QPushButton("(전체)")
+        all_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        all_btn.clicked.connect(lambda: _pick(None))
+        lay.addWidget(all_btn)
+        if not tags:
+            hint = QLabel("이 조회 결과에 샷 태그가 없습니다.")
+            hint.setObjectName("page_subtitle")
+            hint.setWordWrap(True)
+            lay.addWidget(hint)
+        else:
+            for tg in tags:
+                b = QPushButton(tg)
+                b.setCursor(Qt.CursorShape.PointingHandCursor)
+                b.clicked.connect(lambda _c=False, val=tg: _pick(val))
+                lay.addWidget(b)
+
+        popup.adjustSize()
+        gp = self._tag_filter_btn.mapToGlobal(QPoint(0, self._tag_filter_btn.height()))
+        popup.move(gp)
+        popup.show()
+        self._tag_filter_popup = popup
+
+    def _do_shot_autocomplete(self) -> None:
+        self._shot_ac_seq += 1
+        seq = self._shot_ac_seq
+        q = self._shot_search_edit.text().strip()
+        pid = self._project_combo.currentData()
+        if pid is None or len(q) < 2:
+            self._shot_combo.hide()
+            return
+
+        def _search() -> List[Dict[str, Any]]:
+            sg = get_default_sg()
+            return search_shots_by_code_prefix(sg, int(pid), q, limit=20)
+
+        w = ShotGridWorker(_search)
+        w.finished.connect(lambda r: self._on_shot_autocomplete_results(r, seq))
+        w.error.connect(lambda _: None)
+        w.start()
+        self._workers.append(w)
+
+    def _on_shot_autocomplete_results(self, result: object, seq: int) -> None:
+        if seq != self._shot_ac_seq:
+            return
+        rows = result if isinstance(result, list) else []
+        self._shot_combo.blockSignals(True)
+        self._shot_combo.clear()
+        for s in rows:
+            code = (s.get("code") or "").strip()
+            sid = s.get("id")
+            if not code or sid is None:
+                continue
+            self._shot_combo.addItem(code, int(sid))
+        self._shot_combo.blockSignals(False)
+        if rows:
+            self._shot_combo.setVisible(True)
+            self._position_shot_results_combo()
+            QTimer.singleShot(0, self._position_shot_results_combo)
+            self._shot_combo.showPopup()
+        else:
+            self._shot_combo.setVisible(False)
+
+    def _on_shot_suggest_selected(self, idx: int) -> None:
+        if idx < 0:
+            return
+        sid = self._shot_combo.itemData(idx)
+        code = self._shot_combo.itemText(idx)
+        if sid is None:
+            return
+        try:
+            sid_i = int(sid)
+        except (TypeError, ValueError):
+            return
+        self._shot_combo.blockSignals(True)
+        self._shot_combo.hide()
+        self._shot_combo.clear()
+        self._shot_combo.blockSignals(False)
+        self._shot_search_edit.setText(code)
+        self._commit_shot_focus(sid_i, code)
+
+    def _on_shot_search_immediate(self) -> None:
+        self._shot_search_timer.stop()
+        self._shot_ac_seq += 1
+        pid = self._project_combo.currentData()
+        if pid is None:
+            QMessageBox.information(self, "샷 검색", "프로젝트를 먼저 선택하세요.")
+            return
+        raw = self._shot_search_edit.text().strip()
+        if not raw:
+            self._clear_shot_and_tag_filters()
+            self._apply_filter_and_sort()
+            return
+
+        def _fetch() -> Optional[Dict[str, Any]]:
+            sg = get_default_sg()
+            return find_shot(sg, int(pid), raw)
+
+        w = ShotGridWorker(_fetch)
+        w.finished.connect(lambda r: self._on_shot_find_for_enter(r, raw))
+        w.error.connect(lambda _: None)
+        w.start()
+        self._workers.append(w)
+
+    def _on_shot_find_for_enter(self, shot: object, typed: str) -> None:
+        s = shot if isinstance(shot, dict) else None
+        if s is None or s.get("id") is None:
+            QMessageBox.information(
+                self,
+                "샷 검색",
+                f"프로젝트에서 '{typed}' 샷을 찾지 못했습니다.",
+            )
+            return
+        try:
+            sid_i = int(s.get("id"))
+        except (TypeError, ValueError):
+            return
+        code = (s.get("code") or typed).strip()
+        self._shot_search_edit.setText(code)
+        self._commit_shot_focus(sid_i, code)
+
+    def _commit_shot_focus(self, shot_id: int, shot_code: str) -> None:
+        self._shot_focus_shot_id = int(shot_id)
+        self._shot_extra_task = None
+        have = False
+        for t in self._all_tasks:
+            ts = t.get("shot_id")
+            if ts is None:
+                continue
+            try:
+                if int(ts) == int(shot_id):
+                    have = True
+                    break
+            except (TypeError, ValueError):
+                continue
+        if have:
+            self._apply_filter_and_sort()
+            return
+        self._shot_inject_seq += 1
+        seq = self._shot_inject_seq
+        pid = self._project_combo.currentData()
+        if pid is None:
+            return
+
+        def _fetch() -> Optional[Dict[str, Any]]:
+            sg = get_default_sg()
+            return fetch_representative_my_tasks_row_for_project_shot(sg, int(pid), int(shot_id))
+
+        w = ShotGridWorker(_fetch)
+        w.finished.connect(lambda r: self._on_injected_shot_row(r, seq, int(shot_id), shot_code))
+        w.error.connect(lambda m: QMessageBox.warning(self, "샷 검색", f"태스크 로드 실패: {m}"))
+        w.start()
+        self._workers.append(w)
+
+    def _on_injected_shot_row(
+        self,
+        row: object,
+        seq: int,
+        wanted_id: int,
+        shot_code: str,
+    ) -> None:
+        if seq != self._shot_inject_seq:
+            return
+        if not isinstance(row, dict):
+            QMessageBox.information(
+                self,
+                "샷 검색",
+                f"'{shot_code}' 샷에 표시할 comp 태스크를 찾지 못했습니다.",
+            )
+            self._shot_focus_shot_id = None
+            return
+        try:
+            rid = int(row.get("shot_id") or 0)
+        except (TypeError, ValueError):
+            rid = 0
+        if rid != int(wanted_id):
+            self._shot_focus_shot_id = None
+            return
+        self._shot_extra_task = row
+        self._apply_filter_and_sort()
 
     def _apply_splitter_initial_ratio(self) -> None:
         """첫 표시 시 샷 목록 ~72% / 우측 패널 ~28% (Notes·Shot Builder)."""
@@ -1253,6 +1541,7 @@ class MyTasksTab(QWidget):
     # ── Project assignees / user picker / guess ─────────────────────
 
     def _on_project_combo_changed(self, _idx: int = 0) -> None:
+        self._clear_shot_and_tag_filters()
         self._project_users.clear()
         assignee_text = (self._user_edit.text() or "").strip()
         if assignee_text == "All Tasks":
@@ -1302,6 +1591,14 @@ class MyTasksTab(QWidget):
         self._me_sg_user = dict(user)
         self._apply_user_from_dict(user)
 
+    def _hide_user_autocomplete_combo(self) -> None:
+        """조회 시작 등 — 비동기 검색 결과로 목록이 잠깐 뜨는 현상 방지."""
+        self._user_search_seq += 1
+        self._user_combo.blockSignals(True)
+        self._user_combo.hide()
+        self._user_combo.clear()
+        self._user_combo.blockSignals(False)
+
     def _position_user_results_combo(self) -> None:
         """담당자 자동완성 콤보를 입력란 바로 아래에만 표시 (필터 줄 중복 위젯 없음)."""
         w = max(220, self._user_edit.width())
@@ -1338,8 +1635,10 @@ class MyTasksTab(QWidget):
             self._pager_host.setVisible(False)
         self._user_id = int(uid)
         self._user_edit.setText(_format_human_user_display(u))
+        self._assignee_resolved_display = (self._user_edit.text() or "").strip()
         self._user_edit.setCursorPosition(0)
         self._show_user_id_badge(f"✓ #{self._user_id}")
+        self._clear_shot_and_tag_filters()
         self._update_timelog_button_state()
 
     def _update_timelog_button_state(self) -> None:
@@ -1458,6 +1757,13 @@ class MyTasksTab(QWidget):
         seq = self._user_search_seq
         query = self._user_edit.text().strip()
         if len(query) < 2:
+            self._user_combo.setVisible(False)
+            return
+        if (
+            self._user_id is not None
+            and self._assignee_resolved_display
+            and query == self._assignee_resolved_display
+        ):
             self._user_combo.setVisible(False)
             return
 
@@ -1603,6 +1909,7 @@ class MyTasksTab(QWidget):
             if u.get("_bpe_roster_all"):
                 self._assignee_all_mode = True
                 self._user_id = None
+                self._assignee_resolved_display = None
                 self._roster_page = 1
                 self._user_edit.setText("All Tasks")
                 self._show_user_id_badge("프로젝트 Shot Task 전체", success=True)
@@ -1793,7 +2100,8 @@ class MyTasksTab(QWidget):
         self._apply_filter_and_sort()
 
     def _apply_filter_and_sort(self) -> None:
-        if not self._all_tasks:
+        merged = self._merged_tasks_for_display()
+        if not merged:
             self._clear_cards()
             if self._assignee_all_mode and self._roster_total > 0:
                 self._loading_label.setText(
@@ -1804,7 +2112,20 @@ class MyTasksTab(QWidget):
                 self._loading_label.setText("0개 Task 로드됨")
             return
 
-        filtered = _filter_tasks_by_status(self._all_tasks, self._active_status)
+        filtered = _filter_tasks_by_status(merged, self._active_status)
+        filtered = _filter_tasks_by_tag(filtered, self._tag_filter_value)
+        if self._shot_focus_shot_id is not None:
+            try:
+                fid = int(self._shot_focus_shot_id)
+            except (TypeError, ValueError):
+                fid = None
+            if fid is not None:
+                filtered = [
+                    t
+                    for t in filtered
+                    if t.get("shot_id") is not None and int(t.get("shot_id") or 0) == fid
+                ]
+
         mode_raw = self._sort_combo.currentData()
         mode = int(mode_raw) if mode_raw is not None else _SORT_MODE_SHOT
         sorted_tasks = _sort_tasks_by_mode(filtered, mode, self._sort_ascending)
@@ -1824,25 +2145,46 @@ class MyTasksTab(QWidget):
             self._load_thumbnail(card)
             self._apply_cached_version_to_card(card)
 
+        tag_note = " · 태그 필터" if (self._tag_filter_value or "").strip() else ""
+        shot_note = " · 샷 검색" if self._shot_focus_shot_id is not None else ""
+
         if self._assignee_all_mode:
             max_page = max(
                 1, (self._roster_total + self._roster_page_size - 1) // self._roster_page_size
             )
             self._loading_label.setText(
                 f"{len(sorted_tasks)}개 표시 · 페이지 {self._roster_page}/{max_page} "
-                f"(전체 {self._roster_total}건)"
+                f"(전체 {self._roster_total}건){tag_note}{shot_note}"
             )
         else:
             self._loading_label.setText(
                 f"{len(sorted_tasks)}개 표시 (전체 {len(self._all_tasks)}개 Task)"
+                f"{tag_note}{shot_note}"
             )
 
-        if not self._assignee_all_mode and self._last_shot_ids:
-            self._load_notes(self._last_shot_ids, days_back=14)
         self._clear_versions_panel()
-        if self._right_stack.currentIndex() == 1:
+        if self._right_stack.currentIndex() == 1 and self._shot_focus_shot_id is None:
             self._versions_shot_lbl.setText("")
             self._add_version_placeholder("샷을 선택하세요.")
+
+        if self._shot_focus_shot_id is not None:
+            try:
+                fid = int(self._shot_focus_shot_id)
+            except (TypeError, ValueError):
+                fid = None
+            if fid is not None:
+                for c in self._cards:
+                    sid = c.task_data.get("shot_id")
+                    if sid is None:
+                        continue
+                    try:
+                        if int(sid) == fid:
+                            self._on_shot_card_selected(c)
+                            break
+                    except (TypeError, ValueError):
+                        continue
+        elif not self._assignee_all_mode and self._last_shot_ids:
+            self._load_notes(self._last_shot_ids, days_back=14)
 
     def _apply_cached_version_to_card(self, card: _ShotCard) -> None:
         k = _version_cache_key(card.task_data)
@@ -1859,6 +2201,9 @@ class MyTasksTab(QWidget):
     # ── Refresh / fetch tasks ───────────────────────────────────────
 
     def _refresh(self, *, reset_status: bool = True) -> None:
+        self._hide_user_autocomplete_combo()
+        if reset_status:
+            self._clear_shot_and_tag_filters()
         project_id = self._project_combo.currentData()
         if self._assignee_all_mode:
             if project_id is None:
@@ -1975,6 +2320,7 @@ class MyTasksTab(QWidget):
             self._assignee_all_mode
             and pid_notes is not None
             and not self._skip_project_notes_on_next_tasks_load
+            and self._shot_focus_shot_id is None
         ):
             self._load_project_notes(int(pid_notes))
         self._skip_project_notes_on_next_tasks_load = False
@@ -2171,6 +2517,9 @@ class MyTasksTab(QWidget):
             if pid is None:
                 self._loading_label.setText("All Tasks 조회는 프로젝트를 선택해야 합니다.")
                 return
+            had_shot_focus = self._shot_focus_shot_id is not None
+            if had_shot_focus:
+                self._clear_shot_focus_only()
             if self._selected_shot_card is not None:
                 self._selected_shot_card.set_selected(False)
                 self._selected_shot_card = None
@@ -2182,6 +2531,12 @@ class MyTasksTab(QWidget):
                 self._add_version_placeholder("샷을 선택하세요.")
             self._switch_right_panel(0)
             self._load_project_notes(int(pid))
+            if had_shot_focus:
+                self._apply_filter_and_sort()
+            return
+        if self._shot_focus_shot_id is not None:
+            self._clear_shot_focus_only()
+            self._apply_filter_and_sort()
             return
         if not self._last_shot_ids:
             self._loading_label.setText("먼저 조회를 실행하세요.")

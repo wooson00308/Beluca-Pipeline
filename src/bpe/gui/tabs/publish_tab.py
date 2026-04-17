@@ -86,6 +86,8 @@ class PublishTab(QWidget):
         self._sudo_login: Optional[str] = None
         self._mov_path: Optional[str] = None
         self._workers: List[Any] = []
+        self._publish_in_flight: bool = False
+        self._timelog_phase_done: bool = False
 
         self._build_ui()
         QTimer.singleShot(50, self._init_background)
@@ -343,6 +345,8 @@ class PublishTab(QWidget):
     # ── Publish flow ────────────────────────────────────────────────
 
     def _on_publish(self) -> None:
+        if self._publish_in_flight:
+            return
         if not self._mov_path or not Path(self._mov_path).is_file():
             self._log_msg("퍼블리쉬할 MOV 파일이 없습니다.")
             return
@@ -364,6 +368,8 @@ class PublishTab(QWidget):
         description = self._desc_edit.toPlainText().strip()
         mov_path = self._mov_path
 
+        self._publish_in_flight = True
+        self._timelog_phase_done = False
         self._publish_btn.setEnabled(False)
         self._cancel_btn.setEnabled(False)
         self._set_progress(5, "Version 생성 중...")
@@ -394,6 +400,7 @@ class PublishTab(QWidget):
         ver = result
         if not isinstance(ver, dict) or "id" not in ver:
             self._log_msg(f"Version 생성 실패: {ver}")
+            self._publish_in_flight = False
             self._publish_btn.setEnabled(True)
             self._cancel_btn.setEnabled(True)
             return
@@ -443,6 +450,10 @@ class PublishTab(QWidget):
         self._create_time_log_if_needed()
 
     def _create_time_log_if_needed(self) -> None:
+        if self._timelog_phase_done:
+            return
+        self._timelog_phase_done = True
+
         hours = self._timelog_hours.value()
         if hours <= 0.0:
             self._finish_publish()
@@ -494,12 +505,14 @@ class PublishTab(QWidget):
     def _on_upload_error(self, err: str) -> None:
         self._status_msg.setText("업로드 오류")
         self._log_msg(f"업로드 오류: {err}")
+        self._publish_in_flight = False
         self._publish_btn.setEnabled(True)
         self._cancel_btn.setEnabled(True)
 
     def _on_create_error(self, err: str) -> None:
         self._status_msg.setText("Version 생성 오류")
         self._log_msg(f"Version 생성 오류: {err}")
+        self._publish_in_flight = False
         self._publish_btn.setEnabled(True)
         self._cancel_btn.setEnabled(True)
 

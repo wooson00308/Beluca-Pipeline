@@ -47,3 +47,23 @@ def _ensure_configured() -> None:
     ch.setLevel(logging.INFO)
     ch.setFormatter(logging.Formatter("%(levelname)-5s %(message)s"))
     root.addHandler(ch)
+
+    # 번들: 샷그리드 모듈 로그를 exe 옆 파일에도 기록 (dits-test 등 공유 경로 수집용).
+    if getattr(sys, "frozen", False):
+        try:
+            from bpe.core.feedback_file_log import feedback_log_dir
+
+            sg_path = feedback_log_dir() / "bpe_shotgrid.log"
+            sg_fh = logging.FileHandler(sg_path, encoding="utf-8", mode="w")
+            sg_fh.setLevel(logging.DEBUG)
+            sg_fh.setFormatter(
+                logging.Formatter(
+                    "%(asctime)s %(levelname)-5s [%(name)s] %(message)s",
+                    datefmt="%Y-%m-%d %H:%M:%S",
+                )
+            )
+            sg_root = logging.getLogger("bpe.shotgrid")
+            sg_root.setLevel(logging.DEBUG)
+            sg_root.addHandler(sg_fh)
+        except Exception:
+            pass

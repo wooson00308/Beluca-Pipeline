@@ -13,7 +13,17 @@ from datetime import time as dt_time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from bpe.core.feedback_file_log import append_feedback_log_verbose
+from bpe.core.ffmpeg_paths import resolve_ffmpeg
 from bpe.core.logging import get_logger
+from bpe.core.shotgun_upload_trace import (
+    ensure_shotgun_upload_trace_logging_configured,
+    exception_trace_preview,
+    is_shotgun_upload_trace_enabled,
+    upload_source_path_meta,
+)
+from bpe.core.upload_exc_diag import sg_upload_exception_diag
+from bpe.core.win_subprocess import no_console_subprocess_kwargs
 from bpe.shotgrid.errors import ShotGridError
 
 logger = get_logger("shotgrid.versions")
@@ -331,6 +341,13 @@ def upload_movie_to_version(
     attach_id: Optional[int] = None
 
     try:
+        ensure_shotgun_upload_trace_logging_configured()
+        append_feedback_log_verbose(
+            "version_upload_precheck",
+            version_id=int(version_id),
+            staged_local_copy=bool(stage_local),
+            **upload_source_path_meta(upload_src),
+        )
         upload_rounds = 3
         _overall(0.55)
         _up_ret: Optional[Any] = None
@@ -350,6 +367,16 @@ def upload_movie_to_version(
                     or "Connection aborted" in msg
                     or "URLError" in type(round_e).__name__
                 )
+                _vfail: Dict[str, Any] = {
+                    "version_id": int(version_id),
+                    "attempt": attempt_idx,
+                    "max_rounds": upload_rounds,
+                    "retryable": retryable,
+                    "upload_diag": sg_upload_exception_diag(round_e),
+                }
+                if is_shotgun_upload_trace_enabled():
+                    _vfail["exc_trace_preview"] = exception_trace_preview(round_e)
+                append_feedback_log_verbose("version_upload_round_failed", **_vfail)
                 logger.warning(
                     "upload round %d/%d failed: %s (retryable=%s)",
                     attempt_idx,
@@ -462,7 +489,7 @@ def _extract_first_frame(
     """Extract the first frame of a movie as JPEG via ffmpeg."""
     import subprocess as _sp
 
-    ffmpeg_bin = shutil.which("ffmpeg")
+    ffmpeg_bin = resolve_ffmpeg()
     if not ffmpeg_bin:
         logger.debug("ffmpeg not found — skip first-frame extraction")
         return False
@@ -483,6 +510,7 @@ def _extract_first_frame(
             stderr=_sp.DEVNULL,
             timeout=timeout_sec,
             check=True,
+            **no_console_subprocess_kwargs(),
         )
         return Path(dest_path).is_file() and Path(dest_path).stat().st_size > 0
     except Exception as e:

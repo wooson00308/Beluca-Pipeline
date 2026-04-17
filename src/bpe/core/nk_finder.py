@@ -9,7 +9,7 @@ import subprocess
 import sys
 from collections import deque
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 from bpe.core.logging import get_logger
 from bpe.core.nuke_render_paths import normalize_path_str
@@ -854,6 +854,40 @@ _RENDER_SUBDIRS: Tuple[Tuple[str, ...], ...] = (
 )
 
 
+def parse_sg_path_to_movie_string(raw: Any) -> str:
+    """Best-effort local path from ShotGrid ``sg_path_to_movie`` (string or file URL)."""
+    if raw is None:
+        return ""
+    s = str(raw).strip()
+    if not s or s.lower() in ("none", "<none>"):
+        return ""
+    low = s.lower()
+    if low.startswith("file:"):
+        from urllib.parse import unquote, urlparse
+
+        u = urlparse(s)
+        path = unquote(u.path or "")
+        if sys.platform == "win32" and len(path) >= 2 and path[0] == "/" and path[2] == ":":
+            path = path[1:]
+        return path
+    return s
+
+
+def _pick_newest_among_candidates(paths: List[Path]) -> Path:
+    """When multiple stems match, prefer higher v### in filename then newest mtime."""
+
+    def _sk(p: Path) -> Tuple[int, float]:
+        try:
+            merged = _version_ints_from_mov_filename(p)
+            vmax = max(merged) if merged else -1
+            mt = os.path.getmtime(p)
+        except OSError:
+            vmax, mt = -1, 0.0
+        return (vmax, mt)
+
+    return max(paths, key=_sk)
+
+
 def find_comp_render_video(
     shot_name: str,
     project_code: str,
@@ -861,6 +895,7 @@ def find_comp_render_video(
     *,
     version_code: Optional[str] = None,
     extensions: Tuple[str, ...] = (".mov", ".mp4", ".mxf", ".mkv"),
+    fallback_latest_if_version_unmatched: bool = False,
 ) -> Optional[Path]:
     """샷 루트 아래 여러 후보 폴더에서 영상 파일을 찾는다.
 
@@ -927,10 +962,27 @@ def find_comp_render_video(
         vc_lower = version_code.strip().lower()
         exact = [p for p in candidates if p.stem.lower() == vc_lower]
         if exact:
-            return exact[0]
+            return _pick_newest_among_candidates(exact)
         contained = [p for p in candidates if vc_lower in p.stem.lower()]
         if contained:
-            return contained[0]
+            return _pick_newest_among_candidates(contained)
+        if fallback_latest_if_version_unmatched:
+
+            def _sort_key_fb(p: Path) -> Tuple[int, float]:
+                try:
+                    merged = _version_ints_from_mov_filename(p)
+                    vmax = max(merged) if merged else -1
+                    mt = os.path.getmtime(p)
+                except OSError:
+                    vmax, mt = -1, 0.0
+                return (vmax, mt)
+
+            logger.info(
+                "find_comp_render_video: 버전 코드 불일치 — 최신 렌더로 폴백 vc=%r shot=%s",
+                version_code,
+                sn,
+            )
+            return max(candidates, key=_sort_key_fb)
         logger.warning(
             "find_comp_render_video: 버전 코드와 일치하는 파일 없음 vc=%r candidates=%d",
             version_code,
@@ -948,6 +1000,96 @@ def find_comp_render_video(
         return (vmax, mt)
 
     return max(candidates, key=_sort_key)
+
+
+def resolve_comp_renders_dir(
+    shot_name: str,
+    project_code: str,
+    server_root: str,
+) -> Optional[Path]:
+    """샷 루트 아래 ``find_comp_render_video``와 동일한 후보에서 렌더 *폴더*만 반환."""
+    sn = (shot_name or "").strip()
+    pc = (project_code or "").strip()
+    sr = (server_root or "").strip()
+    if not sn or not sr:
+        return None
+    shot_root = _resolve_shot_root(sr, pc, sn)
+    if shot_root is None:
+        return None
+    for parts in _RENDER_SUBDIRS:
+        d = shot_root.joinpath(*parts)
+        try:
+            if d.is_dir():
+                try:
+                    return Path(normalize_path_str(d.resolve()))
+                except OSError:
+                    return Path(normalize_path_str(str(d)))
+        except OSError:
+            continue
+    mov = find_comp_render_video(
+        sn,
+        pc,
+        sr,
+        version_code=None,
+        fallback_latest_if_version_unmatched=True,
+    )
+    if mov is not None:
+        try:
+            return Path(normalize_path_str(mov.parent.resolve()))
+        except OSError:
+            return Path(normalize_path_str(str(mov.parent)))
+    return None
+
+
+def resolve_local_comp_mov_for_feedback(
+    shot_name: str,
+    project_code: str,
+    server_root: str,
+    *,
+    sg_movie_raw: str,
+    version_code: Optional[str],
+) -> Tuple[Optional[Path], List[str], Optional[str]]:
+    """Feedback 탭용: SG 디스크 경로 우선, 실패 시 샷 폴더 검색(버전 불일치 시 최신 렌더 폴백).
+
+    Returns
+    -------
+    path, diagnostic_lines, optional_warning_for_ui
+    """
+    tried: List[str] = []
+    sn = (shot_name or "").strip()
+    pc = (project_code or "").strip()
+    sr = (server_root or "").strip()
+    sg_hit = False
+    sg_raw = (sg_movie_raw or "").strip()
+    if sg_raw:
+        norm_sg = normalize_path_str(parse_sg_path_to_movie_string(sg_raw))
+        tried.append(f"ShotGrid 경로: {norm_sg}")
+        p_sg = Path(norm_sg)
+        if p_sg.is_file():
+            sg_hit = True
+            return p_sg, tried, None
+        logger.info("ShotGrid sg_path_to_movie 파일 없음 또는 접근 불가: %s", norm_sg)
+
+    mov = find_comp_render_video(
+        sn,
+        pc,
+        sr,
+        version_code=version_code,
+        fallback_latest_if_version_unmatched=True,
+    )
+    if mov is not None:
+        tried.append(f"샷 폴더 검색: {normalize_path_str(str(mov))}")
+        warn: Optional[str] = None
+        if version_code and not sg_hit:
+            warn = (
+                "로컬 폴더에서 찾은 파일이 ShotGrid 버전 코드와 다를 수 있습니다. "
+                "노트는 여전히 선택된 Version에 연결됩니다."
+            )
+        return mov, tried, warn
+    tried.append(
+        f"로컬 검색 실패 — 샷={sn}, 버전={(version_code or '최신')}, 루트={normalize_path_str(sr)}"
+    )
+    return None, tried, None
 
 
 def find_comp_render_mov(

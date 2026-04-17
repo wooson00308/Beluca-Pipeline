@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import os
 import threading
+from pathlib import Path
 from typing import Any, Optional
 
+from bpe.core.feedback_file_log import append_feedback_log_verbose
 from bpe.core.logging import get_logger
+from bpe.core.shotgrid_ca_bundle import resolve_shotgun_ca_certs_path
+from bpe.core.shotgrid_proxy import resolve_shotgun_http_proxy, shotgrid_http_proxy_diag
 from bpe.core.shotgrid_settings import get_shotgrid_settings
+from bpe.core.shotgun_upload_trace import ensure_shotgun_upload_trace_logging_configured
 from bpe.shotgrid.errors import ShotGridError
 
 logger = get_logger("shotgrid.client")
@@ -21,6 +26,7 @@ else:
     _SHOTGUN_IMPORT_ERROR = None
 
 _TLS_SG = threading.local()
+_TLS_DIAG_LOGGED = False
 
 
 def _require_shotgun() -> type:
@@ -77,11 +83,39 @@ def connect_from_settings(
     if not script_name or not script_key:
         raise ShotGridError("Script 이름 또는 Script Key가 비어 있습니다.")
 
+    explicit_proxy = (s.get("http_proxy") or "").strip()
+    http_proxy = resolve_shotgun_http_proxy(s)
+    if http_proxy:
+        if explicit_proxy:
+            logger.debug("shotgrid http_proxy: settings/env")
+        else:
+            logger.debug("shotgrid http_proxy: system (Windows/환경 프록시)")
+
+    ca_certs = resolve_shotgun_ca_certs_path(s)
+    if ca_certs:
+        logger.info("ShotGrid TLS: PEM bundle %s", Path(ca_certs).name)
+    else:
+        logger.debug("ShotGrid TLS: default trust (no BPE bundle path)")
+
+    global _TLS_DIAG_LOGGED
+    if not _TLS_DIAG_LOGGED:
+        _TLS_DIAG_LOGGED = True
+        _pd = shotgrid_http_proxy_diag(s)
+        append_feedback_log_verbose(
+            "shotgrid_tls",
+            has_ca_bundle=bool(ca_certs),
+            pem_basename=Path(ca_certs).name if ca_certs else "",
+            http_proxy_set=bool(http_proxy),
+            **_pd,
+        )
+
     sg = SG(
         base_url,
         script_name=script_name,
         api_key=script_key,
         sudo_as_login=sudo_login,
+        http_proxy=http_proxy,
+        ca_certs=ca_certs,
     )
 
     # timeout — BPE_SG_PUT_TIMEOUT_SECS env (min 60, default 720)
@@ -97,6 +131,7 @@ def connect_from_settings(
     except Exception:
         pass
 
+    ensure_shotgun_upload_trace_logging_configured()
     return sg
 
 

@@ -60,6 +60,11 @@ _my_tasks_sg_icon = SRC / "bpe" / "gui" / "resources" / "shotgrid_open.png"
 if _my_tasks_sg_icon.is_file():
     datas.append((str(_my_tasks_sg_icon), "bpe/gui/resources"))
 
+_feedback_png_dir = SRC / "bpe" / "gui" / "resources" / "feedback"
+if _feedback_png_dir.is_dir():
+    for _fb_png in sorted(_feedback_png_dir.glob("*.png")):
+        datas.append((str(_fb_png), "bpe/gui/resources/feedback"))
+
 # 템플릿이 있으면 포함
 templates_dir = ROOT / "templates"
 if templates_dir.exists():
@@ -73,6 +78,14 @@ binaries = []
 
 if _launcher_src.exists():
     binaries.append((str(_launcher_src), "."))
+
+# Windows: scripts/fetch_ffmpeg_windows.ps1 로 받은 ffmpeg/ffprobe (onefile 번들에 동봉)
+if sys.platform == "win32":
+    _ff_ffmpeg = ROOT / "installer" / "ffmpeg-bin" / "ffmpeg.exe"
+    _ff_ffprobe = ROOT / "installer" / "ffmpeg-bin" / "ffprobe.exe"
+    if _ff_ffmpeg.is_file() and _ff_ffprobe.is_file():
+        binaries.append((str(_ff_ffmpeg), "."))
+        binaries.append((str(_ff_ffprobe), "."))
 
 # PySide6 — 바이너리·플러그인·데이터 전부 (미설치 시 빌드는 의미 없는 얇은 exe만 나옴)
 try:
@@ -90,6 +103,8 @@ hiddenimports = [
     "PySide6.QtCore",
     "PySide6.QtGui",
     "PySide6.QtWidgets",
+    "PySide6.QtMultimedia",
+    "PySide6.QtMultimediaWidgets",
     "shotgun_api3",
     "shotgun_api3.lib.httplib2",
     "shotgun_api3.lib.sgtimezone",
@@ -103,6 +118,8 @@ hiddenimports = [
     "bpe.core.settings",
     "bpe.core.cache",
     "bpe.core.atomic_io",
+    "bpe.core.ffmpeg_paths",
+    "bpe.core.win_subprocess",
     "bpe.gui",
     "bpe.shotgrid",
 ]

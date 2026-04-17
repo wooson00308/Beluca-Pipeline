@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-from bpe.shotgrid.client import reset_default_sg, resolve_sudo_login
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
+
+from bpe.core.settings import save_settings
+from bpe.shotgrid.client import connect_from_settings, reset_default_sg, resolve_sudo_login
 from bpe.shotgrid.client import test_connection as sg_test_connection
 from tests.shotgrid.mock_sg import MockShotgun
 
@@ -54,3 +60,43 @@ class TestResetDefaultSg:
     def test_no_error_when_no_cache(self) -> None:
         # Should not raise even if nothing is cached
         reset_default_sg()
+
+
+class TestConnectFromSettingsHttpProxy:
+    def test_passes_none_when_http_proxy_empty(
+        self, tmp_app_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("BPE_SHOTGRID_NO_SYSTEM_PROXY", "1")
+        monkeypatch.setattr("bpe.shotgrid.client.resolve_shotgun_ca_certs_path", lambda _s: None)
+        mock_cls = MagicMock()
+        monkeypatch.setattr("bpe.shotgrid.client.Shotgun", mock_cls)
+        connect_from_settings("", "", "")
+        _args, kwargs = mock_cls.call_args
+        assert kwargs.get("http_proxy") is None
+        assert kwargs.get("ca_certs") is None
+
+    def test_passes_http_proxy_from_merged_settings(
+        self, tmp_app_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        save_settings({"shotgrid": {"http_proxy": "corp-proxy:8080"}})
+        monkeypatch.setattr("bpe.shotgrid.client.resolve_shotgun_ca_certs_path", lambda _s: None)
+        mock_cls = MagicMock()
+        monkeypatch.setattr("bpe.shotgrid.client.Shotgun", mock_cls)
+        connect_from_settings("", "", "")
+        _args, kwargs = mock_cls.call_args
+        assert kwargs.get("http_proxy") == "corp-proxy:8080"
+
+
+class TestConnectFromSettingsCaCerts:
+    def test_passes_ca_certs_from_settings(
+        self, tmp_app_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pem = tmp_app_dir / "custom.pem"
+        pem.write_bytes(b"-----BEGIN CERTIFICATE-----\nYQ==\n-----END CERTIFICATE-----\n")
+        save_settings({"shotgrid": {"ca_certs": str(pem)}})
+        monkeypatch.setenv("BPE_SHOTGRID_NO_SYSTEM_PROXY", "1")
+        mock_cls = MagicMock()
+        monkeypatch.setattr("bpe.shotgrid.client.Shotgun", mock_cls)
+        connect_from_settings("", "", "")
+        _args, kwargs = mock_cls.call_args
+        assert kwargs.get("ca_certs") == str(pem.resolve())

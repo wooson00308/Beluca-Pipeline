@@ -11,10 +11,12 @@ from bpe.shotgrid.errors import ShotGridError
 logger = get_logger("shotgrid.timelogs")
 
 
-def _should_retry_time_log_create_without_created_by(exc: BaseException) -> bool:
-    """`created_by`를 넣은 create만 실패한 경우에만 재시도한다(권한·네트워크 등은 재시도 안 함)."""
+def _should_retry_time_log_create_audit(exc: BaseException) -> bool:
+    """감사 필드(created_by / updated_by) 때문에 create만 거부된 경우에만 재시도."""
     s = str(exc).lower()
     if "created_by" in s:
+        return True
+    if "updated_by" in s:
         return True
     if "unknown field" in s:
         return True
@@ -41,22 +43,9 @@ def create_time_log(
 ) -> Dict[str, Any]:
     """Create a TimeLog entity on ShotGrid.
 
-    Parameters
-    ----------
-    sg:
-        Authenticated Shotgun instance.
-    project_id:
-        ShotGrid Project entity ID.
-    task_id:
-        ShotGrid Task entity ID (the TimeLog ``entity`` link field).
-    user_id:
-        ShotGrid HumanUser entity ID.
-    duration_minutes:
-        Time spent in **minutes** (must be >= 1).
-    description:
-        Optional free-text description.
-    log_date:
-        Date to record; defaults to today.
+    ``created_by`` / ``updated_by`` 는 ShotGrid에서 **create 시에만** 설정 가능한 사이트가 많다.
+    따라서 create 페이로드에 넣고, 거부 시 감사 필드 조합을 줄여 재시도한다.
+    사후 update 는 하지 않는다.
     """
     if duration_minutes < 1:
         raise ShotGridError("TimeLog duration은 1분 이상이어야 합니다.")
@@ -73,18 +62,38 @@ def create_time_log(
         "date": record_date,
     }
 
+    attempts: List[Dict[str, Any]] = [
+        {**data, "created_by": human_user, "updated_by": human_user},
+        {**data, "created_by": human_user},
+        {**data, "updated_by": human_user},
+        data,
+    ]
+
     try:
-        try:
-            result = sg.create("TimeLog", {**data, "created_by": human_user})
-        except Exception as exc:
-            if _should_retry_time_log_create_without_created_by(exc):
+        result: Optional[Dict[str, Any]] = None
+        for i, payload in enumerate(attempts):
+            try:
+                result = sg.create("TimeLog", payload)
+                if i > 0:
+                    logger.info(
+                        "TimeLog create: 감사 필드 변형 %d/%d 로 성공",
+                        i + 1,
+                        len(attempts),
+                    )
+                break
+            except Exception as exc:
+                is_last = i == len(attempts) - 1
+                if is_last:
+                    raise
+                if not _should_retry_time_log_create_audit(exc):
+                    raise
                 logger.warning(
-                    "TimeLog create(created_by 포함) 거부 — created_by 없이 재시도: %s",
+                    "TimeLog create 거부 — 감사 필드 조합 축소 후 재시도: %s",
                     exc,
                 )
-                result = sg.create("TimeLog", data)
-            else:
-                raise
+        if result is None:
+            raise RuntimeError("TimeLog create returned no result")
+
         logger.info(
             "TimeLog created: id=%s task=%d user=%d duration=%dmin",
             result.get("id"),
@@ -92,25 +101,6 @@ def create_time_log(
             user_id,
             duration_minutes,
         )
-        tl_id = result.get("id")
-        if tl_id is not None:
-            tid = int(tl_id)
-            try:
-                sg.update("TimeLog", tid, {"updated_by": human_user})
-            except Exception as exc:
-                logger.warning(
-                    "TimeLog updated_by 보정 실패(기록은 생성됨): id=%s err=%s",
-                    tl_id,
-                    exc,
-                )
-            try:
-                sg.update("TimeLog", tid, {"created_by": human_user})
-            except Exception as exc:
-                logger.warning(
-                    "TimeLog created_by 보정 실패(기록은 생성됨): id=%s err=%s",
-                    tl_id,
-                    exc,
-                )
         return result
     except Exception as e:
         raise ShotGridError(

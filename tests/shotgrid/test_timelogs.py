@@ -54,7 +54,7 @@ class TestCreateTimeLog:
         assert log.get("created_by") == {"type": "HumanUser", "id": 30}
         assert log.get("updated_by") == {"type": "HumanUser", "id": 30}
 
-    def test_create_retries_without_created_by_when_field_rejected(self) -> None:
+    def test_create_retries_audit_fields_when_created_by_rejected(self) -> None:
         class RejectCreatedByMock(MockShotgun):
             def create(self, entity_type: str, data: dict) -> dict:  # type: ignore[override]
                 if entity_type == "TimeLog" and "created_by" in data:
@@ -70,6 +70,8 @@ class TestCreateTimeLog:
         assert len(logs) == 1
         assert logs[0]["duration"] == 20
         assert logs[0]["user"] == {"type": "HumanUser", "id": 30}
+        assert logs[0].get("updated_by") == {"type": "HumanUser", "id": 30}
+        assert "created_by" not in logs[0]
 
     def test_create_does_not_retry_on_unrelated_error(self) -> None:
         class BoomCreateMock(MockShotgun):
@@ -84,19 +86,14 @@ class TestCreateTimeLog:
             create_time_log(sg, project_id=10, task_id=20, user_id=30, duration_minutes=10)
         assert sg.find("TimeLog", [], None) == []
 
-    def test_post_create_updated_by_ok_when_created_by_update_rejected(self) -> None:
-        """묶음이 아닌 순차 update: updated_by만 성공·created_by update만 거부되는 사이트."""
+    def test_create_succeeds_with_updated_by_only_when_created_by_rejected_on_create(self) -> None:
+        """created_by 가 create 에서 거부되면 updated_by 만 넣은 변형으로 성공하는 사이트."""
 
         class SplitAuditMock(MockShotgun):
             def create(self, entity_type: str, data: dict) -> dict:  # type: ignore[override]
                 if entity_type == "TimeLog" and "created_by" in data:
                     raise ValueError("created_by rejected on create")
                 return super().create(entity_type, data)
-
-            def update(self, entity_type: str, entity_id: int, data: dict) -> dict:  # type: ignore[override]
-                if entity_type == "TimeLog" and "created_by" in data:
-                    raise ValueError("created_by rejected on update")
-                return super().update(entity_type, entity_id, data)
 
         sg = SplitAuditMock()
         sg._add_entity("Project", {"id": 10, "name": "TestProj"})
@@ -109,19 +106,15 @@ class TestCreateTimeLog:
         assert logs[0].get("updated_by") == {"type": "HumanUser", "id": 30}
         assert "created_by" not in logs[0]
 
-    def test_updated_by_update_failure_still_returns_success(self) -> None:
+    def test_create_success_without_post_update_calls(self) -> None:
         sg = _base_sg()
-
-        def _boom(*_a: object, **_k: object) -> None:
-            raise RuntimeError("read only field")
-
-        sg.update = _boom  # type: ignore[method-assign]
         result = create_time_log(sg, project_id=10, task_id=20, user_id=30, duration_minutes=15)
         assert result.get("type") == "TimeLog"
         assert result.get("id") is not None
         logs = sg.find("TimeLog", [], None)
         assert len(logs) == 1
-        assert "updated_by" not in logs[0]
+        assert logs[0].get("created_by") == {"type": "HumanUser", "id": 30}
+        assert logs[0].get("updated_by") == {"type": "HumanUser", "id": 30}
 
     def test_custom_date(self) -> None:
         sg = _base_sg()

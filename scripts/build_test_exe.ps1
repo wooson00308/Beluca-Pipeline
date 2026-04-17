@@ -30,6 +30,14 @@ $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 
 Push-Location $RepoRoot
 try {
+    if ($env:OS -eq 'Windows_NT') {
+        Write-Host '==> FFmpeg (Windows 번들용, 없으면 다운로드) ...' -ForegroundColor Cyan
+        $fetch = Join-Path $PSScriptRoot 'fetch_ffmpeg_windows.ps1'
+        if (Test-Path -LiteralPath $fetch) {
+            & $fetch
+        }
+    }
+
     if ($Check) {
         Write-Host '==> ruff check ...' -ForegroundColor Cyan
         python -m ruff check src/ tests/
