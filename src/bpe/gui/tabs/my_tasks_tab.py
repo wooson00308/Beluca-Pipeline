@@ -1180,6 +1180,7 @@ class MyTasksTab(QWidget):
         self._right_stack.addWidget(versions_page)
 
         right_lay.addWidget(self._right_stack, 1)
+        right_panel.setMinimumWidth(280)
         self._splitter.addWidget(right_panel)
 
         self._splitter.setStretchFactor(0, 6)
@@ -1567,7 +1568,7 @@ class MyTasksTab(QWidget):
         self._apply_filter_and_sort()
 
     def _apply_splitter_initial_ratio(self) -> None:
-        """첫 표시 시 샷 목록 ~72% / 우측 패널 ~28% (Notes·Shot Builder)."""
+        """첫 표시 시 샷 목록 ~55% / 우측 패널 ~45% (Notes·Versions)."""
         if self._splitter_initial_ratio_done:
             return
         w = self._splitter.width()
@@ -1579,7 +1580,7 @@ class MyTasksTab(QWidget):
                 self._splitter_initial_ratio_done = True
             return
         self._splitter_initial_ratio_done = True
-        left = int(w * 0.60)
+        left = int(w * 0.55)
         self._splitter.setSizes([left, w - left])
 
     # ── Project loading ─────────────────────────────────────────────
