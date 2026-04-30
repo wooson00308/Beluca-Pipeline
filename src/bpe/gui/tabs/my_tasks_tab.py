@@ -529,12 +529,10 @@ class _ShotCard(QFrame):
         title_row.addStretch()
         info.addLayout(title_row)
         task_line = QLabel(f"Task: {task_content}")
-        task_line.setObjectName("page_subtitle")
-        task_line.setStyleSheet(f"border: none; color: {theme.TEXT};")
+        task_line.setStyleSheet(f"border: none; color: {theme.TEXT_DIM};")
         info.addWidget(task_line)
         self._version_line = QLabel("Version: —")
-        self._version_line.setObjectName("page_subtitle")
-        self._version_line.setStyleSheet(f"border: none; color: {theme.TEXT};")
+        self._version_line.setStyleSheet(f"border: none; color: {theme.TEXT_DIM};")
         info.addWidget(self._version_line)
         info.addStretch()
         lay.addLayout(info, 1)
@@ -572,8 +570,9 @@ class _ShotCard(QFrame):
         dc_lay = QVBoxLayout(date_col)
         dc_lay.setContentsMargins(6, 6, 6, 6)
         dc_hdr = QLabel("Delivery date")
-        dc_hdr.setObjectName("page_subtitle")
-        dc_hdr.setStyleSheet("border: none;")
+        dc_hdr.setStyleSheet(
+            f"color: {theme.TEXT_LABEL}; font-size: {theme.FONT_SIZE_SMALL}px; border: none;"
+        )
         dc_val = QLabel(delivery)
         dc_val.setWordWrap(True)
         dc_val.setStyleSheet(f"color: {theme.TEXT}; border: none;")
@@ -594,8 +593,9 @@ class _ShotCard(QFrame):
         vfx_hdr_row = QHBoxLayout()
         vfx_hdr_row.setSpacing(6)
         vfx_hdr = QLabel("VFX work order")
-        vfx_hdr.setObjectName("page_subtitle")
-        vfx_hdr.setStyleSheet("border: none;")
+        vfx_hdr.setStyleSheet(
+            f"color: {theme.TEXT_LABEL}; font-size: {theme.FONT_SIZE_SMALL}px; border: none;"
+        )
         self._vfx_toggle_btn = QPushButton("\u25bc")
         self._vfx_toggle_btn.setFixedSize(28, 22)
         self._vfx_toggle_btn.setToolTip("워크오더 펼치기")
@@ -634,22 +634,22 @@ class _ShotCard(QFrame):
         btn_col.setSpacing(6)
         btn_col.setContentsMargins(4, 0, 0, 0)
         folder_btn = QPushButton("폴더 열기")
-        folder_btn.setMinimumWidth(100)
+        folder_btn.setMinimumWidth(96)
         folder_btn.clicked.connect(self._open_shot_folder)
         btn_col.addWidget(folder_btn)
 
         nuke_btn = QPushButton("NukeX")
-        nuke_btn.setMinimumWidth(72)
+        nuke_btn.setMinimumWidth(96)
         nuke_btn.clicked.connect(self._open_nk)
         btn_col.addWidget(nuke_btn)
 
         publish_btn = QPushButton("퍼블리쉬")
-        publish_btn.setMinimumWidth(80)
+        publish_btn.setMinimumWidth(96)
         publish_btn.clicked.connect(self._on_publish)
         btn_col.addWidget(publish_btn)
 
         sb_btn = QPushButton("Shot Build")
-        sb_btn.setMinimumWidth(80)
+        sb_btn.setMinimumWidth(96)
         sb_btn.setToolTip("Shot Builder — NK 생성")
         sb_btn.clicked.connect(self._on_shot_builder)
         btn_col.addWidget(sb_btn)
@@ -874,7 +874,7 @@ class MyTasksTab(QWidget):
         self._user_info.setObjectName("user_id_badge")
         self._user_info.setVisible(False)
         self._user_info.setStyleSheet(
-            f"color: {theme.SUCCESS}; font-size: 11px; "
+            f"color: {theme.SUCCESS}; font-size: {theme.FONT_SIZE_SMALL}px; "
             f"padding: 0; margin: 0; background: transparent;"
         )
         self._user_info.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
@@ -995,7 +995,7 @@ class MyTasksTab(QWidget):
         self._sort_dir_btn.setStyleSheet(
             f"QPushButton {{ background-color: {theme.INPUT_BG}; color: {theme.TEXT}; "
             f"border: 1px solid {theme.BORDER}; border-radius: 4px; "
-            f"font-size: 14px; padding: 0px; min-width: 0; min-height: 0; }}"
+            f"font-size: {theme.FONT_SIZE}px; padding: 0px; min-width: 0; min-height: 0; }}"
             f"QPushButton:hover {{ background-color: {theme.PANEL_BG}; "
             f"border-color: {theme.ACCENT}; color: {theme.ACCENT}; }}"
             f"QPushButton:pressed {{ background-color: {theme.BORDER}; }}"
@@ -1112,6 +1112,14 @@ class MyTasksTab(QWidget):
         self._note_refresh_btn.clicked.connect(self._refresh_notes_clicked)
         note_hdr.addWidget(self._note_refresh_btn)
         notes_page_lay.addLayout(note_hdr)
+        _notes_hdr_sep = QFrame()
+        _notes_hdr_sep.setFrameShape(QFrame.Shape.HLine)
+        _notes_hdr_sep.setFrameShadow(QFrame.Shadow.Plain)
+        _notes_hdr_sep.setFixedHeight(1)
+        _notes_hdr_sep.setStyleSheet(
+            f"background-color: {theme.BORDER}; border: none; max-height: 1px;"
+        )
+        notes_page_lay.addWidget(_notes_hdr_sep)
 
         note_scroll = QScrollArea()
         note_scroll.setObjectName("note_list_scroll")
@@ -1150,6 +1158,14 @@ class MyTasksTab(QWidget):
         ver_refresh_btn.clicked.connect(self._refresh_versions_clicked)
         ver_hdr.addWidget(ver_refresh_btn)
         versions_page_lay.addLayout(ver_hdr)
+        _versions_hdr_sep = QFrame()
+        _versions_hdr_sep.setFrameShape(QFrame.Shape.HLine)
+        _versions_hdr_sep.setFrameShadow(QFrame.Shadow.Plain)
+        _versions_hdr_sep.setFixedHeight(1)
+        _versions_hdr_sep.setStyleSheet(
+            f"background-color: {theme.BORDER}; border: none; max-height: 1px;"
+        )
+        versions_page_lay.addWidget(_versions_hdr_sep)
         ver_scroll = QScrollArea()
         ver_scroll.setObjectName("note_list_scroll")
         ver_scroll.setWidgetResizable(True)
@@ -1675,7 +1691,8 @@ class MyTasksTab(QWidget):
         self._user_info.setVisible(bool(text))
         color = theme.SUCCESS if success else theme.ERROR
         self._user_info.setStyleSheet(
-            f"color: {color}; font-size: 11px; padding: 0; margin: 0; background: transparent;"
+            f"color: {color}; font-size: {theme.FONT_SIZE_SMALL}px; "
+            f"padding: 0; margin: 0; background: transparent;"
         )
         QTimer.singleShot(0, self._position_user_info)
 
@@ -2103,14 +2120,14 @@ class MyTasksTab(QWidget):
                 ss = (
                     f"QPushButton {{ background-color: {theme.ACCENT}; color: #ffffff; "
                     f"border: 2px solid {theme.ACCENT}; border-radius: {r}px; "
-                    f"font-weight: 700; font-size: 11px; padding: 4px 6px; "
+                    f"font-weight: 700; font-size: {theme.FONT_SIZE_SMALL}px; padding: 4px 6px; "
                     f"min-width: 0; min-height: 0; }}"
                 )
             else:
                 ss = (
                     f"QPushButton {{ background-color: {theme.PANEL_BG}; color: {theme.TEXT}; "
                     f"border: 1px solid {theme.BORDER}; border-radius: {r}px; "
-                    f"font-weight: 600; font-size: 11px; padding: 4px 6px; "
+                    f"font-weight: 600; font-size: {theme.FONT_SIZE_SMALL}px; padding: 4px 6px; "
                     f"min-width: 0; min-height: 0; }}"
                 )
             btn.setStyleSheet(ss)
@@ -2120,7 +2137,7 @@ class MyTasksTab(QWidget):
             ss = (
                 f"QPushButton {{ background-color: {bg}; color: {fg}; "
                 f"border: 2px solid {theme.ACCENT}; border-radius: {r}px; "
-                f"font-weight: 700; font-size: 11px; padding: 4px 6px; "
+                f"font-weight: 700; font-size: {theme.FONT_SIZE_SMALL}px; padding: 4px 6px; "
                 f"min-width: 0; min-height: 0; }}"
             )
         else:
@@ -2128,7 +2145,7 @@ class MyTasksTab(QWidget):
             ss = (
                 f"QPushButton {{ background-color: {theme.PANEL_BG}; color: {label}; "
                 f"border: 1px solid {theme.BORDER}; border-radius: {r}px; "
-                f"font-weight: 600; font-size: 11px; padding: 4px 6px; "
+                f"font-weight: 600; font-size: {theme.FONT_SIZE_SMALL}px; padding: 4px 6px; "
                 f"min-width: 0; min-height: 0; }}"
             )
         btn.setStyleSheet(ss)
@@ -2714,7 +2731,7 @@ class MyTasksTab(QWidget):
                 pass
         card = _NoteCardFrame(shot_ids, self._on_note_navigate_to_shot)
         lay = QVBoxLayout(card)
-        lay.setContentsMargins(12, 8, 12, 8)
+        lay.setContentsMargins(8, 6, 8, 6)
         lay.setSpacing(4)
 
         proj = (rec.get("project_name") or "—").strip()
@@ -2727,7 +2744,9 @@ class MyTasksTab(QWidget):
         meta_row.setContentsMargins(0, 0, 0, 0)
         meta_row.setSpacing(8)
         meta_label = QLabel(meta)
-        meta_label.setStyleSheet(f"color: {theme.TEXT_DIM}; border: none;")
+        meta_label.setStyleSheet(
+            f"color: {theme.TEXT_DIM}; font-size: {theme.FONT_SIZE_SMALL}px; border: none;"
+        )
         meta_label.setWordWrap(True)
         meta_row.addWidget(meta_label, 1)
         version_code: Optional[str] = rec.get("version_code")
@@ -2740,7 +2759,7 @@ class MyTasksTab(QWidget):
             rv_btn.setStyleSheet(
                 f"QPushButton {{ color: {theme.ACCENT}; background: transparent; "
                 f"border: 1px solid {theme.ACCENT}; border-radius: 4px; "
-                f"font-size: 9px; padding: 0; }}"
+                f"font-size: {theme.FONT_SIZE_SMALL}px; padding: 0; }}"
                 f"QPushButton:hover {{ background: rgba(45, 139, 122, 0.12); }}"
             )
         else:
@@ -2749,7 +2768,7 @@ class MyTasksTab(QWidget):
             rv_btn.setStyleSheet(
                 f"QPushButton {{ color: {theme.TEXT_DIM}; background: transparent; "
                 f"border: 1px solid {theme.BORDER}; border-radius: 4px; "
-                f"font-size: 9px; padding: 0; }}"
+                f"font-size: {theme.FONT_SIZE_SMALL}px; padding: 0; }}"
             )
         rv_btn.clicked.connect(lambda _checked=False, r=rec: self._open_note_render_in_rv(r))
         meta_row.addWidget(rv_btn, 0, Qt.AlignmentFlag.AlignTop)
@@ -2942,7 +2961,8 @@ class MyTasksTab(QWidget):
             play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             play_btn.setStyleSheet(
                 f"QPushButton {{ color: {theme.ACCENT}; background: transparent; "
-                f"border: 1px solid {theme.ACCENT}; border-radius: 4px; font-size: 11px; }}"
+                f"border: 1px solid {theme.ACCENT}; border-radius: 4px; "
+                f"font-size: {theme.FONT_SIZE_SMALL}px; }}"
                 f"QPushButton:hover {{ background: rgba(45, 139, 122, 0.12); }}"
             )
             play_btn.clicked.connect(
