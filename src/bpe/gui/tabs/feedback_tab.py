@@ -8,10 +8,11 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from PySide6.QtCore import QRect, QSize, Qt, QTimer, QUrl
+from PySide6.QtCore import QPoint, QRect, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import (
     QColor,
     QDesktopServices,
+    QFocusEvent,
     QIcon,
     QMouseEvent,
     QPixmap,
@@ -20,12 +21,16 @@ from PySide6.QtGui import (
     QWheelEvent,
 )
 from PySide6.QtWidgets import (
+    QApplication,
     QButtonGroup,
     QComboBox,
     QFrame,
     QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -80,7 +85,7 @@ from bpe.shotgrid.tasks import (
     list_review_tasks_for_project,
     update_task_status,
 )
-from bpe.shotgrid.users import guess_human_user_for_me
+from bpe.shotgrid.users import guess_human_user_for_me, search_human_users
 
 # 피드백 툴바 버튼·팔레트 등 기존 크기 대비 1.2배 작게(÷1.2)
 _FB_ICON_SCALE = 1.0 / 1.2
@@ -193,6 +198,18 @@ class NoScrollComboBox(QComboBox):
         event.ignore()
 
 
+class _CcSearchLineEdit(QLineEdit):
+    """CC 검색 입력 — 포커스 이탈 시 팝업 드롭다운을 닫는다(클릭 선택 지연 허용)."""
+
+    def __init__(self, owner: "FeedbackTab", parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._owner = owner
+
+    def focusOutEvent(self, event: QFocusEvent) -> None:  # noqa: N802
+        super().focusOutEvent(event)
+        QTimer.singleShot(150, self._owner._maybe_hide_cc_dropdown)
+
+
 class FeedbackTab(QWidget):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -217,6 +234,13 @@ class FeedbackTab(QWidget):
         self._ann_by_frame: Dict[int, List[Dict[str, Any]]] = {}
         self._tracked_frame_idx: Optional[int] = None
         self._restoring_feedback_overlay = False
+
+        self._cc_users: List[Dict[str, Any]] = []
+        self._cc_search_req_id = 0
+        self._cc_search_timer = QTimer(self)
+        self._cc_search_timer.setSingleShot(True)
+        self._cc_search_timer.setInterval(300)
+        self._cc_search_timer.timeout.connect(self._start_cc_search)
 
         self._submit_anim_timer = QTimer(self)
         self._submit_anim_timer.setInterval(110)
@@ -245,13 +269,16 @@ class FeedbackTab(QWidget):
         self._header_title = QLabel("")
         self._header_title.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         self._header_title.setStyleSheet(
-            f"font-size: 19px; font-weight: 700; color: {theme.TEXT}; border: none;"
+            f"font-size: {theme.FONT_SIZE_TITLE}px; font-weight: 700; color: {theme.TEXT}; "
+            f"border: none;"
         )
         self._header_title.setWordWrap(True)
 
         self._header_sub = QLabel("")
         self._header_sub.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        self._header_sub.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 13px; border: none;")
+        self._header_sub.setStyleSheet(
+            f"color: {theme.TEXT_DIM}; font-size: {theme.FONT_SIZE_SUBTITLE}px; border: none;"
+        )
 
         # VideoPlayer는 초록 툴바(두께·색·undo)가 annotation_overlay를 쓰므로 먼저 만든다.
         self._video = VideoPlayerWidget()
@@ -320,7 +347,11 @@ class FeedbackTab(QWidget):
             gh.addWidget(tb)
 
         gh.addSpacing(8)
-        gh.addWidget(QLabel("px"))
+        _px_lbl = QLabel("px")
+        _px_lbl.setStyleSheet(
+            f"color: {theme.TEXT_DIM}; font-size: {theme.FONT_SIZE_SMALL}px; border: none;"
+        )
+        gh.addWidget(_px_lbl)
         self._ann_width_spin = QSpinBox()
         self._ann_width_spin.setRange(1, 48)
         self._ann_width_spin.setValue(3)
@@ -400,7 +431,7 @@ class FeedbackTab(QWidget):
         self._btn_feedback_undo.setFixedSize(_ann_act_w, _ann_act_h)
         self._btn_feedback_undo.clicked.connect(self._video.annotation_overlay.undo_last)
         _undo_fx = QGraphicsOpacityEffect(self._btn_feedback_undo)
-        _undo_fx.setOpacity(0.8)
+        _undo_fx.setOpacity(0.85)
         self._btn_feedback_undo.setGraphicsEffect(_undo_fx)
         self._btn_feedback_clear = QToolButton()
         self._btn_feedback_clear.setIcon(
@@ -412,7 +443,7 @@ class FeedbackTab(QWidget):
         self._btn_feedback_clear.setFixedSize(_ann_act_w, _ann_act_h)
         self._btn_feedback_clear.clicked.connect(self._video.annotation_overlay.clear_all)
         _clear_fx = QGraphicsOpacityEffect(self._btn_feedback_clear)
-        _clear_fx.setOpacity(0.8)
+        _clear_fx.setOpacity(0.85)
         self._btn_feedback_clear.setGraphicsEffect(_clear_fx)
         ann_actions.addWidget(self._btn_feedback_undo)
         ann_actions.addWidget(self._btn_feedback_clear)
@@ -440,6 +471,9 @@ class FeedbackTab(QWidget):
         row1 = QHBoxLayout()
         _proj_lbl = QLabel("프로젝트")
         _proj_lbl.setFixedWidth(_QUEUE_LABEL_COL_W)
+        _proj_lbl.setStyleSheet(
+            f"color: {theme.TEXT_LABEL}; font-size: {theme.FONT_SIZE}px; border: none;"
+        )
         row1.addWidget(_proj_lbl)
         self._project_combo = QComboBox()
         self._project_combo.setMinimumWidth(160)
@@ -450,6 +484,7 @@ class FeedbackTab(QWidget):
         row1.addWidget(self._refresh_btn)
 
         filt = QHBoxLayout()
+        filt.setSpacing(4)
         _filt_lbl_sp = QLabel("")
         _filt_lbl_sp.setFixedWidth(_QUEUE_LABEL_COL_W)
         filt.addWidget(_filt_lbl_sp)
@@ -537,7 +572,12 @@ class FeedbackTab(QWidget):
         pnl.addWidget(notes_scroll, 1)
 
         st_note = QHBoxLayout()
-        st_note.addWidget(QLabel("태스크 상태:"))
+        _st_note_lbl = QLabel("태스크 상태:")
+        _st_note_lbl.setFixedWidth(_QUEUE_LABEL_COL_W)
+        _st_note_lbl.setStyleSheet(
+            f"color: {theme.TEXT_LABEL}; font-size: {theme.FONT_SIZE}px; border: none;"
+        )
+        st_note.addWidget(_st_note_lbl)
         self._notes_status_combo = NoScrollComboBox()
         for scode, lbl in BELUCA_TASK_STATUS_PRESETS:
             self._notes_status_combo.addItem(f"{scode} — {lbl}", scode)
@@ -545,10 +585,51 @@ class FeedbackTab(QWidget):
         st_note.addWidget(self._notes_status_combo, 1)
         pnl.addLayout(st_note)
 
-        pnl.addWidget(QLabel("코멘트"))
+        cc_row = QHBoxLayout()
+        cc_row.setSpacing(8)
+        _cc_lbl = QLabel("CC")
+        _cc_lbl.setFixedWidth(_QUEUE_LABEL_COL_W)
+        _cc_lbl.setStyleSheet(
+            f"color: {theme.TEXT_LABEL}; font-size: {theme.FONT_SIZE}px; border: none;"
+        )
+        cc_row.addWidget(_cc_lbl, 0)
+        self._cc_tags_widget = QWidget()
+        self._cc_tags_layout = QHBoxLayout(self._cc_tags_widget)
+        self._cc_tags_layout.setContentsMargins(0, 0, 0, 0)
+        self._cc_tags_layout.setSpacing(4)
+        cc_row.addWidget(self._cc_tags_widget, 1)
+        self._cc_input = _CcSearchLineEdit(self)
+        self._cc_input.setPlaceholderText("이름 검색…")
+        self._cc_input.setMinimumWidth(120)
+        self._cc_input.textChanged.connect(self._on_cc_text_changed)
+        cc_row.addWidget(self._cc_input, 0)
+        pnl.addLayout(cc_row)
+
+        self._cc_dropdown = QListWidget()
+        self._cc_dropdown.setParent(self)
+        self._cc_dropdown.setWindowFlags(Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        self._cc_dropdown.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._cc_dropdown.hide()
+        self._cc_dropdown.itemClicked.connect(self._on_cc_user_picked)
+        self._rebuild_cc_chips()
+
+        _notes_sep = QFrame()
+        _notes_sep.setFrameShape(QFrame.Shape.HLine)
+        _notes_sep.setFrameShadow(QFrame.Shadow.Plain)
+        _notes_sep.setFixedHeight(1)
+        _notes_sep.setStyleSheet(
+            f"background-color: {theme.BORDER}; border: none; max-height: 1px;"
+        )
+        pnl.addWidget(_notes_sep)
+
+        _comment_lbl = QLabel("코멘트")
+        _comment_lbl.setStyleSheet(
+            f"color: {theme.TEXT_LABEL}; font-size: {theme.FONT_SIZE}px; border: none;"
+        )
+        pnl.addWidget(_comment_lbl)
         self._comment = QPlainTextEdit()
         self._comment.setPlaceholderText("작업자에게 전달할 피드백을 입력하세요.")
-        self._comment.setMinimumHeight(120)
+        self._comment.setMinimumHeight(96)
         self._comment.setSizePolicy(
             QSizePolicy.Policy.Preferred,
             QSizePolicy.Policy.Preferred,
@@ -617,10 +698,159 @@ class FeedbackTab(QWidget):
     def _style_ann_palette_selection(self, selected_hex: str) -> None:
         sel = (selected_hex or "").strip().lower()
         for h, btn in self._palette_by_hex.items():
-            ring = f"2px solid {theme.ACCENT}" if h.lower() == sel else "none"
+            h_low = h.lower()
+            ring = f"2px solid {theme.ACCENT}" if h_low == sel else "none"
+            subtle = f"1px solid {theme.BORDER}" if h_low == "#ffffff" else "none"
+            border = ring if ring != "none" else subtle
             btn.setStyleSheet(
-                f"color: {h}; font-size: 21px; border: {ring}; border-radius: 20px; padding: 2px;"
+                f"color: {h}; font-size: 21px; border: {border}; border-radius: 20px; padding: 2px;"
             )
+
+    def _rebuild_cc_chips(self) -> None:
+        while self._cc_tags_layout.count():
+            it = self._cc_tags_layout.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.deleteLater()
+        for u in self._cc_users:
+            self._cc_tags_layout.addWidget(self._make_cc_chip(u))
+        self._cc_tags_layout.addStretch()
+
+    def _make_cc_chip(self, user: Dict[str, Any]) -> QPushButton:
+        iid = int(user["id"])
+        name = (user.get("name") or user.get("login") or "?").strip()
+        btn = QPushButton(f"× {name}")
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setStyleSheet(
+            f"QPushButton {{ background: {theme.INPUT_BG}; color: {theme.TEXT}; "
+            f"border: 1px solid {theme.BORDER}; border-radius: 12px; "
+            f"padding: 2px 8px; font-size: {theme.FONT_SIZE_SMALL}px; "
+            f"min-height: 0; min-width: 0; }}"
+            f"QPushButton:hover {{ border-color: {theme.ACCENT}; }}"
+        )
+
+        def _remove(_: bool = False, uid: int = iid) -> None:
+            self._remove_cc_user(uid)
+
+        btn.clicked.connect(_remove)
+        return btn
+
+    def _remove_cc_user(self, user_id: int) -> None:
+        iid = int(user_id)
+        self._cc_users = [u for u in self._cc_users if int(u.get("id") or 0) != iid]
+        self._rebuild_cc_chips()
+
+    def _add_cc_user(self, user: Dict[str, Any]) -> None:
+        uid = user.get("id")
+        if uid is None:
+            return
+        try:
+            iid = int(uid)
+        except (TypeError, ValueError):
+            return
+        if any(int(u.get("id") or 0) == iid for u in self._cc_users):
+            return
+        self._cc_users.append(
+            {
+                "id": iid,
+                "name": (user.get("name") or "").strip(),
+                "login": (user.get("login") or "").strip(),
+                "email": (user.get("email") or "").strip(),
+            }
+        )
+        self._rebuild_cc_chips()
+
+    def _clear_cc_selection(self) -> None:
+        self._cc_users.clear()
+        self._rebuild_cc_chips()
+
+    def _hide_cc_dropdown(self) -> None:
+        self._cc_dropdown.hide()
+
+    def _maybe_hide_cc_dropdown(self) -> None:
+        if not self._cc_dropdown.isVisible():
+            return
+        app = QApplication.instance()
+        if app is None:
+            self._hide_cc_dropdown()
+            return
+        fw = app.focusWidget()
+        if fw is self._cc_input:
+            return
+        if fw is self._cc_dropdown:
+            return
+        if fw is not None and self._cc_dropdown.isAncestorOf(fw):
+            return
+        self._hide_cc_dropdown()
+
+    def _on_cc_text_changed(self, _text: str) -> None:
+        self._cc_search_timer.stop()
+        if not self._cc_input.text().strip():
+            self._hide_cc_dropdown()
+            return
+        self._cc_search_timer.start()
+
+    def _start_cc_search(self) -> None:
+        q = self._cc_input.text().strip()
+        if not q:
+            self._hide_cc_dropdown()
+            return
+        self._cc_search_req_id += 1
+        rid = self._cc_search_req_id
+
+        def _do() -> List[Dict[str, Any]]:
+            sg = get_default_sg()
+            return search_human_users(sg, q, limit=15)
+
+        w = ShotGridWorker(_do)
+        w.finished.connect(lambda r, rid=rid: self._on_cc_search_finished(rid, r))
+        w.error.connect(lambda e, rid=rid: self._on_cc_search_error(rid, e))
+        w.start()
+        self._workers.append(w)
+
+    def _on_cc_search_error(self, rid: int, msg: str) -> None:
+        if rid != self._cc_search_req_id:
+            return
+        logger.debug("cc user search failed: %s", msg)
+        self._hide_cc_dropdown()
+
+    def _on_cc_search_finished(self, rid: int, rows: object) -> None:
+        if rid != self._cc_search_req_id:
+            return
+        if not isinstance(rows, list):
+            self._hide_cc_dropdown()
+            return
+        self._cc_dropdown.clear()
+        for u in rows:
+            if not isinstance(u, dict) or u.get("id") is None:
+                continue
+            name = (u.get("name") or u.get("login") or "").strip() or "?"
+            em = (u.get("email") or "").strip()
+            lg = (u.get("login") or "").strip()
+            sub = f" ({em})" if em else (f" ({lg})" if lg else "")
+            it = QListWidgetItem(f"{name}{sub}")
+            it.setData(Qt.ItemDataRole.UserRole, u)
+            self._cc_dropdown.addItem(it)
+        if self._cc_dropdown.count() == 0:
+            self._hide_cc_dropdown()
+            return
+        row_h = self._cc_dropdown.sizeHintForRow(0)
+        if row_h <= 0:
+            row_h = 28
+        h = min(220, 8 + row_h * self._cc_dropdown.count())
+        self._cc_dropdown.setFixedHeight(max(h, 40))
+        w = self._cc_input.width()
+        self._cc_dropdown.setFixedWidth(max(w, 200))
+        pt = self._cc_input.mapToGlobal(QPoint(0, self._cc_input.height()))
+        self._cc_dropdown.move(pt)
+        self._cc_dropdown.show()
+
+    def _on_cc_user_picked(self, item: QListWidgetItem) -> None:
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if isinstance(data, dict):
+            self._add_cc_user(data)
+        self._cc_input.clear()
+        self._hide_cc_dropdown()
 
     def _on_submit_progress_anim_tick(self) -> None:
         if not self._submit_busy:
@@ -898,6 +1128,8 @@ class FeedbackTab(QWidget):
     def _feedback_is_dirty(self) -> bool:
         if self._comment.toPlainText().strip():
             return True
+        if self._cc_users:
+            return True
         if any(bool(v) for v in self._ann_by_frame.values()):
             return True
         if self._video.annotation_overlay.has_content():
@@ -906,6 +1138,7 @@ class FeedbackTab(QWidget):
 
     def _clear_feedback_draft(self) -> None:
         self._comment.clear()
+        self._clear_cc_selection()
         self._clear_per_frame_ann_state()
         self._video.annotation_overlay.clear_all()
 
@@ -1676,6 +1909,17 @@ class FeedbackTab(QWidget):
             self._submit_btn.set_fill_ratio(0.14)
         self._start_submit_progress_animation()
 
+        cc_snapshot: List[Dict[str, Any]] = []
+        for u in self._cc_users:
+            uid = u.get("id")
+            if uid is None:
+                continue
+            try:
+                iid = int(uid)
+            except (TypeError, ValueError):
+                continue
+            cc_snapshot.append({"type": "HumanUser", "id": iid})
+
         def _do() -> CreateNoteResult:
             base_sg = get_default_sg()
             me = guess_human_user_for_me(base_sg)
@@ -1710,6 +1954,7 @@ class FeedbackTab(QWidget):
                 attachment_paths=att_list,
                 author_user=me,
                 addressings_to=addr if addr else None,
+                addressings_cc=cc_snapshot if cc_snapshot else None,
             )
             note_row = res.note if isinstance(res.note, dict) else {}
             append_feedback_log_verbose(
@@ -1743,6 +1988,7 @@ class FeedbackTab(QWidget):
         self._restore_submit_ui_after_note()
         self._unlink_note_tmp_paths(tmp_paths)
         self._comment.clear()
+        self._clear_cc_selection()
         self._clear_per_frame_ann_state()
         self._video.annotation_overlay.clear_all()
         self._load_notes_for_shot()

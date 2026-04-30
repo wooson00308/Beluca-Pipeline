@@ -281,6 +281,25 @@ class TestCreateNote:
         assert row.get("addressings_to") == to
         assert row.get("addressings_cc") == cc
 
+    def test_create_note_with_result_explicit_cc(self) -> None:
+        sg = MockShotgun()
+        sg._add_entity("Project", {"id": 1})
+        to = [{"type": "HumanUser", "id": 8}]
+        cc = [{"type": "HumanUser", "id": 9}, {"type": "HumanUser", "id": 10}]
+        res = create_note_with_result(
+            sg,
+            project_id=1,
+            shot_id=50,
+            subject="H",
+            content="B",
+            addressings_to=to,
+            addressings_cc=cc,
+        )
+        nid = res.note["id"]
+        row = next(e for e in sg._entities["Note"] if e["id"] == nid)
+        assert row.get("addressings_to") == to
+        assert row.get("addressings_cc") == cc
+
     def test_create_note_upload_fallback_after_attachments_fails(self, tmp_path) -> None:
         """attachments 전략만 실패할 때 field 없이 업로드로 성공하는지."""
 
