@@ -38,19 +38,79 @@ def parse_shot_name(shot_name: str) -> Optional[Dict[str, str]]:
     return {"ep": parts[0], "full": s}
 
 
+def _ep_dirs_containing_shot_folder(sq_dir: Path, shot_full: str) -> List[str]:
+    """``04_sq`` 직계 자식 에피소드 폴더 중 ``shot_full`` 이름의 샷 디렉터리가 있는 것들."""
+    want = (shot_full or "").strip().upper()
+    if not want:
+        return []
+    matches: List[str] = []
+    try:
+        if not sq_dir.is_dir():
+            return []
+        for ep_dir in sq_dir.iterdir():
+            if not ep_dir.is_dir():
+                continue
+            found = False
+            try:
+                for child in ep_dir.iterdir():
+                    if child.is_dir() and child.name.upper() == want:
+                        found = True
+                        break
+            except OSError:
+                continue
+            if found:
+                matches.append(ep_dir.name)
+    except OSError:
+        return []
+    return matches
+
+
+def _resolve_ep_segment_for_disk(
+    server_root: str, project_code: str, parsed_ep: str, shot_full: str
+) -> str:
+    """디스크에 샷 폴더가 있으면 그 상위 에피소드 폴더명을 쓴다. 없으면 ``parsed_ep``."""
+    sr = Path(server_root)
+    pc = project_code.strip()
+    if not pc:
+        return parsed_ep
+    sq_dir = sr / pc / "04_sq"
+    candidates = _ep_dirs_containing_shot_folder(sq_dir, shot_full)
+    if not candidates:
+        return parsed_ep
+    if len(candidates) == 1:
+        return candidates[0]
+
+    # Prefer parsed token when it matches a real folder case-insensitively
+    for c in candidates:
+        if c.lower() == (parsed_ep or "").lower():
+            return c
+
+    candidates_sorted = sorted(candidates, key=lambda x: x.lower())
+    logger.warning(
+        "04_sq 아래 동일 샷 폴더가 여러 에피소드에 있습니다: shot=%s eps=%s → %s 사용",
+        shot_full,
+        candidates_sorted,
+        candidates_sorted[0],
+    )
+    return candidates_sorted[0]
+
+
 def build_shot_paths(
     server_root: str, project_code: str, shot_name: str
 ) -> Optional[Dict[str, Path]]:
     """샷의 서버 경로 딕셔너리를 반환한다.
 
     구조: server_root / project_code / 04_sq / EP / shot_name / ...
+    ``04_sq`` 아래에 실제 샷 폴더가 있으면 그 부모를 EP로 쓴다(프로젝트별 네이밍 대응).
+    없으면 ``parse_shot_name``의 첫 토큰 EP로 폴백(신규 샷).
     ``plate_hi`` 키는 ``plate/org/v001/hi`` 또는 ``.../mov`` 중 디스크에 있는 쪽을 가리킨다.
     shot_name을 파싱할 수 없으면 None.
     """
     parsed = parse_shot_name(shot_name)
     if not parsed:
         return None
-    shot_root = Path(server_root) / project_code / "04_sq" / parsed["ep"] / parsed["full"]
+    ep_seg = _resolve_ep_segment_for_disk(server_root, project_code, parsed["ep"], parsed["full"])
+    shot_root = Path(server_root) / project_code / "04_sq" / ep_seg / parsed["full"]
     nuke_dir = shot_root / "comp" / "devl" / "nuke"
     return {
         "shot_root": shot_root,

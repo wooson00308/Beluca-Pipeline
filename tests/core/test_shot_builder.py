@@ -81,6 +81,24 @@ class TestBuildShotPaths:
         for v in paths.values():
             assert isinstance(v, Path)
 
+    def test_disk_ep_folder_overrides_parsed_prefix(self, tmp_path: Path) -> None:
+        """``04_sq`` 아래 실제 에피소드 폴더가 있으면 ``parse_shot_name`` 첫 토큰보다 우선한다."""
+        shot = "NWR_E04_0050"
+        (tmp_path / "NWR_033" / "04_sq" / "NWR_E04" / shot).mkdir(parents=True)
+        paths = build_shot_paths(str(tmp_path), "NWR_033", shot)
+        assert paths is not None
+        root = tmp_path / "NWR_033" / "04_sq" / "NWR_E04" / shot
+        assert paths["shot_root"] == root
+        assert paths["nuke_dir"] == root / "comp" / "devl" / "nuke"
+
+    def test_fallback_when_shot_not_on_disk_under_04_sq(self, tmp_path: Path) -> None:
+        """``04_sq``는 있지만 샷 폴더가 없으면 기존처럼 첫 토큰 EP로 폴백."""
+        shot = "NWR_E04_0050"
+        (tmp_path / "NWR_033" / "04_sq").mkdir(parents=True)
+        paths = build_shot_paths(str(tmp_path), "NWR_033", shot)
+        assert paths is not None
+        assert paths["shot_root"] == tmp_path / "NWR_033" / "04_sq" / "NWR" / shot
+
     def test_plate_hi_uses_mov_when_only_mov_folder_exists(self, tmp_path: Path) -> None:
         shot_root = tmp_path / "PRJ" / "04_sq" / "E107" / "E107_S030_0160"
         (shot_root / "plate" / "org" / "v001" / "mov").mkdir(parents=True)
