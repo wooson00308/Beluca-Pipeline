@@ -1,4 +1,4 @@
-# @cursor-change: 2026-05-15, 0.8.22, F5 새로고침 시 선택 샷·필터 유지(trigger_refresh)
+# @cursor-change: 2026-05-15, 0.8.23, 마이테스크 폴더 열기 태스크별 경로(comp/devl·fx·matte)
 """My Tasks tab — ShotGrid comp task list with thumbnails, NukeX open, shot folder."""
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ from bpe.core.nk_finder import (
     find_latest_comp_version_display,
     find_latest_nk_and_open,
     find_server_root_auto,
-    find_shot_folder,
+    find_shot_folder_by_task,
     open_comp_render_in_rv,
     open_plate_in_rv,
 )
@@ -670,6 +670,7 @@ class _ShotCard(QFrame):
         d = self.task_data
         shot_code = d.get("shot_code", "")
         project_code = d.get("project_code") or d.get("project_folder", "")
+        task_content = d.get("task_content", "")
         if not shot_code or not project_code:
             logger.warning("폴더 열기: shot_code 또는 project_code 없음")
             return
@@ -682,7 +683,9 @@ class _ShotCard(QFrame):
                 project_code,
             )
             return
-        folder = find_shot_folder(shot_code, project_code, server_root)
+        folder = find_shot_folder_by_task(
+            shot_code, project_code, server_root, task_content
+        )
         if folder is None or not folder.is_dir():
             logger.warning("폴더 열기: 샷 폴더를 찾을 수 없음 (%s)", shot_code)
             return

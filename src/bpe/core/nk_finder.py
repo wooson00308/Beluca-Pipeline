@@ -1,3 +1,4 @@
+# @cursor-change: 2026-05-15, 0.8.23, 마이테스크 폴더 열기 태스크별 경로(comp/devl, fx, matte)
 """NK file discovery — find the latest .nk for a given shot."""
 
 from __future__ import annotations
@@ -9,7 +10,7 @@ import subprocess
 import sys
 from collections import deque
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from bpe.core.logging import get_logger
 from bpe.core.nuke_render_paths import normalize_path_str
@@ -438,6 +439,55 @@ def find_shot_folder(shot_name: str, project_code: str, server_root: str) -> Opt
     try:
         if nuke_dir.is_dir():
             return Path(normalize_path_str(nuke_dir.resolve()))
+    except OSError:
+        pass
+    try:
+        return Path(normalize_path_str(shot_root.resolve()))
+    except OSError:
+        return Path(normalize_path_str(shot_root))
+
+
+# 마이테스크 「폴더 열기」 전용 — task_content 소문자로 매칭 (대소문자 무관)
+_FOLDER_OPEN_BY_TASK_CONTENT: Dict[str, Tuple[str, ...]] = {
+    "comp": ("comp", "devl"),
+    "fx": ("fx",),
+    "matte": ("matte",),
+}
+
+
+def find_shot_folder_by_task(
+    shot_name: str,
+    project_code: str,
+    server_root: str,
+    task_content: str = "",
+) -> Optional[Path]:
+    """마이테스크 「폴더 열기」 전용.
+
+    * ``comp`` → ``shot_root/comp/devl`` (있으면)
+    * ``fx`` → ``shot_root/fx``
+    * ``matte`` → ``shot_root/matte``
+    * 그 외·빈 문자열 → :func:`find_shot_folder` 와 동일 ( ``comp/devl/nuke`` 우선 등 )
+    """
+    sn = (shot_name or "").strip()
+    pc = (project_code or "").strip()
+    sr = (server_root or "").strip()
+    if not sn or not sr:
+        return None
+
+    tc_key = (task_content or "").strip().lower()
+    rel_parts = _FOLDER_OPEN_BY_TASK_CONTENT.get(tc_key)
+
+    if not rel_parts:
+        return find_shot_folder(shot_name, project_code, server_root)
+
+    shot_root = _resolve_shot_root(sr, pc, sn)
+    if shot_root is None:
+        return None
+
+    target = shot_root.joinpath(*rel_parts)
+    try:
+        if target.is_dir():
+            return Path(normalize_path_str(target.resolve()))
     except OSError:
         pass
     try:

@@ -1,3 +1,4 @@
+# @cursor-change: 2026-05-15, 0.8.23, find_shot_folder_by_task 테스트 추가
 """Tests for bpe.core.nk_finder."""
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from bpe.core.nk_finder import (
     find_plate_mov,
     find_server_root_auto,
     find_shot_folder,
+    find_shot_folder_by_task,
     parse_sg_path_to_movie_string,
     patch_nk_string_trim_in_place,
     patch_string_trim_file_knob_script,
@@ -461,6 +463,70 @@ class TestFindShotFolder:
     def test_returns_none_for_missing_args(self):
         assert find_shot_folder("", "PRJ", "/x") is None
         assert find_shot_folder("S", "PRJ", "") is None
+
+
+class TestFindShotFolderByTask:
+    """마이테스크 「폴더 열기」 전용 — 태스크별 디렉터리."""
+
+    def _make_standard_shot(self, tmp_path: Path, shot_code: str) -> Path:
+        ep = shot_code.split("_")[0].upper()
+        return tmp_path / "PRJ" / "04_sq" / ep / shot_code
+
+    def test_comp_opens_comp_devl(self, tmp_path):
+        shot_root = self._make_standard_shot(tmp_path, "E01_S01_010")
+        devl = shot_root / "comp" / "devl"
+        devl.mkdir(parents=True)
+        got = find_shot_folder_by_task("E01_S01_010", "PRJ", str(tmp_path), "Comp")
+        assert got == devl.resolve()
+
+    def test_comp_case_insensitive(self, tmp_path):
+        shot_root = self._make_standard_shot(tmp_path, "E01_S01_011")
+        devl = shot_root / "comp" / "devl"
+        devl.mkdir(parents=True)
+        assert (
+            find_shot_folder_by_task("E01_S01_011", "PRJ", str(tmp_path), "COMP")
+            == devl.resolve()
+        )
+
+    def test_comp_fallback_shot_root_when_devl_missing(self, tmp_path):
+        shot_root = self._make_standard_shot(tmp_path, "E01_S01_012")
+        shot_root.mkdir(parents=True)
+        got = find_shot_folder_by_task("E01_S01_012", "PRJ", str(tmp_path), "comp")
+        assert got == shot_root.resolve()
+
+    def test_fx_opens_fx_dir_case_variants(self, tmp_path):
+        shot_root = self._make_standard_shot(tmp_path, "E01_S01_020")
+        fx_dir = shot_root / "fx"
+        fx_dir.mkdir(parents=True)
+        for tc in ("fx", "Fx", "FX"):
+            got = find_shot_folder_by_task("E01_S01_020", "PRJ", str(tmp_path), tc)
+            assert got == fx_dir.resolve()
+
+    def test_matte_opens_matte_dir_case_variants(self, tmp_path):
+        shot_root = self._make_standard_shot(tmp_path, "E01_S01_030")
+        matte_dir = shot_root / "matte"
+        matte_dir.mkdir(parents=True)
+        for tc in ("matte", "Matte", "MATTE"):
+            got = find_shot_folder_by_task("E01_S01_030", "PRJ", str(tmp_path), tc)
+            assert got == matte_dir.resolve()
+
+    def test_other_task_delegates_to_find_shot_folder(self, tmp_path):
+        shot_root = self._make_standard_shot(tmp_path, "E01_S01_040")
+        nuke_dir = shot_root / "comp" / "devl" / "nuke"
+        nuke_dir.mkdir(parents=True)
+        got = find_shot_folder_by_task("E01_S01_040", "PRJ", str(tmp_path), "Lighting")
+        assert got == nuke_dir.resolve()
+
+    def test_empty_task_content_delegates_to_find_shot_folder(self, tmp_path):
+        shot_root = self._make_standard_shot(tmp_path, "E01_S01_041")
+        nuke_dir = shot_root / "comp" / "devl" / "nuke"
+        nuke_dir.mkdir(parents=True)
+        got = find_shot_folder_by_task("E01_S01_041", "PRJ", str(tmp_path), "")
+        assert got == nuke_dir.resolve()
+
+    def test_returns_none_for_missing_args(self):
+        assert find_shot_folder_by_task("", "PRJ", "/x", "comp") is None
+        assert find_shot_folder_by_task("S", "PRJ", "", "comp") is None
 
 
 # ── find_plate_mov ───────────────────────────────────────────────
