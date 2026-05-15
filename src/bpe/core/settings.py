@@ -151,3 +151,41 @@ def get_feedback_frame_start(settings_file: Optional[Path] = None) -> int:
         except (TypeError, ValueError):
             pass
     return 1001
+
+
+_DEFAULT_AI_QC: Dict[str, Any] = {
+    "provider": "openai",
+    "api_key": "",
+    "sample_count": 20,
+    "model": "",
+    "use_sg_context": True,
+    "sg_notes_limit": 3,
+    "last_plate_path": "",
+}
+
+
+def get_ai_qc_settings(settings_file: Optional[Path] = None) -> Dict[str, Any]:
+    """Return the 'ai_qc' section, filling missing keys with defaults.
+
+    기존 settings.json 키(presets_dir, tools, feedback, unc_mappings)에 영향 없음.
+    """
+    settings = load_settings(settings_file)
+    stored = settings.get("ai_qc")
+    if not isinstance(stored, dict):
+        stored = {}
+    merged: Dict[str, Any] = dict(_DEFAULT_AI_QC)
+    for k, v in stored.items():
+        if k in merged:
+            merged[k] = v
+    return merged
+
+
+def save_ai_qc_settings(data: Dict[str, Any], settings_file: Optional[Path] = None) -> None:
+    """Update only the 'ai_qc' key in settings.json. Preserves other keys."""
+    settings = load_settings(settings_file)
+    existing = settings.get("ai_qc")
+    if not isinstance(existing, dict):
+        existing = {}
+    existing.update({k: v for k, v in data.items() if k in _DEFAULT_AI_QC})
+    settings["ai_qc"] = existing
+    save_settings(settings, settings_file)

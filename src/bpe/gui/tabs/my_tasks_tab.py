@@ -1,3 +1,4 @@
+# @cursor-change: 2026-05-15, 0.8.22, F5 새로고침 시 선택 샷·필터 유지(trigger_refresh)
 """My Tasks tab — ShotGrid comp task list with thumbnails, NukeX open, shot folder."""
 
 from __future__ import annotations
@@ -801,6 +802,7 @@ class MyTasksTab(QWidget):
         self._shot_search_timer.timeout.connect(self._do_shot_autocomplete)
         self._shot_ac_seq = 0
         self._shot_focus_shot_id: Optional[int] = None
+        self._pending_reselect_shot_id: Optional[int] = None
         self._shot_extra_task: Optional[Dict[str, Any]] = None
         self._shot_inject_seq = 0
         self._shot_substring_query: Optional[str] = None
@@ -2173,6 +2175,7 @@ class MyTasksTab(QWidget):
     def _apply_filter_and_sort(self) -> None:
         merged = self._merged_tasks_for_display()
         if not merged:
+            self._pending_reselect_shot_id = None
             self._clear_cards()
             if self._assignee_all_mode and self._roster_total > 0:
                 self._loading_label.setText(
@@ -2245,6 +2248,7 @@ class MyTasksTab(QWidget):
             self._add_version_placeholder("샷을 선택하세요.")
 
         if self._shot_focus_shot_id is not None:
+            self._pending_reselect_shot_id = None
             try:
                 fid = int(self._shot_focus_shot_id)
             except (TypeError, ValueError):
@@ -2260,6 +2264,20 @@ class MyTasksTab(QWidget):
                             break
                     except (TypeError, ValueError):
                         continue
+        elif self._pending_reselect_shot_id is not None:
+            fid = self._pending_reselect_shot_id
+            self._pending_reselect_shot_id = None
+            for c in self._cards:
+                sid = c.task_data.get("shot_id")
+                if sid is None:
+                    continue
+                try:
+                    if int(sid) == fid:
+                        self._on_shot_card_selected(c)
+                        self._card_area.ensureWidgetVisible(c)
+                        break
+                except (TypeError, ValueError):
+                    continue
         elif not self._assignee_all_mode and self._last_shot_ids:
             self._load_notes(self._last_shot_ids, days_back=14)
 
@@ -2274,6 +2292,16 @@ class MyTasksTab(QWidget):
     def _refresh_version_labels_on_cards(self) -> None:
         for card in self._cards:
             self._apply_cached_version_to_card(card)
+
+    def trigger_refresh(self) -> None:
+        """F5: 필터·상태 유지한 채 ShotGrid 재조회; 선택 중인 샷은 다시 선택."""
+        if self._shot_focus_shot_id is None and self._selected_shot_card is not None:
+            sid = self._selected_shot_card.task_data.get("shot_id")
+            try:
+                self._pending_reselect_shot_id = int(sid) if sid is not None else None
+            except (TypeError, ValueError):
+                self._pending_reselect_shot_id = None
+        self._refresh(reset_status=False)
 
     # ── Refresh / fetch tasks ───────────────────────────────────────
 

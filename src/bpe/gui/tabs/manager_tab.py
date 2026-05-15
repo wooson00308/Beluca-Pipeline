@@ -1,3 +1,4 @@
+# @cursor-change: 2026-05-15, 0.8.22, F5 시 Feedback에 trigger_refresh 위임
 """Manager tab — Preset + Feedback sub-pages behind the lock overlay."""
 
 from __future__ import annotations
@@ -69,3 +70,10 @@ class ManagerTab(QWidget):
         )
         self._btn_preset.setStyleSheet(sel if self._btn_preset.isChecked() else unsel)
         self._btn_feedback.setStyleSheet(sel if self._btn_feedback.isChecked() else unsel)
+
+    def trigger_refresh(self) -> None:
+        """F5: 활성 서브탭(피드백) 새로고침. Preset에는 위임 없음."""
+        current = self._stack.currentWidget()
+        rf = getattr(current, "trigger_refresh", None)
+        if callable(rf):
+            rf()

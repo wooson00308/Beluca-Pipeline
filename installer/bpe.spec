@@ -122,6 +122,8 @@ hiddenimports = [
     "bpe.core.win_subprocess",
     "bpe.gui",
     "bpe.shotgrid",
+    "bpe.core.ai_qc",
+    "bpe.gui.widgets.ai_qc_dialog",
 ]
 hiddenimports += list(_ps6_hidden)
 

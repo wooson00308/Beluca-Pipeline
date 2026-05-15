@@ -1,5 +1,7 @@
 """Feedback video preview: Qt Multimedia smooth playback, FFmpeg frame fallback."""
 
+# @cursor-change: 2026-05-14, 0.2.1, current_media_path 추가 — AI QC 등 경로 단일 소스화
+
 from __future__ import annotations
 
 import json
@@ -526,6 +528,10 @@ class VideoPlayerWidget(QWidget):
     @property
     def annotation_overlay(self) -> AnnotationOverlay:
         return self._overlay
+
+    def current_media_path(self) -> str:
+        """로드된 미디어 로컬 파일 경로(정규화). 없거나 아직 클리어됨이면 빈 문자열."""
+        return (self._path or "").strip()
 
     def set_feedback_frame_start(self, start: int) -> None:
         """MOV index 0 is shown as *start* (e.g. 1001)."""
@@ -1365,6 +1371,10 @@ class VideoPlayerWidget(QWidget):
             self._slider_block_position = False
         elif self._preview_mode == _PreviewMode.FFMPEG_FRAMES:
             self._seek_frame(int(value), force=True)
+
+    def seek_to_frame_index(self, idx: int) -> None:
+        """Public wrapper — 지정한 0-based 프레임 인덱스로 이동."""
+        self._seek_frame(int(idx))
 
     def _seek_frame(self, idx: int, *, force: bool = False) -> None:
         if not self._path:

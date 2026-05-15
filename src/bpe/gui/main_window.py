@@ -1,3 +1,4 @@
+# @cursor-change: 2026-05-15, 0.8.22, F5 단축키로 마이테스크·매니저(피드백) 새로고침
 """Main window — sidebar navigation + stacked tab pages."""
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from PySide6.QtCore import Qt, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -106,6 +107,10 @@ class MainWindow(QMainWindow):
         root.addWidget(self._stack, 1)
 
         self._switch_tab("my_tasks")
+
+        f5_refresh = QShortcut(QKeySequence(Qt.Key.Key_F5), self)
+        f5_refresh.setContext(Qt.ShortcutContext.WindowShortcut)
+        f5_refresh.activated.connect(self._on_f5_refresh)
 
         # ── Update check ──
         self._update_info: Any = None
@@ -404,6 +409,7 @@ Remove-Item -LiteralPath $Ps1Path -Force -ErrorAction SilentlyContinue
         from bpe.gui.widgets.lock_overlay import LockOverlay
 
         manager_tab = ManagerTab()
+        self._manager_tab = manager_tab
         lock_overlay = LockOverlay()
         lock_overlay.unlocked.connect(self._on_preset_unlocked)
         preset_stack = QStackedWidget()
@@ -411,7 +417,8 @@ Remove-Item -LiteralPath $Ps1Path -Force -ErrorAction SilentlyContinue
         preset_stack.addWidget(manager_tab)
         self._preset_stack = preset_stack
 
-        self._tab_pages["my_tasks"] = MyTasksTab()
+        self._my_tasks_tab = MyTasksTab()
+        self._tab_pages["my_tasks"] = self._my_tasks_tab
         self._tab_pages["presets"] = preset_stack
         self._tab_pages["tools"] = ToolsTab()
 
@@ -435,3 +442,10 @@ Remove-Item -LiteralPath $Ps1Path -Force -ErrorAction SilentlyContinue
             btn.setProperty("selected", k == key)
             btn.style().unpolish(btn)
             btn.style().polish(btn)
+
+    def _on_f5_refresh(self) -> None:
+        current = self._stack.currentWidget()
+        if current is self._tab_pages.get("my_tasks"):
+            self._my_tasks_tab.trigger_refresh()
+        elif current is self._tab_pages.get("presets") and self._preset_unlocked:
+            self._manager_tab.trigger_refresh()

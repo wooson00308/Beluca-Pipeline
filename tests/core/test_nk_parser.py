@@ -10,6 +10,8 @@ from bpe.core.nk_parser import (
     _PRESET_DEFAULTS,
     _extract_all_blocks,
     _find_named_block,
+    extract_first_read_file_path,
+    extract_first_read_file_path_from_script,
     get_knob,
     merge_nk_preserve_root_template,
     merge_nodetree_content,
@@ -469,3 +471,22 @@ class TestParseNkFileExtended:
         assert "fps 24" in out
         assert "R1" in out
         assert "W1" not in out
+
+
+class TestExtractFirstReadFilePath:
+    """AI QC — NK 에서 첫 Read file 경로."""
+
+    def test_from_script_read_plate_preferred(self) -> None:
+        nk = (
+            'Read {\n name Read2\n file "W:/other/foo.exr"\n}\n'
+            'Read {\n name Read_Plate\n file "W:/plate/shot.%04d.exr"\n}\n'
+        )
+        path = extract_first_read_file_path_from_script(nk)
+        assert path == "W:/plate/shot.%04d.exr"
+
+    def test_via_file_when_no_named(self, tmp_path: Path) -> None:
+        nk = 'Read {\n name R1\n file "D:/seq/test.mov"\n}\n'
+        p = tmp_path / "shot.nk"
+        p.write_text(nk, encoding="utf-8")
+        path = extract_first_read_file_path(str(p))
+        assert path == "D:/seq/test.mov"

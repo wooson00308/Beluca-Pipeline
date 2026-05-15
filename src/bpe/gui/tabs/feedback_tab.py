@@ -1,3 +1,4 @@
+# @cursor-change: 2026-05-15, 0.8.22, F5 새로고침용 trigger_refresh 추가
 """Feedback / review tab — SV·TM queue, FFmpeg preview, annotations, ShotGrid Notes."""
 
 from __future__ import annotations
@@ -229,7 +230,6 @@ class FeedbackTab(QWidget):
         self._submit_busy = False
         self._notes_req_id = 0
         self._notes_attach_seq = 0
-        self._current_mov_path: str = ""
         self._submit_btn_default_text = ""
         self._ann_by_frame: Dict[int, List[Dict[str, Any]]] = {}
         self._tracked_frame_idx: Optional[int] = None
@@ -418,6 +418,26 @@ class FeedbackTab(QWidget):
         vvh.setSpacing(4)
         ann_actions = QHBoxLayout()
         ann_actions.setContentsMargins(0, 0, 0, 0)
+        _ann_act_w = max(28, round(40 * _FB_ICON_SCALE))
+        _ann_act_h = max(26, round(36 * _FB_ICON_SCALE))
+        # AI QC 버튼 — 왼쪽 끝, stretch 로 드로잉 툴과 시각 분리
+        self._btn_ai_qc = QToolButton()
+        self._btn_ai_qc.setText("AI QC")
+        self._btn_ai_qc.setToolTip("현재 영상을 AI가 분석해 합성 품질 이슈를 찾습니다")
+        self._btn_ai_qc.setAutoRaise(False)
+        self._btn_ai_qc.setProperty("primary", True)
+        self._btn_ai_qc.setFixedSize(_ann_act_w * 2, _ann_act_h)
+        self._btn_ai_qc.setEnabled(False)
+        self._btn_ai_qc.setStyleSheet(
+            f"QToolButton {{ color: #FF9F0A; font-weight: bold; "
+            f"font-size: {theme.FONT_SIZE_SMALL}px; "
+            f"border: 2px solid #FF9F0A; border-radius: 6px; background: transparent; }}"
+            f"QToolButton:hover {{ background: #FF9F0A33; }}"
+            f"QToolButton:disabled {{ color: {theme.TEXT_DIM}; border-color: {theme.BORDER}; "
+            f"font-weight: normal; }}"
+        )
+        self._btn_ai_qc.clicked.connect(self._on_ai_qc_clicked)
+        ann_actions.addWidget(self._btn_ai_qc)
         ann_actions.addStretch(1)
         self._btn_feedback_undo = QToolButton()
         self._btn_feedback_undo.setIcon(
@@ -426,8 +446,6 @@ class FeedbackTab(QWidget):
         self._btn_feedback_undo.setIconSize(QSize(FEEDBACK_PANEL_ICON_PX, FEEDBACK_PANEL_ICON_PX))
         self._btn_feedback_undo.setToolTip("실행 취소 (주석 한 단계)")
         self._btn_feedback_undo.setAutoRaise(True)
-        _ann_act_w = max(28, round(40 * _FB_ICON_SCALE))
-        _ann_act_h = max(26, round(36 * _FB_ICON_SCALE))
         self._btn_feedback_undo.setFixedSize(_ann_act_w, _ann_act_h)
         self._btn_feedback_undo.clicked.connect(self._video.annotation_overlay.undo_last)
         _undo_fx = QGraphicsOpacityEffect(self._btn_feedback_undo)
@@ -1224,6 +1242,7 @@ class FeedbackTab(QWidget):
             self._clear_per_frame_ann_state()
             self._video.set_feedback_project_selected(False)
             self._video.clear()
+            self._update_ai_qc_btn_state()
             return
         self._video.set_feedback_project_selected(True)
         self._task_status_lbl.setText("조회 중…")
@@ -1241,6 +1260,10 @@ class FeedbackTab(QWidget):
         w.error.connect(lambda e, q=req: self._on_tasks_load_error(e, q))
         w.start()
         self._workers.append(w)
+
+    def trigger_refresh(self) -> None:
+        """F5: 프로젝트·필터·선택 유지한 채 피드백 큐 재조회."""
+        self._reload_tasks()
 
     def _on_tasks_load_error(self, err: str, req: int) -> None:
         if req != self._list_req_id:
@@ -1272,6 +1295,7 @@ class FeedbackTab(QWidget):
             self._selected_version_code = ""
             self._clear_per_frame_ann_state()
             self._video.clear()
+            self._update_ai_qc_btn_state()
             for c in self._shot_cards:
                 c.setStyleSheet("")
             return
@@ -1283,6 +1307,7 @@ class FeedbackTab(QWidget):
         self._selected_version_code = ""
         self._clear_per_frame_ann_state()
         self._video.clear()
+        self._update_ai_qc_btn_state()
 
     def _clear_cards(self) -> None:
         for c in self._shot_cards:
@@ -1707,6 +1732,7 @@ class FeedbackTab(QWidget):
         if not task:
             self._clear_per_frame_ann_state()
             self._video.clear()
+            self._update_ai_qc_btn_state()
             return
         shot = (task.get("shot_code") or "").strip()
         proj = _effective_project_for_paths(task)
@@ -1717,11 +1743,13 @@ class FeedbackTab(QWidget):
         if not shot or not proj:
             self._clear_per_frame_ann_state()
             self._video.clear()
+            self._update_ai_qc_btn_state()
             return
 
         if not root:
             self._clear_per_frame_ann_state()
             self._video.clear()
+            self._update_ai_qc_btn_state()
             QMessageBox.warning(
                 self,
                 "서버 루트 없음",
@@ -1736,7 +1764,7 @@ class FeedbackTab(QWidget):
         vid = self._video_req_id
         self._clear_per_frame_ann_state()
         self._video.clear()
-        self._current_mov_path = ""
+        self._update_ai_qc_btn_state()
         self._sync_shot_card_primary_titles()
 
         snap = dict(task)
@@ -1761,6 +1789,7 @@ class FeedbackTab(QWidget):
             if not isinstance(result, tuple) or len(result) != 3 or not isinstance(result[1], list):
                 self._clear_per_frame_ann_state()
                 self._video.clear()
+                self._update_ai_qc_btn_state()
                 return
             path_str: Optional[str] = result[0]  # type: ignore[assignment]
             tried_lines: List[str] = result[1]  # type: ignore[assignment]
@@ -1779,10 +1808,11 @@ class FeedbackTab(QWidget):
                     "• 파일 이름에 버전 코드가 포함되는지\n\n"
                     f"진단:\n{detail}",
                 )
+                self._update_ai_qc_btn_state()
                 return
             ok = self._video.load_mov(path_str)
             self._video.set_feedback_frame_start(get_feedback_frame_start())
-            self._current_mov_path = path_str
+            self._update_ai_qc_btn_state()
             self._apply_mov_name_to_selected_shot_card(path_str)
             self._video.set_clip_footer_text(Path(path_str).name)
             self._refresh_header_labels(path_str)
@@ -1812,9 +1842,132 @@ class FeedbackTab(QWidget):
             return
         self._clear_per_frame_ann_state()
         self._video.clear()
-        self._current_mov_path = ""
+        self._update_ai_qc_btn_state()
         self._sync_shot_card_primary_titles()
         QMessageBox.warning(self, "영상 경로", str(msg))
+
+    # ── AI QC ─────────────────────────────────────────────────────────────────
+
+    def _ai_qc_resolved_mov_path(self) -> str:
+        """VideoPlayer 와 동일 기준 로컬 경로 — 디스크에 파일이 있을 때만 허용."""
+        p = self._video.current_media_path().strip()
+        return p if p and Path(p).is_file() else ""
+
+    def _update_ai_qc_btn_state(self) -> None:
+        """AI QC 버튼: 플레이어가 실재 파일 경로를 잡았을 때만 활성화."""
+        resolved = self._ai_qc_resolved_mov_path()
+        enabled = bool(resolved)
+        self._btn_ai_qc.setEnabled(enabled)
+
+    def _prefetch_notes_for_ai_qc_banner(self, shot_id: Optional[int]) -> List[Dict[str, Any]]:
+        """AI QC 설정 화면 배너용 — SG 노트 몇 줄만 동기 조회."""
+        if shot_id is None:
+            return []
+        try:
+            sg = get_default_sg()
+            return list_notes_for_shots(sg, [int(shot_id)], limit=3, days_back=60)
+        except Exception:
+            return []
+
+    def _plate_path_from_nk_for_ai_qc(self) -> str:
+        """현재 선택 샷 최신 NK → 첫 Read 의 file 노브 경로 (드라이브 정규화)."""
+        task = self._selected_task
+        if not task:
+            return ""
+        shot = (task.get("shot_code") or "").strip()
+        proj = _effective_project_for_paths(task)
+        root = self._server_root_for_task(task)
+        if not shot or not proj or not root:
+            return ""
+        from bpe.core.nk_finder import find_latest_nk_path
+        from bpe.core.nk_parser import extract_first_read_file_path
+
+        nk = find_latest_nk_path(shot, proj, root)
+        if nk is None or not nk.is_file():
+            return ""
+        raw = extract_first_read_file_path(str(nk))
+        if not raw:
+            return ""
+        return normalize_path_str(raw.strip())
+
+    def _collect_sg_context(self) -> Optional[Dict[str, Any]]:
+        """현재 선택된 태스크에서 SG 컨텍스트 수집 (step_name, shot_id)."""
+        task = self._selected_task
+        if not task:
+            return None
+        step_name = ""
+        step = task.get("step")
+        if isinstance(step, dict):
+            step_name = (step.get("name") or "").strip()
+        elif isinstance(step, str):
+            step_name = step.strip()
+        if not step_name:
+            step_name = (task.get("step_name") or task.get("task_type") or "").strip()
+        shot_id = task.get("shot_id")
+        task_id = task.get("task_id")
+        return {
+            "step_name": step_name,
+            "shot_code": (task.get("shot_code") or "").strip(),
+            "shot_id": int(shot_id) if shot_id is not None else None,
+            "task_id": int(task_id) if task_id is not None else None,
+            "status_field": (task.get("status_field") or "sg_status_list"),
+            "notes": [],
+        }
+
+    def _on_ai_qc_clicked(self) -> None:
+        """AI QC 버튼 클릭 핸들러 — AiQcDialog 열기."""
+        mov_path = self._ai_qc_resolved_mov_path()
+        if not mov_path:
+            QMessageBox.warning(
+                self,
+                "AI QC",
+                "분석할 영상이 준비되지 않았습니다.\n"
+                "샷을 선택한 뒤 MOV가 로드될 때까지 기다린 후 다시 시도해 주세요.\n"
+                "(네트워크 렌더 경로 접근 또는 파일 존재 여부를 확인하세요.)",
+            )
+            return
+        from bpe.core.ai_qc import AiQcSettings
+        from bpe.core.settings import (
+            get_ai_qc_settings,
+            get_feedback_frame_start,
+            save_ai_qc_settings,
+        )
+        from bpe.gui.widgets.ai_qc_dialog import AiQcDialog
+
+        raw = get_ai_qc_settings()
+        ai_settings = AiQcSettings(
+            provider=raw.get("provider", "openai"),
+            api_key=raw.get("api_key", ""),
+            sample_count=raw.get("sample_count", 20),
+            model=raw.get("model", ""),
+            use_sg_context=raw.get("use_sg_context", True),
+            sg_notes_limit=raw.get("sg_notes_limit", 3),
+            last_plate_path=raw.get("last_plate_path", ""),
+        )
+        sg_ctx = self._collect_sg_context()
+        if sg_ctx:
+            sg_ctx["sg_notes_limit"] = ai_settings.sg_notes_limit
+            sid = sg_ctx.get("shot_id")
+            sg_ctx["prefetch_notes"] = self._prefetch_notes_for_ai_qc_banner(
+                int(sid) if sid is not None else None
+            )
+
+        dlg = AiQcDialog(
+            self,
+            mov_path=mov_path,
+            settings=ai_settings,
+            append_worker=self._workers.append,
+            video_widget=self._video,
+            comment_widget=self._comment,
+            sg_context=sg_ctx,
+            feedback_frame_start=get_feedback_frame_start(),
+            plate_from_nk_fn=self._plate_path_from_nk_for_ai_qc,
+        )
+        dlg.exec()
+
+        updated = dlg.get_updated_settings()
+        if updated:
+            save_ai_qc_settings(updated)
 
     def _submit_note(self) -> None:
         if self._submit_busy:

@@ -368,6 +368,9 @@ class PublishTab(QWidget):
         description = self._desc_edit.toPlainText().strip()
         mov_path = self._mov_path
 
+        # status_code를 publish 시점에 읽어 Version 생성과 Task 업데이트 모두에 사용
+        status_code = parse_task_status_selection(self._status_combo.currentText())
+
         self._publish_in_flight = True
         self._timelog_phase_done = False
         self._publish_btn.setEnabled(False)
@@ -388,6 +391,7 @@ class PublishTab(QWidget):
                 version_name=version_name,
                 description=description,
                 artist_id=user_id,
+                sg_status=status_code,
             )
 
         w = ShotGridWorker(_create)
@@ -420,9 +424,9 @@ class PublishTab(QWidget):
     def _on_upload_done(self, version_id: int) -> None:
         self._set_progress(92, "Task 상태 업데이트 중...")
         self._log_msg(f"MOV 업로드 완료! (Version #{version_id})")
-        self._update_task_status()
+        self._update_task_status(version_id)
 
-    def _update_task_status(self) -> None:
+    def _update_task_status(self, version_id: Optional[int] = None) -> None:
         status_sel = self._status_combo.currentText()
         status_code = parse_task_status_selection(status_sel)
         task_id = self._task_data.get("task_id")

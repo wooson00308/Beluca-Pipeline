@@ -289,6 +289,32 @@ def parse_nk_file(nk_path: str) -> Dict[str, Any]:
     return result
 
 
+def extract_first_read_file_path_from_script(content: str) -> Optional[str]:
+    """NK 본문에서 선호 순서로 첫 Read 노드의 ``file`` 경로 문자열 반환."""
+    rb_read = (
+        _find_named_block(content, "Read", "Read4")
+        or _find_named_block(content, "Read", "Read_Plate")
+        or _find_named_block(content, "Read", "Read5")
+    )
+    if not rb_read:
+        all_reads = _extract_all_blocks(content, "Read")
+        rb_read = all_reads[0] if all_reads else None
+    if not rb_read:
+        return None
+    fp = get_knob(rb_read, "file")
+    out = fp.strip() if fp else ""
+    return out or None
+
+
+def extract_first_read_file_path(nk_path: str) -> Optional[str]:
+    """``.nk`` 파일에서 첫 Read 노드 ``file`` 경로를 추출한다. 실패 시 ``None``."""
+    try:
+        content = Path(nk_path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    return extract_first_read_file_path_from_script(content)
+
+
 # Default values used when NK analysis misses a field.
 _PRESET_DEFAULTS: Dict[str, Any] = {
     "project_type": "드라마(OTT)",
