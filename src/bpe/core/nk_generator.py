@@ -621,11 +621,25 @@ def _scan_plate_frame_range(plate_hi: Path) -> Optional[Tuple[int, int]]:
                     continue
                 n = _count_mov_frames(p)
                 if n is not None and n > 0:
-                    last = _DEFAULT_FRAME_FIRST + n - 1
-                    return (_DEFAULT_FRAME_FIRST, last)
+                    # MOV/비디오 파일은 Nuke에서 1번 프레임부터 시작
+                    return (1, n)
     except OSError:
         return None
     return None
+
+
+def _to_project_frame_range(first_fr: int, last_fr: int) -> Tuple[int, int]:
+    """플레이트 범위를 NK 프로젝트(Root) 용 1001 기준 범위로 변환한다.
+
+    EXR/DPX 시퀀스처럼 이미 1001+ 범위면 그대로 반환.
+    MOV처럼 1 기준 범위면 1001 기준으로 올린다.
+    예) (1, 81) → (1001, 1081)
+        (1001, 1022) → (1001, 1022)  # 변화 없음
+    """
+    if first_fr >= _DEFAULT_FRAME_FIRST:
+        return (first_fr, last_fr)
+    n_frames = last_fr - first_fr + 1
+    return (_DEFAULT_FRAME_FIRST, _DEFAULT_FRAME_FIRST + n_frames - 1)
 
 
 def _read_file_path_from_inner(inner: str) -> Optional[str]:
@@ -863,6 +877,10 @@ def _patch_write2_from_preset(body: str, preset_data: Dict[str, Any]) -> Tuple[s
         new_body = body[:blk_start] + f"Write {{{new_inner}}}" + body[blk_end:]
         return new_body, True
 
+    # Write2 블록이 전혀 없는 템플릿 → 패치 불필요, 경고 없이 성공 반환
+    if not re.search(r"(?m)^ name Write2\s*$", body):
+        return body, True
+
     # --- Regex fallback ---
     pattern = re.compile(
         r'(Write \{\n file "[^"]+"\n file_type exr\n autocrop true\n)'
@@ -1051,6 +1069,7 @@ def _generate_nk_minimal(
     fmt_str = f"{width} {height} 0 0 {width} {height} 1 {format_name}"
     fr = _scan_plate_frame_range(paths["plate_hi"])
     first_fr, last_fr = fr if fr else (_DEFAULT_FRAME_FIRST, _DEFAULT_FRAME_LAST)
+    proj_first, proj_last = _to_project_frame_range(first_fr, last_fr)
     lines = [
         "set cut_paste_input [stack 0]",
         "version 14.1 v4",
@@ -1058,8 +1077,8 @@ def _generate_nk_minimal(
         " inputs 0",
         f" fps {fps}",
         f' format "{fmt_str}"',
-        f" first_frame {first_fr}",
-        f" last_frame {last_fr}",
+        f" first_frame {proj_first}",
+        f" last_frame {proj_last}",
         *(
             [
                 " colorManagement OCIO",
@@ -1215,8 +1234,11 @@ def generate_nk_content(
 
     fr = _scan_plate_frame_range(paths["plate_hi"])
     first_fr, last_fr = fr if fr else (_DEFAULT_FRAME_FIRST, _DEFAULT_FRAME_LAST)
+    # 프로젝트 범위: 항상 1001 기준 (MOV plate는 1 기준이지만 NK 작업은 1001부터)
+    proj_first, proj_last = _to_project_frame_range(first_fr, last_fr)
 
     body = _patch_viewer_fps(body, fps)
+    # 플레이트 Read 노드: 실제 파일 포맷 기준 (MOV → 1~N, EXR → 1001~)
     body = _patch_read_frame_range(body, first_fr, last_fr)
     if fr is None:
         warnings.append(
@@ -1226,13 +1248,14 @@ def generate_nk_content(
 
     # Root block override (inserted after version line)
     # ocio_path 가 비어 있으면 OCIO 줄 생략 (빈 customOCIOConfigPath 로 Nuke 오류 방지)
+    # NK 프로젝트 범위는 항상 1001 기준 (플레이트가 MOV여도 동일)
     root_block = (
         "Root {\n"
         " inputs 0\n"
         f" fps {fps}\n"
         f' format "{fmt_str}"\n'
-        f" first_frame {first_fr}\n"
-        f" last_frame {last_fr}\n"
+        f" first_frame {proj_first}\n"
+        f" last_frame {proj_last}\n"
         f"{ocio_root_tail}"
         "}\n"
     )
@@ -1247,7 +1270,7 @@ def generate_nk_content(
         insert_pos = (second_nl + 1) if second_nl != -1 else 0
 
     final_body = body[:insert_pos] + root_block + body[insert_pos:]
-    final_body = _patch_all_root_frame_range(final_body, first_fr, last_fr)
+    final_body = _patch_all_root_frame_range(final_body, proj_first, proj_last)
     warnings.extend(_template_sample_path_warnings(final_body))
     return final_body, warnings
 

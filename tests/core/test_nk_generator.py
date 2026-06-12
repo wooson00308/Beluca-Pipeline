@@ -289,7 +289,8 @@ class TestPlateFrameRangeAndEo7Strip:
         hi.mkdir()
         (hi / "p.mov").write_bytes(b"fake")
         with patch("bpe.core.nk_generator._count_mov_frames", return_value=74):
-            assert _scan_plate_frame_range(hi) == (1001, 1074)
+            # MOV 파일은 Nuke에서 1번 프레임부터 시작 → (1, n)
+            assert _scan_plate_frame_range(hi) == (1, 74)
 
     def test_scan_plate_frame_range(self, tmp_path):
         hi = tmp_path / "plate" / "org" / "v001" / "hi"

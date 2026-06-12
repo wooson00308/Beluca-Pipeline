@@ -258,6 +258,14 @@ class PresetTab(QWidget):
         )
         red_lay.addWidget(self._hint_lbl)
 
+        suffix_hint = QLabel(
+            "같은 프로젝트 변형 프리셋은 '프로젝트코드_접미사' 형식으로 저장하세요 "
+            "(예: SHWEQ_023_AI). Shot Builder에서 자동으로 묶어서 선택할 수 있습니다."
+        )
+        suffix_hint.setWordWrap(True)
+        suffix_hint.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: {theme.FONT_SIZE_SMALL}px;")
+        red_lay.addWidget(suffix_hint)
+
         self._dup_lbl = QLabel("")
         self._dup_lbl.setWordWrap(True)
         self._dup_lbl.setVisible(False)

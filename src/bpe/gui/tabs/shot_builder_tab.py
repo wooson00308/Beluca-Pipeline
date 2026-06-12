@@ -11,6 +11,8 @@ from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -26,7 +28,7 @@ from PySide6.QtWidgets import (
 from bpe.core.nk_finder import find_nukex_exe_and_args, find_server_root_auto
 from bpe.core.nk_generator import generate_nk_content
 from bpe.core.nuke_render_paths import normalize_path_str
-from bpe.core.presets import load_presets
+from bpe.core.presets import find_matching_preset_keys, load_presets
 from bpe.core.settings import get_shot_builder_settings, save_shot_builder_settings
 from bpe.core.shot_builder import (
     build_shot_paths,
@@ -51,6 +53,50 @@ def _resolve_preset_key(presets: Dict[str, Any], name: str) -> Optional[str]:
     for k in presets:
         if k.upper() == n.upper():
             return k
+    return None
+
+
+def _pick_preset_dialog(
+    parent: QWidget, preset_keys: List[str], project_code: str
+) -> Optional[str]:
+    """프리셋이 여러 개일 때 선택 다이얼로그를 띄우고 선택한 키를 반환한다.
+
+    취소 시 None 반환.
+    """
+    dlg = QDialog(parent)
+    dlg.setWindowTitle("프리셋 선택")
+    dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
+    dlg.setMinimumWidth(420)
+    dlg.setStyleSheet(f"QDialog {{ background: {theme.BG}; color: {theme.TEXT}; }}")
+
+    layout = QVBoxLayout(dlg)
+    layout.setContentsMargins(24, 24, 24, 24)
+    layout.setSpacing(16)
+
+    desc = QLabel(
+        f"<b>{project_code}</b> 프로젝트에 맞는 프리셋이 여러 개입니다.<br>"
+        "NK에 적용할 프리셋을 선택하세요.<br>"
+        "<span style='color: gray; font-size: 11px;'>"
+        "서버 폴더 경로는 ShotGrid 프로젝트 코드를 사용합니다.</span>"
+    )
+    desc.setWordWrap(True)
+    desc.setTextFormat(Qt.TextFormat.RichText)
+    layout.addWidget(desc)
+
+    combo = QComboBox()
+    combo.addItems(preset_keys)
+    combo.setCurrentIndex(0)
+    layout.addWidget(combo)
+
+    buttons = QDialogButtonBox(
+        QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+    )
+    buttons.accepted.connect(dlg.accept)
+    buttons.rejected.connect(dlg.reject)
+    layout.addWidget(buttons)
+
+    if dlg.exec() == QDialog.DialogCode.Accepted:
+        return combo.currentText()
     return None
 
 
@@ -376,16 +422,38 @@ class ShotBuilderTab(QWidget):
         shot_display = parsed["full"]
 
         presets = load_presets()
-        preset_key = _resolve_preset_key(presets, preset_name)
-        if preset_key is None:
-            self._log.appendPlainText(f"[오류] 프리셋 '{preset_name}'을(를) 찾을 수 없습니다.")
-            return
+
+        if self._auto_mode:
+            # 자동 모드: project_code 기준으로 매칭되는 프리셋 목록 탐색
+            # folder_code는 서버 폴더명 고정 (= ShotGrid project_code)
+            folder_code = preset_name
+            matches = find_matching_preset_keys(presets, folder_code)
+            if not matches:
+                self._log.appendPlainText(f"[오류] 프리셋 '{preset_name}'을(를) 찾을 수 없습니다.")
+                return
+            if len(matches) == 1:
+                preset_key: Optional[str] = matches[0]
+            else:
+                preset_key = _pick_preset_dialog(self, matches, preset_name)
+                if preset_key is None:
+                    self._log.appendPlainText(
+                        "[취소] 프리셋을 선택하지 않아 NK를 생성하지 않았습니다."
+                    )
+                    return
+        else:
+            # 수동 모드: 기존 동작 유지 (콤보박스에서 직접 선택한 값)
+            folder_code = preset_name
+            preset_key = _resolve_preset_key(presets, preset_name)
+            if preset_key is None:
+                self._log.appendPlainText(f"[오류] 프리셋 '{preset_name}'을(를) 찾을 수 없습니다.")
+                return
+
         preset_data = presets[preset_key]
         if not isinstance(preset_data, dict):
             self._log.appendPlainText(f"[오류] 프리셋 '{preset_key}' 데이터가 올바르지 않습니다.")
             return
 
-        paths = build_shot_paths(server_root, preset_key, shot_name)
+        paths = build_shot_paths(server_root, folder_code, shot_name)
         if paths is None:
             self._log.appendPlainText("[오류] 경로를 생성할 수 없습니다.")
             return

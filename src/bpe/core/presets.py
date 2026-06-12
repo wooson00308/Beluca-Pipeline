@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import bpe.core.config as cfg
 from bpe.core.atomic_io import atomic_write_text, write_json_file
@@ -62,6 +62,29 @@ def save_presets(data: Dict[str, Any]) -> None:
     """Save all presets atomically."""
     ensure_store()
     write_json_file(_preset_file(), data)
+
+
+def find_matching_preset_keys(presets: Dict[str, Any], project_code: str) -> List[str]:
+    """주어진 project_code에 대응하는 프리셋 키 목록을 반환한다.
+
+    매칭 규칙:
+      - 키가 project_code와 대소문자 무시 정확 일치, 또는
+      - 키가 ``project_code_`` 로 시작 (언더스코어 경계로 오매칭 방지)
+
+    예) project_code='shweq_023' → ['SHWEQ_023', 'SHWEQ_023_AI'] 매칭
+        'SHWEQ_0234'는 매칭 안 됨 (언더스코어 없이 이어지므로)
+
+    반환값은 정확 일치 항목을 앞에 두고 나머지는 알파벳 순으로 정렬한다.
+    """
+    pc = (project_code or "").strip().upper()
+    if not pc:
+        return []
+    result: List[str] = []
+    for k in presets:
+        ku = k.upper()
+        if ku == pc or ku.startswith(pc + "_"):
+            result.append(k)
+    return sorted(result, key=lambda k: (k.upper() != pc, k.upper()))
 
 
 def get_preset(name: str) -> Optional[Dict[str, Any]]:

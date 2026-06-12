@@ -8,6 +8,7 @@ from bpe.core.presets import (
     delete_preset,
     delete_preset_template,
     ensure_store,
+    find_matching_preset_keys,
     get_preset,
     load_preset_template,
     load_presets,
@@ -53,6 +54,58 @@ def test_delete_preset(tmp_app_dir: Path) -> None:
 
 def test_get_nonexistent(tmp_app_dir: Path) -> None:
     assert get_preset("NOPE") is None
+
+
+class TestFindMatchingPresetKeys:
+    """find_matching_preset_keys 매칭 규칙 검증."""
+
+    def test_exact_match_only(self) -> None:
+        presets = {"SHWEQ_023": {}, "OTHER_001": {}}
+        assert find_matching_preset_keys(presets, "shweq_023") == ["SHWEQ_023"]
+
+    def test_exact_and_suffix(self) -> None:
+        presets = {"SHWEQ_023": {}, "SHWEQ_023_AI": {}, "OTHER_001": {}}
+        result = find_matching_preset_keys(presets, "shweq_023")
+        # 정확 일치가 앞에, 나머지는 알파벳 순
+        assert result == ["SHWEQ_023", "SHWEQ_023_AI"]
+
+    def test_suffix_only_no_exact(self) -> None:
+        presets = {"SHWEQ_023_AI": {}, "SHWEQ_023_VFX": {}}
+        result = find_matching_preset_keys(presets, "SHWEQ_023")
+        assert result == ["SHWEQ_023_AI", "SHWEQ_023_VFX"]
+
+    def test_no_underscore_boundary_prevents_overmatch(self) -> None:
+        # SHWEQ_0234 는 SHWEQ_023_으로 시작하지 않으므로 매칭 안 됨
+        presets = {"SHWEQ_0234": {}, "SHWEQ_023": {}}
+        result = find_matching_preset_keys(presets, "shweq_023")
+        assert result == ["SHWEQ_023"]
+
+    def test_different_project_not_matched(self) -> None:
+        presets = {"MVK_028": {}, "MVK_028_AI": {}, "SBS_030": {}}
+        result = find_matching_preset_keys(presets, "SBS_030")
+        assert result == ["SBS_030"]
+
+    def test_empty_project_code(self) -> None:
+        presets = {"SHWEQ_023": {}}
+        assert find_matching_preset_keys(presets, "") == []
+        assert find_matching_preset_keys(presets, "   ") == []
+
+    def test_empty_presets(self) -> None:
+        assert find_matching_preset_keys({}, "SHWEQ_023") == []
+
+    def test_case_insensitive_matching(self) -> None:
+        presets = {"SHWEQ_023": {}, "SHWEQ_023_AI": {}}
+        # 소문자 project_code도 매칭
+        assert find_matching_preset_keys(presets, "shweq_023") == [
+            "SHWEQ_023",
+            "SHWEQ_023_AI",
+        ]
+
+    def test_exact_match_is_first_even_if_multiple_suffixes(self) -> None:
+        presets = {"PROJ_A": {}, "PROJ_A_AI": {}, "PROJ_A_VFX": {}}
+        result = find_matching_preset_keys(presets, "PROJ_A")
+        assert result[0] == "PROJ_A"
+        assert set(result) == {"PROJ_A", "PROJ_A_AI", "PROJ_A_VFX"}
 
 
 def test_preset_template_lifecycle(tmp_app_dir: Path) -> None:
