@@ -66,7 +66,18 @@ def add_setup_pro_menu() -> None:
         "Tool Hooks 다시 불러오기  (BPE 앱 설정 적용)",
         "from bpe.nuke_plugin.tool_hooks import reload_tool_hooks; reload_tool_hooks()",
     )
+    tools_menu.addCommand(
+        "지금 QC 체크  (선택 Write 또는 전체)",
+        "from bpe.nuke_plugin.tool_hooks import run_qc_now; run_qc_now()",
+    )
     setup_menu.addCommand(
         "Tool Hooks 다시 불러오기",
         "from bpe.nuke_plugin.tool_hooks import reload_tool_hooks; reload_tool_hooks()",
     )
+
+    try:
+        from bpe.nuke_plugin.tool_hooks import reload_tool_hooks as _rth
+
+        _rth()
+    except Exception as _e:
+        nuke.tprint("[BPE Tools] 훅 자동 등록 실패: %s" % _e)

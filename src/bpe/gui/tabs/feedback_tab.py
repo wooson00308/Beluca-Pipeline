@@ -1,4 +1,4 @@
-# @cursor-change: 2026-05-15, 0.8.22, F5 새로고침용 trigger_refresh 추가
+# @cursor-change: 2026-05-15, 0.8.23, 피드백 CC UX·재생바 마커·팔레트 기본색 정렬
 """Feedback / review tab — SV·TM queue, FFmpeg preview, annotations, ShotGrid Notes."""
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from PySide6.QtCore import QPoint, QRect, QSize, Qt, QTimer, QUrl
+from PySide6.QtCore import QEvent, QObject, QPoint, QRect, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import (
     QColor,
     QDesktopServices,
@@ -236,6 +236,7 @@ class FeedbackTab(QWidget):
         self._restoring_feedback_overlay = False
 
         self._cc_users: List[Dict[str, Any]] = []
+        self._cc_click_filter_active = False
         self._cc_search_req_id = 0
         self._cc_search_timer = QTimer(self)
         self._cc_search_timer.setSingleShot(True)
@@ -250,6 +251,21 @@ class FeedbackTab(QWidget):
         self._submit_btn_default_text = self._submit_btn.text()
         self._video.frame_index_changed.connect(self._on_feedback_video_frame_changed)
         self._video.annotation_overlay.changed.connect(self._on_feedback_overlay_changed)
+        self._video.timeline_domain_changed.connect(self._sync_feedback_timeline_markers)
+
+    def eventFilter(self, _watched: QObject, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.MouseButtonPress and self._cc_dropdown.isVisible():
+            me = event
+            if isinstance(me, QMouseEvent) and me.button() == Qt.MouseButton.LeftButton:
+                gp = me.globalPosition().toPoint()
+                if self._cc_dropdown.frameGeometry().contains(gp):
+                    return False
+                inp_top_left = self._cc_input.mapToGlobal(QPoint(0, 0))
+                inp_geo = QRect(inp_top_left, self._cc_input.size())
+                if inp_geo.contains(gp):
+                    return False
+                self._hide_cc_dropdown()
+        return False
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -410,7 +426,7 @@ class FeedbackTab(QWidget):
         cl.addWidget(self._left_queue_header)
 
         self._tool_none.setChecked(True)
-        self._style_ann_palette_selection("#ffffff")
+        self._on_ann_palette_pick("#ff0000")
 
         self._video_host = QWidget()
         vvh = QVBoxLayout(self._video_host)
@@ -618,9 +634,10 @@ class FeedbackTab(QWidget):
         cc_row.addWidget(self._cc_tags_widget, 1)
         self._cc_input = _CcSearchLineEdit(self)
         self._cc_input.setPlaceholderText("이름 검색…")
-        self._cc_input.setMinimumWidth(120)
+        self._cc_input.setMinimumWidth(200)
         self._cc_input.textChanged.connect(self._on_cc_text_changed)
-        cc_row.addWidget(self._cc_input, 0)
+        self._cc_input.returnPressed.connect(self._on_cc_search_return)
+        cc_row.addWidget(self._cc_input, 1)
         pnl.addLayout(cc_row)
 
         self._cc_dropdown = QListWidget()
@@ -629,6 +646,7 @@ class FeedbackTab(QWidget):
         self._cc_dropdown.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._cc_dropdown.hide()
         self._cc_dropdown.itemClicked.connect(self._on_cc_user_picked)
+        self._cc_dropdown.itemActivated.connect(self._on_cc_user_picked)
         self._rebuild_cc_chips()
 
         _notes_sep = QFrame()
@@ -784,6 +802,57 @@ class FeedbackTab(QWidget):
 
     def _hide_cc_dropdown(self) -> None:
         self._cc_dropdown.hide()
+        if self._cc_click_filter_active:
+            app = QApplication.instance()
+            if app is not None:
+                app.removeEventFilter(self)
+            self._cc_click_filter_active = False
+
+    def _install_cc_outside_click_filter(self) -> None:
+        if self._cc_click_filter_active:
+            return
+        app = QApplication.instance()
+        if app is None:
+            return
+        app.installEventFilter(self)
+        self._cc_click_filter_active = True
+
+    def _position_cc_dropdown(self) -> None:
+        dropdown_h = self._cc_dropdown.height()
+        dropdown_w = self._cc_dropdown.width()
+        inp_tl_global = self._cc_input.mapToGlobal(QPoint(0, 0))
+        pt_below = self._cc_input.mapToGlobal(QPoint(0, self._cc_input.height()))
+
+        win = self.window()
+        fg = win.frameGeometry() if isinstance(win, QWidget) else QRect()
+
+        app = QApplication.instance()
+        screen = app.screenAt(pt_below) if app is not None else None
+        avail = screen.availableGeometry() if screen is not None else fg
+
+        if not fg.isNull():
+            left = max(avail.left(), fg.left())
+            top = max(avail.top(), fg.top())
+            right = min(avail.right(), fg.right())
+            bottom = min(avail.bottom(), fg.bottom())
+        else:
+            left, top, right, bottom = avail.left(), avail.top(), avail.right(), avail.bottom()
+
+        x = float(pt_below.x())
+        y = float(pt_below.y())
+
+        if y + dropdown_h > bottom:
+            y_above = float(inp_tl_global.y() - dropdown_h)
+            if y_above >= top:
+                y = y_above
+            else:
+                y = max(float(top), min(y, float(bottom) - float(dropdown_h)))
+
+        if x + dropdown_w > right:
+            x = max(float(left), float(right) - float(dropdown_w))
+        x = max(float(left), min(x, float(right) - float(dropdown_w)))
+
+        self._cc_dropdown.move(int(round(x)), int(round(y)))
 
     def _maybe_hide_cc_dropdown(self) -> None:
         if not self._cc_dropdown.isVisible():
@@ -859,9 +928,16 @@ class FeedbackTab(QWidget):
         self._cc_dropdown.setFixedHeight(max(h, 40))
         w = self._cc_input.width()
         self._cc_dropdown.setFixedWidth(max(w, 200))
-        pt = self._cc_input.mapToGlobal(QPoint(0, self._cc_input.height()))
-        self._cc_dropdown.move(pt)
+        self._position_cc_dropdown()
+        self._install_cc_outside_click_filter()
         self._cc_dropdown.show()
+
+    def _on_cc_search_return(self) -> None:
+        if not self._cc_dropdown.isVisible() or self._cc_dropdown.count() <= 0:
+            return
+        first = self._cc_dropdown.item(0)
+        if first is not None:
+            self._on_cc_user_picked(first)
 
     def _on_cc_user_picked(self, item: QListWidgetItem) -> None:
         data = item.data(Qt.ItemDataRole.UserRole)
@@ -1142,6 +1218,10 @@ class FeedbackTab(QWidget):
     def _clear_per_frame_ann_state(self) -> None:
         self._ann_by_frame.clear()
         self._tracked_frame_idx = None
+        self._video.set_feedback_markers_by_frame([])
+
+    def _sync_feedback_timeline_markers(self) -> None:
+        self._video.set_feedback_markers_by_frame(list(self._ann_by_frame.keys()))
 
     def _feedback_is_dirty(self) -> bool:
         if self._comment.toPlainText().strip():
@@ -1202,6 +1282,7 @@ class FeedbackTab(QWidget):
         )
         self._restoring_feedback_overlay = False
         self._tracked_frame_idx = idx
+        self._sync_feedback_timeline_markers()
 
     def _on_feedback_overlay_changed(self) -> None:
         if self._restoring_feedback_overlay:
@@ -1214,6 +1295,7 @@ class FeedbackTab(QWidget):
             self._ann_by_frame[idx] = snap
         else:
             self._ann_by_frame.pop(idx, None)
+        self._sync_feedback_timeline_markers()
 
     def _sync_current_frame_ann_to_dict(self) -> None:
         idx = self._tracked_frame_idx

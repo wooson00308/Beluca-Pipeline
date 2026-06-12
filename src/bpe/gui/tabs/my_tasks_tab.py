@@ -1,4 +1,4 @@
-# @cursor-change: 2026-05-15, 0.8.23, 마이테스크 폴더 열기 태스크별 경로(comp/devl·fx·matte)
+# @cursor-change: 2026-05-15, 0.8.23, 마이 태스크 Publish 버튼·다이얼로그 제목 영문
 """My Tasks tab — ShotGrid comp task list with thumbnails, NukeX open, shot folder."""
 
 from __future__ import annotations
@@ -644,7 +644,7 @@ class _ShotCard(QFrame):
         nuke_btn.clicked.connect(self._open_nk)
         btn_col.addWidget(nuke_btn)
 
-        publish_btn = QPushButton("퍼블리쉬")
+        publish_btn = QPushButton("Publish")
         publish_btn.setMinimumWidth(96)
         publish_btn.clicked.connect(self._on_publish)
         btn_col.addWidget(publish_btn)
@@ -3105,7 +3105,7 @@ class MyTasksTab(QWidget):
             user_name = _format_human_user_display(self._me_sg_user)
 
         dlg = QDialog(self)
-        dlg.setWindowTitle("퍼블리쉬")
+        dlg.setWindowTitle("Publish")
         dlg.setMinimumSize(1050, 880)
         dlg.resize(1100, 940)
 

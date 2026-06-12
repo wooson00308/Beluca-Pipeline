@@ -1,6 +1,6 @@
 """Feedback video preview: Qt Multimedia smooth playback, FFmpeg frame fallback."""
 
-# @cursor-change: 2026-05-14, 0.2.1, current_media_path 추가 — AI QC 등 경로 단일 소스화
+# @cursor-change: 2026-05-15, 0.8.23, 피드백 재생바 마커·ACCENT 슬라이더 스타일
 
 from __future__ import annotations
 
@@ -33,6 +33,8 @@ from PySide6.QtGui import (
     QKeyEvent,
     QMouseEvent,
     QPainter,
+    QPaintEvent,
+    QPen,
     QPixmap,
     QResizeEvent,
 )
@@ -42,6 +44,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QSlider,
+    QStyle,
+    QStyleOptionSlider,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -292,10 +296,60 @@ class _ExtractPngBytesThread(QThread):
         self.done.emit(extract_frame_png(self._path, self._frame_index, self._fps))
 
 
+class _FeedbackMarkerSlider(QSlider):
+    """Horizontal slider that draws thin ticks at marker positions (feedback frames)."""
+
+    def __init__(self, orientation: Qt.Orientation, parent: Optional[QWidget] = None) -> None:
+        super().__init__(orientation, parent)
+        self._marker_values: List[int] = []
+
+    def set_marker_values(self, values: List[int]) -> None:
+        self._marker_values = sorted({int(v) for v in values})
+        self.update()
+
+    def paintEvent(self, event: QPaintEvent) -> None:
+        super().paintEvent(event)
+        if not self._marker_values:
+            return
+        vmin = self.minimum()
+        vmax = self.maximum()
+        if vmax <= vmin:
+            return
+        opt = QStyleOptionSlider()
+        self.initStyleOption(opt)
+        groove = self.style().subControlRect(
+            QStyle.ComplexControl.CC_Slider,
+            opt,
+            QStyle.SubControl.SC_SliderGroove,
+            self,
+        )
+        if groove.width() <= 0:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QPen(QColor(theme.ERROR)))
+        span = float(vmax - vmin)
+        mid_y = groove.center().y()
+        half_h = max(3, min(7, groove.height() // 2 + 2))
+        top = mid_y - half_h
+        bottom = mid_y + half_h
+        gw = float(groove.width())
+        gl = float(groove.left())
+        for val in self._marker_values:
+            if val < vmin or val > vmax:
+                continue
+            frac = (float(val - vmin)) / span
+            x = gl + frac * gw
+            xi = int(round(x))
+            painter.drawLine(xi, int(top), xi, int(bottom))
+        painter.end()
+
+
 class VideoPlayerWidget(QWidget):
     """QMediaPlayer + QVideoSink QLabel preview with AnnotationOverlay; FFmpeg fallback."""
 
     frame_index_changed = Signal(int)
+    timeline_domain_changed = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -391,7 +445,7 @@ class VideoPlayerWidget(QWidget):
         self._host.installEventFilter(self)
         self._overlay.installEventFilter(self)
 
-        self._slider = QSlider(Qt.Orientation.Horizontal)
+        self._slider = _FeedbackMarkerSlider(Qt.Orientation.Horizontal)
         self._slider.setTracking(True)
         self._slider.setMinimum(0)
         self._slider.setMaximum(0)
@@ -399,6 +453,14 @@ class VideoPlayerWidget(QWidget):
         self._slider.sliderMoved.connect(self._on_slider_moved)
         self._slider.sliderReleased.connect(self._on_slider_released)
         self._slider.valueChanged.connect(self._on_slider_value_changed_user)
+        self._slider.setStyleSheet(
+            f"QSlider::groove:horizontal {{ background: {theme.INPUT_BG}; height: 4px; "
+            f"border-radius: 2px; }}"
+            f"QSlider::sub-page:horizontal {{ background: {theme.ACCENT}; height: 4px; "
+            f"border-radius: 2px; }}"
+            f"QSlider::handle:horizontal {{ background: {theme.ACCENT}; width: 14px; "
+            f"height: 14px; margin: -5px 0; border-radius: 7px; }}"
+        )
         root.addWidget(self._slider)
 
         ctl = QHBoxLayout()
@@ -536,6 +598,26 @@ class VideoPlayerWidget(QWidget):
     def set_feedback_frame_start(self, start: int) -> None:
         """MOV index 0 is shown as *start* (e.g. 1001)."""
         self._feedback_frame_start = max(0, int(start))
+
+    def set_feedback_markers_by_frame(self, frames: List[int]) -> None:
+        """Draw ticks on the seek bar at file-relative 0-based frame indices with annotations."""
+        if self._preview_mode == _PreviewMode.NONE:
+            self._slider.set_marker_values([])
+            return
+        tf = max(0, self._total_frames - 1)
+        vals: List[int] = []
+        seen = set()
+        for raw in frames:
+            fi = max(0, min(int(raw), tf))
+            if fi in seen:
+                continue
+            seen.add(fi)
+            if self._slider_is_ms:
+                vals.append(self._position_ms_for_frame_index(fi))
+            else:
+                vals.append(fi)
+        vals.sort()
+        self._slider.set_marker_values(vals)
 
     def current_frame_index(self) -> int:
         """0-based frame index within the file (FFmpeg mode exact; media mode approximate)."""
@@ -1034,6 +1116,7 @@ class VideoPlayerWidget(QWidget):
         self._info_lbl.setText("Qt 재생")
         append_feedback_log("mode_media", duration_ms=duration_ms)
         self._prime_first_frame_media()
+        self.timeline_domain_changed.emit()
 
     def _prime_first_frame_media(self) -> None:
         if self._preview_mode != _PreviewMode.MEDIA or not self._path:
@@ -1113,6 +1196,7 @@ class VideoPlayerWidget(QWidget):
         self._slider.blockSignals(False)
         self._info_lbl.setText("프레임 미리보기 모드")
         self._seek_frame(0, force=True)
+        self.timeline_domain_changed.emit()
 
     def clear(self) -> None:
         self._scrub_coalesce_timer.stop()
@@ -1134,6 +1218,7 @@ class VideoPlayerWidget(QWidget):
         self._apply_idle_display_message()
         self._display.show()
         self._slider.setMaximum(0)
+        self._slider.set_marker_values([])
         self._overlay.clear_all()
         self._view_zoom = 1.0
         self._view_pan_x = 0.0
@@ -1142,6 +1227,7 @@ class VideoPlayerWidget(QWidget):
         self._play_btn.setIcon(make_media_play_icon(FEEDBACK_MEDIA_CTL_ICON_PX, QColor(theme.TEXT)))
         self._last_emitted_frame_idx = None
         append_feedback_log("clear")
+        self.timeline_domain_changed.emit()
 
     def _extract_frame_png_bytes_async(self, frame_index: int) -> Optional[bytes]:
         """Run FFmpeg extract in a worker thread; keeps the GUI responsive."""

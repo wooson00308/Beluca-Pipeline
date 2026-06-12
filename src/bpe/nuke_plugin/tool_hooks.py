@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import nuke
 import nukescripts
 
 import bpe.core.config as cfg
+from bpe.core.logging import get_logger
 from bpe.core.nuke_render_paths import (
     normalize_path_str,
     normalize_unc_to_drive,
@@ -17,6 +18,8 @@ from bpe.core.nuke_render_paths import (
 )
 from bpe.core.presets import load_presets
 from bpe.core.settings import get_tools_settings, get_unc_mappings
+
+logger = get_logger("nuke_plugin.tool_hooks")
 
 # ══════════════════════════════════════════════════════════════════════
 # 공용 유틸리티
@@ -68,6 +71,88 @@ def _find_upstream_reads(node):
 
 # QC 승인 후 재실행되는 렌더를 식별하는 전역 상태
 _bpe_qc_approved: set = set()
+_bpe_qc_in_progress: set = set()
+_bpe_qc_panel_open: bool = False
+
+_SHOT_NAME_RE = re.compile(r"([A-Z]\d{2,4}_[A-Z]\d{2,4}_\d{3,5})", re.IGNORECASE)
+_PROJECT_YEAR_RE = re.compile(r"project_(\d{4})", re.IGNORECASE)
+_PROJECT_CODE_RE = re.compile(r"^[A-Z]{2,6}_\d{2,4}$", re.IGNORECASE)
+
+_EXR_FPS_KEYS = (
+    "input/frame_rate",
+    "input/fps",
+    "exr/nuke/fps",
+    "exr/framesPerSecond",
+    "exr/fps",
+    "nuke/fps",
+)
+_EXR_TIMECODE_KEYS = (
+    "input/timecode",
+    "exr/timeCode",
+    "timecode",
+    "exr/timecode",
+    "nuke/timecode",
+)
+_EXR_COLORSPACE_KEYS = (
+    "input/colorspace",
+    "exr/colorInteropID",
+    "exr/renderingTransform",
+    "exr/nuke/colorspace",
+    "exr/InputColorspace",
+    "nuke/colorspace",
+    "exr/colorSpace",
+    "exr/arri/Input Color Space",
+)
+
+_QC_SEP = "\u2500" * 54
+
+
+def _qc_log_info(msg: str, *args: Any) -> None:
+    """Script Editor + BPE 로그 파일에 QC 진행 상황 기록."""
+    try:
+        logger.info(msg, *args)
+    except Exception:
+        pass
+    try:
+        if args:
+            nuke.tprint("[BPE QC] " + (msg % args))
+        else:
+            nuke.tprint("[BPE QC] " + msg)
+    except Exception:
+        pass
+
+
+def _qc_log_warning(msg: str, *args: Any) -> None:
+    try:
+        logger.warning(msg, *args)
+    except Exception:
+        pass
+    try:
+        if args:
+            nuke.tprint("[BPE QC] WARNING: " + (msg % args))
+        else:
+            nuke.tprint("[BPE QC] WARNING: " + msg)
+    except Exception:
+        pass
+
+
+def _qc_log_error(msg: str, *args: Any, exc: Optional[BaseException] = None) -> None:
+    try:
+        if exc is not None:
+            logger.exception(msg, *args)
+        else:
+            logger.error(msg, *args)
+    except Exception:
+        pass
+    try:
+        if args:
+            nuke.tprint("[BPE QC] ERROR: " + (msg % args))
+        else:
+            nuke.tprint("[BPE QC] ERROR: " + msg)
+        if exc is not None:
+            nuke.tprint("[BPE QC] ERROR detail: %s" % exc)
+    except Exception:
+        pass
 
 
 def _guess_preset_from_script():
@@ -86,12 +171,231 @@ def _guess_preset_from_script():
     return None, None
 
 
-def collect_qc_data(write_node) -> dict:
-    """렌더 대상 Write 노드에서 QC에 필요한 정보를 수집한다."""
-    root = nuke.root()
-    data = {}
+def _score_and_pick_plate_read(all_reads: list, write_node) -> Tuple[Any, int]:
+    """점수 기반으로 플레이트 Read 노드를 선택한다."""
+    if not all_reads:
+        return None, 0
 
-    # Root 정보
+    try:
+        write_first = int(write_node["first"].value())
+        write_last = int(write_node["last"].value())
+        write_frames = write_last - write_first + 1
+    except Exception:
+        write_frames = None
+
+    scores: Dict[str, Tuple[int, Any]] = {}
+    for r in all_reads:
+        score = 0
+        path = _knob_value_safe(r, "file").lower().replace("\\", "/")
+
+        for kw in ("plate", "/org/", "raw", "/input/", "/src/", "originals"):
+            if kw in path:
+                score += 8
+                break
+
+        for kw in ("edit", "previs", "preview", "/ref/", "grade", "overlay", "lut"):
+            if kw in path:
+                score -= 8
+                break
+
+        ft = _knob_value_safe(r, "file_type", "fileType").lower()
+        if "exr" in ft or path.endswith(".exr"):
+            score += 3
+
+        try:
+            r_first = int(r["first"].value())
+            r_last = int(r["last"].value())
+            r_frames = r_last - r_first + 1
+            if r_frames <= 1:
+                score -= 10
+            else:
+                score += 5
+                if write_frames is not None:
+                    diff = abs(r_frames - write_frames)
+                    if diff == 0:
+                        score += 5
+                    elif diff <= 10:
+                        score += 2
+        except Exception:
+            pass
+
+        scores[r.name()] = (score, r)
+
+    if not scores:
+        return None, 0
+
+    best_name = max(scores, key=lambda k: scores[k][0])
+    best_score, best_node = scores[best_name]
+    return best_node, best_score
+
+
+def _parse_fps_from_meta_value(raw: Any) -> Optional[str]:
+    """EXR framesPerSecond Rational (n/d) 또는 float/str → 소수 FPS 문자열."""
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if "/" in s:
+        try:
+            num, den = s.split("/", 1)
+            val = float(num) / float(den)
+            if abs(val - 23.976) < 0.01:
+                return "23.976"
+            if abs(val - 29.97) < 0.01:
+                return "29.97"
+            if abs(val - 59.94) < 0.01:
+                return "59.94"
+            return f"{val:.3f}".rstrip("0").rstrip(".")
+        except (ValueError, ZeroDivisionError):
+            return s
+    try:
+        val = float(s)
+        return f"{val:.3f}".rstrip("0").rstrip(".")
+    except ValueError:
+        return s
+
+
+def _read_plate_exr_metadata(plate_read) -> dict:
+    """Nuke Read metadata knob에서 EXR 헤더 정보를 읽는다."""
+    result: Dict[str, Any] = {
+        "fps": None,
+        "timecode": None,
+        "colorspace": None,
+        "all_keys": [],
+        "error": None,
+    }
+    try:
+        mk = plate_read.knob("metadata")
+        if mk is None:
+            result["error"] = "metadata knob 없음"
+            return result
+
+        try:
+            raw = mk.value()
+            if isinstance(raw, dict):
+                meta = raw
+            else:
+                result["error"] = "metadata 타입 불명확"
+                return result
+        except Exception as e:
+            result["error"] = "metadata.value() 실패: %s" % e
+            return result
+
+        result["all_keys"] = list(meta.keys())[:30]
+
+        for key in _EXR_FPS_KEYS:
+            if key in meta:
+                result["fps"] = _parse_fps_from_meta_value(meta[key])
+                break
+
+        for key in _EXR_TIMECODE_KEYS:
+            if key in meta:
+                result["timecode"] = str(meta[key])
+                break
+
+        for key in _EXR_COLORSPACE_KEYS:
+            if key in meta:
+                result["colorspace"] = str(meta[key])
+                break
+
+    except Exception as e:
+        result["error"] = str(e)
+        _qc_log_warning("EXR 메타데이터 읽기 실패: %s", str(e))
+    return result
+
+
+def _find_plate_server_path(root_name: str) -> Tuple[Optional[str], Optional[str]]:
+    """root.name에서 샷 정보를 추출해 서버 plate 경로를 파생한다."""
+    if not root_name:
+        return None, "root.name이 비어 있습니다"
+
+    norm = root_name.replace("\\", "/")
+    parts = [p for p in norm.split("/") if p]
+
+    basename = parts[-1] if parts else ""
+    stem = os.path.splitext(basename)[0]
+    shot_m = _SHOT_NAME_RE.search(stem)
+    if not shot_m:
+        shot_m = _SHOT_NAME_RE.search(norm)
+    if not shot_m:
+        return None, "샷 이름 패턴을 찾을 수 없습니다 (파일명: %s)" % basename
+    shot_name = shot_m.group(1).upper()
+
+    project_code = None
+    for part in parts:
+        if _PROJECT_CODE_RE.match(part):
+            project_code = part.upper()
+            break
+    if not project_code:
+        return None, "경로에서 프로젝트 코드를 찾을 수 없습니다"
+
+    server_root = None
+    for i, part in enumerate(parts):
+        if _PROJECT_YEAR_RE.match(part):
+            if len(parts[0]) == 2 and parts[0][1] == ":":
+                server_root = parts[0] + "/" + "/".join(parts[1 : i + 1])
+            else:
+                server_root = "/".join(parts[: i + 1])
+            break
+    if not server_root:
+        return None, "서버 루트(project_YYYY)를 경로에서 찾을 수 없습니다"
+
+    try:
+        from bpe.core.shot_builder import build_shot_paths
+
+        paths = build_shot_paths(server_root, project_code, shot_name)
+    except Exception as e:
+        _qc_log_warning("build_shot_paths 실패 shot=%s project=%s: %s", shot_name, project_code, e)
+        return None, "build_shot_paths 실패: %s" % e
+
+    if not paths:
+        return None, "샷 경로 없음 (shot=%s, project=%s)" % (shot_name, project_code)
+
+    plate_org = paths["shot_root"] / "plate" / "org"
+    try:
+        if not plate_org.is_dir():
+            return None, "plate/org 폴더 없음: %s" % normalize_path_str(str(plate_org))
+    except OSError as e:
+        return None, "plate/org 접근 오류: %s" % e
+
+    try:
+        ver_dirs = sorted(
+            [
+                d
+                for d in plate_org.iterdir()
+                if d.is_dir() and re.match(r"^v\d+$", d.name, re.IGNORECASE)
+            ],
+            key=lambda d: int(d.name[1:]),
+            reverse=True,
+        )
+    except OSError as e:
+        return None, "버전 폴더 탐색 실패: %s" % e
+
+    if not ver_dirs:
+        return None, "plate/org 아래 버전 폴더 없음: %s" % normalize_path_str(str(plate_org))
+
+    latest = ver_dirs[0]
+    for sub in ("hi", "mov"):
+        sub_dir = latest / sub
+        try:
+            if sub_dir.is_dir():
+                return normalize_path_str(str(sub_dir)), None
+        except OSError:
+            continue
+
+    return normalize_path_str(str(latest)), None
+
+
+def collect_qc_data(write_node) -> dict:
+    """렌더 대상 Write 노드에서 QC 3카테고리 데이터를 수집한다."""
+    root = nuke.root()
+    data: Dict[str, Any] = {}
+
+    data["write_name"] = write_node.name()
+    data["write_file"] = _knob_value_safe(write_node, "file")
+
+    m_shot = _SHOT_NAME_RE.search(data["write_file"])
+    data["shot_name"] = m_shot.group(1).upper() if m_shot else ""
+
     try:
         data["fps"] = str(root["fps"].value())
     except Exception:
@@ -103,91 +407,90 @@ def collect_qc_data(write_node) -> dict:
         data["height"] = str(int(fmt.height()))
         data["format_name"] = fmt.name()
     except Exception:
-        data["width"] = "?"
-        data["height"] = "?"
-        data["format_name"] = "?"
+        data["width"] = data["height"] = data["format_name"] = "?"
 
-    data["ocio_path"] = _knob_value_safe(
-        root,
-        "customOCIOConfigPath",
-        "OCIO_config",
-        "ocioConfigPath",
-    )
-
-    # Write 정보
-    data["write_name"] = write_node.name()
-    data["write_file"] = _knob_value_safe(write_node, "file")
     data["write_colorspace"] = _knob_value_safe(
-        write_node,
-        "ocioColorspace",
-        "colorspace",
-        "colorSpace",
+        write_node, "ocioColorspace", "colorspace", "colorSpace"
     )
-    data["write_file_type"] = _knob_value_safe(
-        write_node,
-        "file_type",
-        "fileType",
-        "file_format",
-    )
+    data["write_file_type"] = _knob_value_safe(write_node, "file_type", "fileType", "file_format")
 
     try:
         data["write_first"] = int(write_node["first"].value())
         data["write_last"] = int(write_node["last"].value())
     except Exception:
-        data["write_first"] = None
-        data["write_last"] = None
+        data["write_first"] = data["write_last"] = None
 
-    # Upstream Read 분류
+    data["mov_write_name"] = None
+    data["mov_fps"] = None
+    for wn in nuke.allNodes("Write"):
+        if wn.name() == data["write_name"]:
+            continue
+        ft = _knob_value_safe(wn, "file_type", "fileType").lower()
+        if "mov" in ft or "mp4" in ft:
+            data["mov_write_name"] = wn.name()
+            data["mov_fps"] = _knob_value_safe(wn, "fps")
+            break
+
+    data["ocio_path"] = _knob_value_safe(
+        root, "customOCIOConfigPath", "OCIO_config", "ocioConfigPath"
+    )
+
     all_reads = _find_upstream_reads(write_node)
+    plate_read, plate_score = _score_and_pick_plate_read(all_reads, write_node)
 
-    plate_reads = [
-        r
-        for r in all_reads
-        if any(k in _knob_value_safe(r, "file").lower() for k in ("plate", "/org/", "\\org\\"))
-    ]
-    edit_reads = [
-        r
-        for r in all_reads
-        if any(k in _knob_value_safe(r, "file").lower() for k in ("edit", "/edit/", "\\edit\\"))
-    ]
+    data["plate_read_name"] = plate_read.name() if plate_read else None
+    data["plate_score"] = plate_score
 
-    if plate_reads:
-        pr = plate_reads[0]
-        data["plate_colorspace"] = _knob_value_safe(pr, "colorspace", "colorSpace")
-        data["plate_file"] = _knob_value_safe(pr, "file")
+    if plate_read:
+        data["plate_file"] = _knob_value_safe(plate_read, "file")
+        data["plate_colorspace"] = _knob_value_safe(plate_read, "colorspace", "colorSpace")
         try:
-            data["plate_first"] = int(pr["first"].value())
-            data["plate_last"] = int(pr["last"].value())
+            data["plate_first"] = int(plate_read["first"].value())
+            data["plate_last"] = int(plate_read["last"].value())
             data["plate_frames"] = data["plate_last"] - data["plate_first"] + 1
         except Exception:
-            data["plate_first"] = None
-            data["plate_last"] = None
-            data["plate_frames"] = None
+            data["plate_first"] = data["plate_last"] = data["plate_frames"] = None
     else:
-        data["plate_colorspace"] = None
-        data["plate_file"] = None
-        data["plate_frames"] = None
+        data["plate_file"] = data["plate_colorspace"] = None
+        data["plate_first"] = data["plate_last"] = data["plate_frames"] = None
 
-    if edit_reads:
-        er = edit_reads[0]
-        data["edit_file"] = _knob_value_safe(er, "file")
-        try:
-            data["edit_first"] = int(er["first"].value())
-            data["edit_last"] = int(er["last"].value())
-            data["edit_frames"] = data["edit_last"] - data["edit_first"] + 1
-        except Exception:
-            data["edit_first"] = None
-            data["edit_last"] = None
-            data["edit_frames"] = None
+    try:
+        root_name = nuke.root()["name"].value()
+    except Exception:
+        root_name = ""
+    plate_server, plate_server_err = _find_plate_server_path(root_name)
+    data["plate_server_path"] = plate_server
+    data["plate_server_error"] = plate_server_err
+
+    if plate_read:
+        meta = _read_plate_exr_metadata(plate_read)
+        data["meta_fps"] = meta.get("fps")
+        data["meta_timecode"] = meta.get("timecode")
+        data["meta_colorspace"] = meta.get("colorspace")
+        data["meta_all_keys"] = meta.get("all_keys", [])
+        data["meta_error"] = meta.get("error")
+        if meta.get("all_keys"):
+            _qc_log_info(
+                "EXR metadata keys (sample): %s",
+                ", ".join(meta.get("all_keys", [])[:8]),
+            )
     else:
-        data["edit_file"] = None
-        data["edit_frames"] = None
+        data["meta_fps"] = data["meta_timecode"] = data["meta_colorspace"] = None
+        data["meta_all_keys"] = []
+        data["meta_error"] = "플레이트 Read 노드 감지 실패"
 
-    # 프리셋 매칭
     preset_name, preset_data = _guess_preset_from_script()
     data["preset_name"] = preset_name
     data["preset_data"] = preset_data or {}
 
+    _qc_log_info(
+        "QC 데이터 수집 완료 write=%s shot=%s preset=%s plate=%s score=%s",
+        data["write_name"],
+        data.get("shot_name") or "?",
+        preset_name or "(없음)",
+        data.get("plate_read_name") or "(없음)",
+        plate_score,
+    )
     return data
 
 
@@ -208,64 +511,116 @@ def _qc_status_line(label, current, expected=None, ok_if_none=False):
 
 
 def _show_qc_dialog(qc_data: dict) -> bool:
-    """QC 결과를 PythonPanel 팝업으로 표시한다. True=렌더 진행, False=취소."""
+    """3카테고리 QC 리포트를 PythonPanel 텍스트로 표시. True=렌더 진행, False=취소."""
     preset_data = qc_data.get("preset_data", {})
-    shot_name = ""
-    write_file = qc_data.get("write_file", "")
-    m = re.search(r"([A-Z]\d{3}_[A-Z]\d{3}_\d{4})", write_file, re.IGNORECASE)
-    if m:
-        shot_name = m.group(1)
+    shot_name = qc_data.get("shot_name", "")
 
-    lines = []
+    lines: List[Tuple[str, str]] = []
 
-    def _add(label, current, expected=None, ok_if_none=False):
+    def _h(title: str) -> None:
+        lines.append(("info", "\n[%s]" % title))
+        lines.append(("info", _QC_SEP))
+
+    def _add(label, current, expected=None, ok_if_none=False, note_extra=""):
         st, lbl, cur, note = _qc_status_line(label, current, expected, ok_if_none)
+        note_str = "  (%s)" % note if note else ""
+        if note_extra:
+            note_str += "  %s" % note_extra
         icon = {"ok": "OK", "warn": "!!", "error": "XX"}[st]
-        note_str = f"  ({note})" if note else ""
-        lines.append((st, f"[{icon}]  {lbl:<22} {cur}{note_str}"))
+        lines.append((st, "[%s]  %-26s %s%s" % (icon, lbl, cur, note_str)))
 
-    # FPS
+    _h("A  납품 규약  Delivery Compliance")
+
     _add(
         "FPS",
         qc_data.get("fps"),
         expected=preset_data.get("fps") if preset_data else None,
     )
 
-    # 해상도
-    w = qc_data.get("width", "?")
-    h = qc_data.get("height", "?")
-    cur_res = f"{w}x{h}"
+    w, h = qc_data.get("width", "?"), qc_data.get("height", "?")
+    cur_res = "%sx%s" % (w, h)
     if preset_data:
-        exp_res = f"{preset_data.get('plate_width', '?')}x{preset_data.get('plate_height', '?')}"
+        exp_res = "%sx%s" % (
+            preset_data.get("plate_width", "?"),
+            preset_data.get("plate_height", "?"),
+        )
         _add("해상도", cur_res, expected=exp_res)
     else:
         _add("해상도", cur_res)
 
-    # OCIO 경로
-    ocio = qc_data.get("ocio_path", "")
-    if ocio:
-        ocio_exists = os.path.exists(ocio)
-        if preset_data and preset_data.get("ocio_path"):
-            _add("OCIO 경로", ocio, expected=preset_data.get("ocio_path"))
-        else:
-            st = "ok" if ocio_exists else "warn"
-            icon = "OK" if ocio_exists else "!!"
-            note = "" if ocio_exists else "  (경로 없음!)"
-            lines.append((st, f"[{icon}]  {'OCIO 경로':<22} {ocio}{note}"))
-    else:
-        lines.append(("warn", "[!!]  OCIO 경로           (설정 없음)"))
-
-    # Write colorspace
     _add(
         "Write 컬러스페이스",
         qc_data.get("write_colorspace"),
         expected=preset_data.get("write_out_colorspace") if preset_data else None,
     )
 
-    # Write 파일 타입
-    _add("Write 파일 포맷", qc_data.get("write_file_type"))
+    _add(
+        "출력 포맷",
+        qc_data.get("write_file_type"),
+        expected=preset_data.get("delivery_format") if preset_data else None,
+    )
 
-    # 플레이트 colorspace
+    wf = qc_data.get("write_first")
+    wl = qc_data.get("write_last")
+    try:
+        root_first = int(nuke.root().firstFrame())
+        root_last = int(nuke.root().lastFrame())
+    except Exception:
+        root_first = root_last = None
+    if wf is not None and wl is not None:
+        range_str = "%s ~ %s  (%df)" % (wf, wl, wl - wf + 1)
+        if root_first is not None:
+            if wf == root_first and wl == root_last:
+                lines.append(("ok", "[OK]  %-26s %s" % ("프레임 범위", range_str)))
+            else:
+                lines.append(
+                    (
+                        "warn",
+                        "[!!]  %-26s %s  (Root: %s~%s)"
+                        % ("프레임 범위", range_str, root_first, root_last),
+                    )
+                )
+        else:
+            lines.append(("ok", "[OK]  %-26s %s" % ("프레임 범위", range_str)))
+    else:
+        lines.append(("warn", "[!!]  %-26s (감지 안됨)" % "프레임 범위"))
+
+    mov_fps = qc_data.get("mov_fps")
+    if mov_fps:
+        _add(
+            "MOV FPS (%s)" % qc_data.get("mov_write_name", "?"),
+            mov_fps,
+            expected=preset_data.get("mov_fps") if preset_data else None,
+        )
+
+    _h("B  작업 설정  Work Setup")
+
+    ocio = qc_data.get("ocio_path", "")
+    if ocio:
+        ocio_ok = os.path.exists(ocio)
+        exp_ocio = preset_data.get("ocio_path") if preset_data else None
+        if exp_ocio:
+            _add("OCIO 경로", ocio, expected=exp_ocio)
+        else:
+            icon = "OK" if ocio_ok else "!!"
+            st = "ok" if ocio_ok else "warn"
+            note = "" if ocio_ok else "  (파일 없음!)"
+            lines.append((st, "[%s]  %-26s %s%s" % (icon, "OCIO 경로", ocio, note)))
+    else:
+        lines.append(("warn", "[!!]  %-26s (설정 없음)" % "OCIO 경로"))
+
+    plate_score = qc_data.get("plate_score", 0)
+    plate_name = qc_data.get("plate_read_name")
+    if plate_name:
+        lines.append(
+            (
+                "ok",
+                "[OK]  %-26s %s  (감지 신뢰도: %d점)" % ("플레이트 Read", plate_name, plate_score),
+            )
+        )
+    else:
+        lines.append(("warn", "[!!]  %-26s (감지 실패)" % "플레이트 Read"))
+
     if qc_data.get("plate_colorspace") is not None:
         _add(
             "플레이트 컬러스페이스",
@@ -273,95 +628,211 @@ def _show_qc_dialog(qc_data: dict) -> bool:
             expected=preset_data.get("read_input_transform") if preset_data else None,
         )
     else:
-        lines.append(("warn", "[!!]  플레이트 컬러스페이스  (플레이트 Read 감지 안됨)"))
+        lines.append(("warn", "[!!]  %-26s (감지 안됨)" % "플레이트 컬러스페이스"))
 
-    # 프레임 수 비교
+    plate_file = qc_data.get("plate_file", "")
+    if plate_file:
+        check_path = re.sub(
+            r"%\d*d",
+            str(qc_data.get("plate_first", 0) or 0).zfill(4),
+            plate_file,
+        )
+        check_path = re.sub(
+            r"#+",
+            str(qc_data.get("plate_first", 0) or 0).zfill(4),
+            check_path,
+        )
+        exists = os.path.exists(check_path)
+        icon = "OK" if exists else "!!"
+        st = "ok" if exists else "warn"
+        short = normalize_path_str(plate_file)[-50:]
+        lines.append((st, "[%s]  %-26s ...%s" % (icon, "플레이트 파일", short)))
+    else:
+        lines.append(("warn", "[!!]  %-26s (경로 없음)" % "플레이트 파일"))
+
+    srv_path = qc_data.get("plate_server_path")
+    srv_err = qc_data.get("plate_server_error")
+    if srv_path:
+        loaded_norm = normalize_path_str(plate_file or "").lower().replace("\\", "/")
+        server_norm = normalize_path_str(srv_path).lower().replace("\\", "/")
+        if server_norm and server_norm in loaded_norm:
+            lines.append(("ok", "[OK]  %-26s 일치 (%s)" % ("서버 플레이트 경로", srv_path[-40:])))
+        else:
+            lines.append(
+                (
+                    "warn",
+                    "[!!]  %-26s 불일치!\n      서버: %s\n      로드: %s"
+                    % ("서버 플레이트 경로", srv_path, plate_file or "(없음)"),
+                )
+            )
+    else:
+        lines.append(("warn", "[!!]  %-26s %s" % ("서버 플레이트 경로", srv_err or "(확인 불가)")))
+
     plate_f = qc_data.get("plate_frames")
-    edit_f = qc_data.get("edit_frames")
-    if plate_f is not None and edit_f is not None:
-        match = plate_f == edit_f
+    write_frames_count = None
+    if qc_data.get("write_first") is not None and qc_data.get("write_last") is not None:
+        write_frames_count = qc_data["write_last"] - qc_data["write_first"] + 1
+    if plate_f is not None and write_frames_count is not None:
+        match = plate_f == write_frames_count
         icon = "OK" if match else "!!"
-        note = "일치" if match else f"  <- 불일치! (편집본 {edit_f}f)"
+        note = "일치" if match else "  <- 불일치! (Write %df)" % write_frames_count
         lines.append(
-            ("ok" if match else "warn", f"[{icon}]  {'플레이트 길이':<22} {plate_f}f{note}")
+            (
+                "ok" if match else "warn",
+                "[%s]  %-26s %df  %s" % (icon, "플레이트 프레임 수", plate_f, note),
+            )
         )
     elif plate_f is not None:
-        lines.append(("ok", f"[OK]  {'플레이트 길이':<22} {plate_f}f"))
+        lines.append(("ok", "[OK]  %-26s %df" % ("플레이트 프레임 수", plate_f)))
     else:
-        lines.append(("warn", "[!!]  플레이트 길이         (Read 감지 안됨)"))
+        lines.append(("warn", "[!!]  %-26s (감지 안됨)" % "플레이트 프레임 수"))
 
-    if edit_f is not None and plate_f is None:
-        lines.append(("ok", f"[OK]  {'편집본 길이':<22} {edit_f}f"))
+    _h("C  EXR 메타데이터  Plate Raw Metadata")
 
-    # 요약 판정
-    has_warn = any(st in ("warn", "error") for st, _ in lines)
-    separator = "-" * 52
+    meta_err = qc_data.get("meta_error")
+    if meta_err and not qc_data.get("meta_fps") and not qc_data.get("meta_timecode"):
+        lines.append(("warn", "[!!]  메타데이터                    (%s)" % meta_err))
+    else:
+        m_fps = qc_data.get("meta_fps")
+        r_fps = qc_data.get("fps")
+        if m_fps:
+            try:
+                match_fps = abs(float(m_fps) - float(r_fps)) < 0.01
+                icon = "OK" if match_fps else "!!"
+                note = "Root FPS 일치" if match_fps else "Root FPS %s 불일치!" % r_fps
+                lines.append(
+                    (
+                        "ok" if match_fps else "warn",
+                        "[%s]  %-26s %s  (%s)" % (icon, "EXR FPS (원본)", m_fps, note),
+                    )
+                )
+            except (ValueError, TypeError):
+                lines.append(("ok", "[OK]  %-26s %s" % ("EXR FPS (원본)", m_fps)))
+        else:
+            lines.append(("warn", "[!!]  %-26s (메타 없음)" % "EXR FPS (원본)"))
 
-    title_shot = f"  {shot_name}" if shot_name else ""
-    header = f"BPE QC Checker{title_shot}\n{separator}\n"
-    body_text = "\n".join(txt for _, txt in lines)
-    footer = f"\n{separator}\n" + (
-        "!!  불일치 항목이 있습니다. 그대로 렌더하시겠습니까?"
-        if has_warn
-        else "OK  모든 항목이 프리셋과 일치합니다."
+        m_tc = qc_data.get("meta_timecode")
+        if m_tc:
+            lines.append(("ok", "[OK]  %-26s %s" % ("타임코드", m_tc)))
+        else:
+            lines.append(("warn", "[!!]  %-26s (메타 없음)" % "타임코드"))
+
+        m_cs = qc_data.get("meta_colorspace")
+        if m_cs:
+            _add(
+                "EXR 컬러스페이스 (원본)",
+                m_cs,
+                expected=preset_data.get("read_input_transform") if preset_data else None,
+            )
+        else:
+            lines.append(("warn", "[!!]  %-26s (메타 없음)" % "EXR 컬러스페이스 (원본)"))
+
+    has_warn = any(st in ("warn", "error") for st, _ in lines if st != "info")
+    warn_count = sum(1 for st, _ in lines if st == "warn")
+
+    title_shot = "  —  %s" % shot_name if shot_name else ""
+    preset_info = (
+        "  [프리셋: %s]" % qc_data["preset_name"]
+        if qc_data.get("preset_name")
+        else "  [프리셋 없음 — 비교 항목 제한]"
     )
 
-    full_text = header + body_text + footer
-    return _show_qc_panel_modal(full_text)
+    header = "BPE QC Checker%s\n%s\n%s\n" % (title_shot, preset_info, _QC_SEP)
+    body = "\n".join(txt for _, txt in lines)
+    footer_text = (
+        "!! 경고 %d개 항목이 있습니다. 그대로 렌더하시겠습니까?" % warn_count
+        if has_warn
+        else "OK  모든 항목이 통과했습니다."
+    )
+    footer = "\n%s\n%s" % (_QC_SEP, footer_text)
+    full_text = header + body + footer
+
+    proceed = _show_qc_panel_modal(full_text)
+    _qc_log_info(
+        "QC 리포트 결과 write=%s proceed=%s warns=%d",
+        qc_data.get("write_name"),
+        proceed,
+        warn_count,
+    )
+    return proceed
 
 
 def _show_qc_panel_modal(full_text: str) -> bool:
-    """PythonPanel을 띄워 True(OK) / False(Cancel)를 반환한다."""
-    panel = nukescripts.PythonPanel(
-        "BPE QC Checker",
-        "com.beluca.bpe.qc_checker",
-    )
+    """PythonPanel 텍스트 리포트. True=렌더 진행, False=취소."""
+    global _bpe_qc_panel_open
+    if _bpe_qc_panel_open:
+        _qc_log_warning("QC 다이얼로그가 이미 열려 있어 중복 표시를 건너뜁니다")
+        return False
+    _bpe_qc_panel_open = True
     try:
-        panel.setMinimumSize(960, 780)
-    except Exception:
-        pass
+        panel = nukescripts.PythonPanel(
+            "BPE QC Checker",
+            "com.beluca.bpe.qc_checker",
+        )
+        try:
+            panel.setMinimumSize(1000, 820)
+        except Exception:
+            pass
 
-    spacer_knob = nuke.Text_Knob("_spacer", "", " " * 118)
-    panel.addKnob(spacer_knob)
+        spacer = nuke.Text_Knob("_spacer", "", " " * 124)
+        panel.addKnob(spacer)
 
-    text_knob = nuke.Multiline_Eval_String_Knob("report", "", full_text)
-    text_knob.setFlag(nuke.NO_ANIMATION)
+        text_knob = nuke.Multiline_Eval_String_Knob("report", "", full_text)
+        text_knob.setFlag(nuke.NO_ANIMATION)
+        try:
+            if hasattr(text_knob, "setHeight"):
+                text_knob.setHeight(580)
+        except Exception:
+            pass
+        panel.addKnob(text_knob)
+
+        hint = nuke.Text_Knob(
+            "_hint",
+            "",
+            "<b>OK</b> → 렌더 진행   /   <b>Cancel</b> → 취소 (수정 후 재렌더)",
+        )
+        panel.addKnob(hint)
+
+        return bool(panel.showModalDialog())
+    except Exception as e:
+        _qc_log_error("QC 패널 표시 실패", exc=e)
+        return False
+    finally:
+        _bpe_qc_panel_open = False
+
+
+def _execute_write_safe(write_name: str, first: int, last: int) -> None:
+    """QC 승인 후 Write 노드를 안전하게 실행한다."""
+    w = nuke.toNode(write_name)
+    if w is None:
+        _qc_log_error("Write 노드 '%s'를 찾을 수 없습니다", write_name)
+        return
     try:
-        if hasattr(text_knob, "setHeight"):
-            text_knob.setHeight(520)
-    except Exception:
-        pass
-    panel.addKnob(text_knob)
-
-    hint_knob = nuke.Text_Knob(
-        "_hint",
-        "",
-        "<b>OK</b> -> 렌더 진행   /   <b>Cancel</b> -> 취소",
-    )
-    panel.addKnob(hint_knob)
-
-    return bool(panel.showModalDialog())
+        _qc_log_info("렌더 재시작 write=%s frames=%s-%s", write_name, first, last)
+        nuke.execute(w, first, last, 1)
+    except Exception as e:
+        _bpe_qc_approved.discard(write_name)
+        _qc_log_error("렌더 실행 오류 write=%s", write_name, exc=e)
 
 
 def bpe_qc_before_render():
-    """nuke.addBeforeRender 에 등록되는 콜백.
-
-    execute 컨텍스트 안에서 QC 데이터를 수집한 뒤 RuntimeError로 렌더를 중단,
-    nuke.executeDeferred 로 idle 상태에서 QC 다이얼로그를 표시한다.
-    OK면 _bpe_qc_approved에 노드 이름을 추가하고 nuke.execute 재호출.
-    """
+    """nuke.addBeforeRender — QC 확인 후 렌더 진행 또는 취소."""
     write = nuke.thisNode()
     write_name = write.name()
 
-    # QC 승인 후 재실행된 렌더 — 통과
     if write_name in _bpe_qc_approved:
         _bpe_qc_approved.discard(write_name)
+        _qc_log_info("QC 승인 통과 write=%s", write_name)
+        return
+
+    if write_name in _bpe_qc_in_progress:
+        _qc_log_info("QC 다이얼로그 진행 중 — 중복 beforeRender 무시 write=%s", write_name)
         return
 
     try:
         qc_data = collect_qc_data(write)
     except Exception as e:
-        nuke.tprint(f"[BPE QC Checker] QC 데이터 수집 오류 (렌더 계속): {e}")
+        _qc_log_error("QC 데이터 수집 오류 (렌더 계속)", exc=e)
         return
 
     try:
@@ -374,31 +845,87 @@ def bpe_qc_before_render():
         except Exception:
             first, last = 1, 1
 
-    def _deferred_qc_and_render():
-        try:
-            proceed = _show_qc_dialog(qc_data)
-        except Exception as e:
-            nuke.tprint(f"[BPE QC Checker] 다이얼로그 오류: {e}")
+    _bpe_qc_in_progress.add(write_name)
+    _qc_log_info("beforeRender QC 시작 write=%s", write_name)
+
+    def _outer():
+        def _inner():
+            _bpe_qc_in_progress.discard(write_name)
+            try:
+                want_qc = nuke.ask(
+                    "BPE QC Checker  —  %s\n\n"
+                    "렌더 전 QC 체크를 실행하시겠습니까?\n\n"
+                    "  OK     → QC 체크 후 결과 확인\n"
+                    "  Cancel → 체크 건너뛰고 바로 렌더" % write_name
+                )
+            except Exception as e:
+                _qc_log_warning("QC 확인 다이얼로그 실패: %s", e)
+                want_qc = False
+
+            w = nuke.toNode(write_name)
+            if w is None:
+                _qc_log_error("Write 노드 '%s' 없음", write_name)
+                return
+
+            if not want_qc:
+                _qc_log_info("QC 건너뛰기 — 바로 렌더 write=%s", write_name)
+                _bpe_qc_approved.add(write_name)
+                nuke.executeDeferred(lambda: _execute_write_safe(write_name, first, last))
+                return
+
+            try:
+                proceed = _show_qc_dialog(qc_data)
+            except Exception as e:
+                _qc_log_error("QC 리포트 다이얼로그 오류", exc=e)
+                return
+
+            if proceed:
+                _bpe_qc_approved.add(write_name)
+                nuke.executeDeferred(lambda: _execute_write_safe(write_name, first, last))
+            else:
+                _qc_log_info("사용자가 렌더 취소 — 수정 후 재렌더 write=%s", write_name)
+
+        nuke.executeDeferred(_inner)
+
+    nuke.executeDeferred(_outer)
+    raise RuntimeError("[BPE QC] 체크 다이얼로그를 표시합니다. 확인 후 렌더가 재시작됩니다.")
+
+
+def run_qc_now() -> None:
+    """setup_pro 메뉴 '지금 QC 체크' — 선택 Write 또는 목록에서 선택."""
+    writes = [n for n in nuke.selectedNodes() if n.Class() == "Write"]
+    if not writes:
+        writes = nuke.allNodes("Write")
+    if not writes:
+        nuke.message("[BPE QC] 스크립트에 Write 노드가 없습니다.")
+        return
+
+    if len(writes) == 1:
+        target = writes[0]
+    else:
+        names = [w.name() for w in writes]
+        p = nukescripts.PythonPanel("QC 대상 Write 선택", "com.beluca.bpe.qc_select")
+        e = nuke.Enumeration_Knob("write_sel", "Write 노드", names)
+        p.addKnob(e)
+        if not p.showModalDialog():
+            return
+        sel_name = e.value()
+        target = nuke.toNode(sel_name)
+        if target is None:
             return
 
-        if not proceed:
-            nuke.tprint("[BPE QC Checker] 사용자가 렌더를 취소했습니다.")
-            return
+    _qc_log_info("수동 QC 실행 write=%s", target.name())
+    try:
+        qc_data = collect_qc_data(target)
+    except Exception as e:
+        _qc_log_error("수동 QC 데이터 수집 오류", exc=e)
+        nuke.message("[BPE QC] 데이터 수집 오류:\n%s" % e)
+        return
 
-        w = nuke.toNode(write_name)
-        if w is None:
-            nuke.tprint(f"[BPE QC Checker] Write 노드 '{write_name}'를 찾을 수 없습니다.")
-            return
-
-        _bpe_qc_approved.add(write_name)
-        try:
-            nuke.execute(w, first, last, 1)
-        except Exception as e:
-            _bpe_qc_approved.discard(write_name)
-            nuke.tprint(f"[BPE QC Checker] 렌더 실행 오류: {e}")
-
-    nuke.executeDeferred(_deferred_qc_and_render)
-    raise RuntimeError("[BPE] QC Checker 다이얼로그를 표시합니다. 확인 후 렌더가 재시작됩니다.")
+    try:
+        _show_qc_dialog(qc_data)
+    except Exception as e:
+        _qc_log_error("수동 QC 리포트 표시 오류", exc=e)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -928,6 +1455,7 @@ def reload_tool_hooks() -> None:
     try:
         tools_cfg = get_tools_settings()
     except Exception as e:
+        logger.error("settings 로드 실패: %s", e)
         nuke.tprint(f"[BPE Tools] settings 로드 실패: {e}")
         return
 
@@ -968,10 +1496,20 @@ def reload_tool_hooks() -> None:
     except Exception as e:
         nuke.tprint(f"[BPE Tools] addOnScriptLoad(Write 경로 보정) 등록 실패: {e}")
 
-    nuke.tprint(
+    msg = (
         "[BPE Tools] Reload 완료 — "
-        f"QC Checker: {'ON' if qc_enabled else 'OFF'}  |  "
-        f"Post-Render Viewer: {'ON' if prv_enabled else 'OFF'}  |  "
-        f"Write 경로 보정(onLoad/onSave): ON  |  "
-        f"settings: {cfg.SETTINGS_FILE}"
+        "QC Checker: %s  |  Post-Render Viewer: %s  |  "
+        "Write 경로 보정(onLoad/onSave): ON  |  settings: %s"
+        % (
+            "ON" if qc_enabled else "OFF",
+            "ON" if prv_enabled else "OFF",
+            cfg.SETTINGS_FILE,
+        )
     )
+    logger.info(
+        "reload_tool_hooks qc=%s post_render=%s settings=%s",
+        qc_enabled,
+        prv_enabled,
+        cfg.SETTINGS_FILE,
+    )
+    nuke.tprint(msg)
