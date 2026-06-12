@@ -292,6 +292,144 @@ def _patch_read_plate_file_paths(body: str, shot_name: str, paths: Dict[str, Pat
 
 
 # ---------------------------------------------------------------------------
+# Edit Read helpers
+# ---------------------------------------------------------------------------
+
+
+def _is_edit_read_block(inner: str) -> bool:
+    """Read 블록의 name 이 ``Read_Edit`` 인지 확인한다."""
+    return bool(re.search(r"(?m)^ name Read_Edit\s*$", inner))
+
+
+def _is_edit_read_file_path(file_path: str) -> bool:
+    """``.../edit/...`` 경로면 edit Read 로 간주한다 (노드 이름과 무관)."""
+    p = (file_path or "").replace("\\", "/").lower()
+    return "/edit/" in p
+
+
+def _discover_edit_sequence_basename(edit_dir: Path, shot_name: str) -> Optional[str]:
+    """
+    ``edit_dir`` 에 실제 edit 파일이 있으면 Nuke용 베이스명을 반환한다.
+
+    - EXR/DPX/TIFF 시퀀스 → ``{prefix}.####.{ext}``
+    - MOV/MP4/M4V/MXF 단일 클립 → 파일명 그대로 (예: ``ep01_s01_c0010_edit_v001.mov``)
+    - ``{shot_name}_edit`` 접두사 파일을 우선 탐색
+    """
+    if not edit_dir.is_dir():
+        return None
+    hint = f"{shot_name}_edit".lower()
+    preferred_seq: Optional[str] = None
+    fallback_seq: Optional[str] = None
+    preferred_vids: List[str] = []
+    fallback_vids: List[str] = []
+    try:
+        for p in edit_dir.iterdir():
+            if not p.is_file():
+                continue
+            m = _PLATE_SEQ_FRAME_RE.match(p.name)
+            if m:
+                prefix, ext = m.group(1), m.group(3).lower()
+                basename = f"{prefix}.####.{ext}"
+                if prefix.lower().startswith(hint):
+                    preferred_seq = basename
+                elif fallback_seq is None:
+                    fallback_seq = basename
+                continue
+            ext = p.suffix.lower().lstrip(".")
+            if ext not in _PLATE_VIDEO_EXTS:
+                continue
+            stem = p.stem.lower()
+            if stem.startswith(hint):
+                preferred_vids.append(p.name)
+            else:
+                fallback_vids.append(p.name)
+    except OSError:
+        return None
+
+    if preferred_seq:
+        return preferred_seq
+    if preferred_vids:
+        return sorted(preferred_vids, key=str.lower)[-1]
+    if fallback_seq:
+        return fallback_seq
+    if fallback_vids:
+        return sorted(fallback_vids, key=str.lower)[-1]
+    return None
+
+
+def _default_edit_basename(edit_dir: Path, shot_name: str) -> str:
+    """디스크 스캔 결과 또는 흔한 edit 파일명 패턴으로 NK ``file`` 베이스명을 정한다."""
+    discovered = _discover_edit_sequence_basename(edit_dir, shot_name)
+    if discovered:
+        return discovered
+    shot_l = shot_name.lower()
+    if edit_dir.is_dir():
+        for candidate in (
+            f"{shot_l}_edit_v001.mov",
+            f"{shot_name}_edit_v001.mov",
+            f"{shot_l}_edit.####.exr",
+            f"{shot_name}_edit.####.exr",
+        ):
+            if (edit_dir / candidate).exists():
+                return candidate
+    return f"{shot_name}_edit.####.exr"
+
+
+def _patch_read_edit_file_paths(body: str, shot_name: str, paths: Dict[str, Path]) -> str:
+    """
+    템플릿 NK의 edit Read 노드 ``file`` 경로를 실제 컷의 edit 폴더 경로로 교체한다.
+
+    edit Read 판별은 **경로에 ``/edit/`` 포함 여부**(노드 이름과 무관)를 우선하고,
+    이름이 ``Read_Edit`` 인 경우도 함께 대상으로 본다. 팀 커스텀 템플릿의 edit Read 가
+    ``Read8`` 처럼 자동 이름이어도 가이드 경로(``.../05_ref/script_guide/.../edit/...``)를
+    현재 컷 edit 로 바꿔 준다.
+
+    - ``paths["edit"]`` 가 없으면 no-op.
+    - edit Read 가 없으면 no-op (플레이트 ``/plate/`` 는 대상 아님).
+    - 디스크 스캔으로 실제 파일을 찾고, 없으면 흔한 edit 파일명 패턴으로 폴백.
+    - ``%04d`` / 고정 프레임 번호 → ``####`` 정규화.
+    - ``file_type`` 도 확장자에 맞게 패치.
+    - ``normalize_path_str()`` 로 UNC → 드라이브 문자 변환.
+    - ``colorspace`` 등 다른 노브는 건드리지 않는다 (템플릿 원본 유지).
+    """
+    edit_dir_raw = paths.get("edit")
+    if not edit_dir_raw:
+        return body
+
+    edit_dir = Path(edit_dir_raw)
+    edit_nk = normalize_path_str(_to_nk_path(edit_dir))
+
+    edit_basename = _default_edit_basename(edit_dir, shot_name)
+
+    new_path = f"{edit_nk}/{edit_basename}"
+    ft = _read_file_type_from_plate_basename(edit_basename)
+
+    blocks = _find_blocks_with_positions(body, "Read")
+    result = body
+    for start, end, inner in reversed(blocks):
+        fp = _read_file_path_from_inner(inner)
+        is_edit = (fp is not None and _is_edit_read_file_path(fp)) or _is_edit_read_block(inner)
+        if not is_edit:
+            continue
+        new_inner = _replace_knob_in_block(inner, "file", new_path)
+        if new_inner == inner:
+            continue
+        patched_ft = _replace_knob_in_block(new_inner, "file_type", ft)
+        if patched_ft == new_inner:
+            new_inner = re.sub(
+                r"(?m)^( file )",
+                f' file_type "{_nk_escape_quotes(ft)}"\n\\1',
+                new_inner,
+                count=1,
+            )
+        else:
+            new_inner = patched_ft
+        result = result[:start] + f"Read {{{new_inner}}}" + result[end:]
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Plate frame range (Read + Viewer)
 # ---------------------------------------------------------------------------
 
@@ -577,7 +715,11 @@ def strip_eo7_mov_problem_knobs_from_nk_body(body: str) -> str:
 
 
 def _patch_read_colorspace(body: str, colorspace: str) -> str:
-    """Replace the colorspace knob on Read nodes (Read4, Read5, etc.)."""
+    """
+    Replace the colorspace knob on plate Read nodes (Read4, Read5, etc.).
+
+    edit Read (``/edit/`` 경로)는 제외해 프로젝트별 edit 컬러스페이스를 그대로 둔다.
+    """
     if not colorspace:
         return body
 
@@ -593,6 +735,9 @@ def _patch_read_colorspace(body: str, colorspace: str) -> str:
     result = body
     for start, end, inner in reversed(blocks):
         if not re.search(r"(?m)^ name Read[\w\d_]+\s*$", inner):
+            continue
+        fp = _read_file_path_from_inner(inner)
+        if (fp is not None and _is_edit_read_file_path(fp)) or _is_edit_read_block(inner):
             continue
         new_inner = _replace_knob_in_block(inner, "colorspace", colorspace)
         if new_inner != inner:
@@ -869,7 +1014,9 @@ def _generate_nk_minimal(
             plate_tail = f"{shot_name}.####.exr"
             plate_read_ft = "exr"
     plate_file = f"{_to_nk_path(paths['plate_hi'])}/{plate_tail}"
-    edit_file = f"{_to_nk_path(paths['edit'])}/{shot_name}_edit.####.exr"
+    edit_tail = _default_edit_basename(Path(paths["edit"]), shot_name)
+    edit_read_ft = _read_file_type_from_plate_basename(edit_tail)
+    edit_file = f"{normalize_path_str(_to_nk_path(paths['edit']))}/{edit_tail}"
     delivery_fmt = (preset_data.get("delivery_format", "EXR 16bit") or "EXR 16bit").upper()
     if "EXR" in delivery_fmt:
         write_file_type, write_ext = "exr", "exr"
@@ -954,7 +1101,7 @@ def _generate_nk_minimal(
         "}",
         "Read {",
         " inputs 0",
-        " file_type exr",
+        f" file_type {edit_read_ft}",
         f" file {edit_file}",
         " colorspace scene_linear",
         " name Read_Edit",
@@ -1011,6 +1158,7 @@ def generate_nk_content(
 
     # 템플릿이 E107 고정값이 아닌 다른 샷(E102 등)으로 저장된 경우 Read file 경로가 남는 문제
     body = _patch_read_plate_file_paths(body, shot_name, paths)
+    body = _patch_read_edit_file_paths(body, shot_name, paths)
 
     # Patch comp version in Viewer NDISender etc.
     body = re.sub(

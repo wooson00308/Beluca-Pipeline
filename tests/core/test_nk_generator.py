@@ -7,13 +7,17 @@ from pathlib import Path
 from unittest.mock import patch
 
 from bpe.core.nk_generator import (
+    _discover_edit_sequence_basename,
     _discover_plate_sequence_basename,
     _find_blocks_with_positions,
     _generate_nk_minimal,
+    _is_edit_read_block,
+    _is_edit_read_file_path,
     _nk_escape_quotes,
     _normalize_plate_basename,
     _parse_stts_inner,
     _patch_read_colorspace,
+    _patch_read_edit_file_paths,
     _patch_read_frame_range,
     _patch_viewer_fps,
     _patch_write2_from_preset,
@@ -1032,3 +1036,275 @@ class TestTemplateSamplePathWarnings:
 
     def test_clean_body_empty(self) -> None:
         assert _template_sample_path_warnings("Read {\n name Read4\n}\n") == []
+
+
+# ---------------------------------------------------------------------------
+# Read_Edit patch helpers
+# ---------------------------------------------------------------------------
+
+
+class TestIsEditReadBlock:
+    def test_detects_read_edit(self):
+        inner = "\n inputs 0\n file_type exr\n file W:/edit/shot.####.exr\n name Read_Edit\n"
+        assert _is_edit_read_block(inner) is True
+
+    def test_ignores_read_plate(self):
+        inner = "\n file W:/plate/shot.####.exr\n name Read_Plate\n"
+        assert _is_edit_read_block(inner) is False
+
+    def test_ignores_generic_read(self):
+        inner = "\n file W:/edit/shot.####.exr\n name Read4\n"
+        assert _is_edit_read_block(inner) is False
+
+
+class TestDiscoverEditSequenceBasename:
+    def test_finds_edit_exr(self, tmp_path):
+        edit_dir = tmp_path / "edit"
+        edit_dir.mkdir()
+        (edit_dir / "E109_S002_0020_edit.1001.exr").write_bytes(b"")
+        result = _discover_edit_sequence_basename(edit_dir, "E109_S002_0020")
+        assert result == "E109_S002_0020_edit.####.exr"
+
+    def test_finds_edit_mov(self, tmp_path):
+        """CRS2 스타일: 소문자 샷명 + _edit_v001.mov"""
+        edit_dir = tmp_path / "edit"
+        edit_dir.mkdir()
+        (edit_dir / "ep01_s01_c0010_edit_v001.mov").write_bytes(b"")
+        result = _discover_edit_sequence_basename(edit_dir, "EP01_S01_C0010")
+        assert result == "ep01_s01_c0010_edit_v001.mov"
+
+    def test_prefers_shot_edit_mov_over_other(self, tmp_path):
+        edit_dir = tmp_path / "edit"
+        edit_dir.mkdir()
+        (edit_dir / "ep01_s05_c0001_edit_v001.mov").write_bytes(b"")
+        (edit_dir / "ep01_s01_c0010_edit_v001.mov").write_bytes(b"")
+        result = _discover_edit_sequence_basename(edit_dir, "EP01_S01_C0010")
+        assert result == "ep01_s01_c0010_edit_v001.mov"
+
+    def test_missing_dir_returns_none(self, tmp_path):
+        result = _discover_edit_sequence_basename(tmp_path / "nope", "E109_S002_0020")
+        assert result is None
+
+    def test_empty_dir_returns_none(self, tmp_path):
+        edit_dir = tmp_path / "edit"
+        edit_dir.mkdir()
+        assert _discover_edit_sequence_basename(edit_dir, "E109_S002_0020") is None
+
+
+class TestPatchReadEditFilePaths:
+    """_patch_read_edit_file_paths: 템플릿 Read_Edit 경로 교체."""
+
+    def _make_paths(self, tmp_path: Path, shot: str) -> dict:
+        return {
+            "shot_root": tmp_path / "shot",
+            "plate_hi": tmp_path / "plate" / "org" / "v001" / "hi",
+            "edit": tmp_path / "edit",
+            "renders": tmp_path / "renders",
+        }
+
+    def test_replaces_bare_path_read_edit(self, tmp_path):
+        """템플릿의 bare file 경로가 올바른 edit 경로로 교체된다."""
+        shot = "E109_S002_0020"
+        paths = self._make_paths(tmp_path, shot)
+        sample_path = (
+            "W:/vfx/project_2026/SBS_030/04_sq/E107"
+            "/E107_S022_0080/edit/E107_S022_0080_edit.%04d.exr"
+        )
+        body = f"Read {{\n inputs 0\n file_type exr\n file {sample_path}\n name Read_Edit\n}}\n"
+        result = _patch_read_edit_file_paths(body, shot, paths)
+        edit_nk = str(paths["edit"]).replace("\\", "/")
+        assert f"{edit_nk}/{shot}_edit.####.exr" in result
+
+    def test_no_read_edit_is_noop(self, tmp_path):
+        """Read_Edit 노드가 없으면 body가 변경되지 않는다."""
+        shot = "E109_S002_0020"
+        paths = self._make_paths(tmp_path, shot)
+        body = "Read {\n file W:/plate/org/v001/hi/E107.####.exr\n name Read_Plate\n}\n"
+        assert _patch_read_edit_file_paths(body, shot, paths) == body
+
+    def test_uses_discovered_file_when_present(self, tmp_path):
+        """edit 폴더에 실제 파일이 있으면 발견된 파일명을 사용한다."""
+        shot = "E109_S002_0020"
+        paths = self._make_paths(tmp_path, shot)
+        edit_dir = Path(paths["edit"])
+        edit_dir.mkdir(parents=True)
+        (edit_dir / f"{shot}_edit.1001.exr").write_bytes(b"")
+        body = (
+            "Read {\n"
+            " inputs 0\n"
+            " file_type exr\n"
+            f" file W:/old/edit/{shot}_edit.%04d.exr\n"
+            " name Read_Edit\n"
+            "}\n"
+        )
+        result = _patch_read_edit_file_paths(body, shot, paths)
+        edit_nk = str(edit_dir).replace("\\", "/")
+        assert f"{edit_nk}/{shot}_edit.####.exr" in result
+
+    def test_replaces_script_guide_path_with_shot_edit_mov(self, tmp_path):
+        """템플릿 가이드 MOV 경로 → 현재 컷 edit 폴더 MOV로 교체."""
+        shot = "EP01_S01_C0010"
+        paths = self._make_paths(tmp_path, shot)
+        edit_dir = Path(paths["edit"])
+        edit_dir.mkdir(parents=True)
+        (edit_dir / "ep01_s01_c0010_edit_v001.mov").write_bytes(b"")
+        guide_path = (
+            "W:/vfx/project_2026/CRS2_032/03_prod/05_ref/script_guide/"
+            "beluca/aces_1.2/edit/ep01_s05_c0001_edit_v001.mov"
+        )
+        body = f"Read {{\n inputs 0\n file_type mov\n file {guide_path}\n name Read_Edit\n}}\n"
+        result = _patch_read_edit_file_paths(body, shot, paths)
+        edit_nk = str(edit_dir).replace("\\", "/")
+        assert guide_path not in result
+        assert f"{edit_nk}/ep01_s01_c0010_edit_v001.mov" in result
+        assert "file_type mov" in result or 'file_type "mov"' in result
+
+    def test_plate_read_not_affected(self, tmp_path):
+        """plate Read 노드는 건드리지 않는다."""
+        shot = "E109_S002_0020"
+        paths = self._make_paths(tmp_path, shot)
+        plate_path = "W:/vfx/SBS_030/plate/org/v001/hi/E107.####.exr"
+        body = (
+            "Read {\n"
+            f' file "{plate_path}"\n'
+            " name Read_Plate\n"
+            "}\n"
+            "Read {\n"
+            " file W:/old/edit/E107_S022_0080_edit.%04d.exr\n"
+            " name Read_Edit\n"
+            "}\n"
+        )
+        result = _patch_read_edit_file_paths(body, shot, paths)
+        assert plate_path in result
+
+    def test_generate_nk_content_patches_edit_path(self, tmp_path):
+        """generate_nk_content 호출 시 Read_Edit 경로가 교체된다."""
+        shot = "E109_S002_0020"
+        plate_hi = tmp_path / "plate" / "org" / "v001" / "hi"
+        plate_hi.mkdir(parents=True)
+        edit_dir = tmp_path / "edit"
+        paths = {
+            "shot_root": tmp_path / "shot",
+            "plate_hi": plate_hi,
+            "edit": edit_dir,
+            "renders": tmp_path / "renders",
+        }
+        sample_edit = (
+            "W:/vfx/project_2026/SBS_030/04_sq/E107/E107_S022_0080/edit/"
+            "E107_S022_0080_edit.%04d.exr"
+        )
+        plate_path = (
+            "W:/vfx/project_2026/SBS_030/04_sq/E107/E107_S022_0080/plate/org/v001/hi/E107.####.exr"
+        )
+        template_body = (
+            "set cut_paste_input [stack 0]\n"
+            "version 14.1 v4\n"
+            "Read {\n"
+            " inputs 0\n"
+            " file_type exr\n"
+            f" file {plate_path}\n"
+            " name Read_Plate\n"
+            "}\n"
+            "Read {\n"
+            " inputs 0\n"
+            " file_type exr\n"
+            f" file {sample_edit}\n"
+            " name Read_Edit\n"
+            "}\n"
+        )
+        preset = {
+            "fps": "23.976",
+            "plate_width": 1920,
+            "plate_height": 1080,
+            "project_code": "SBS_030",
+        }
+        with patch(
+            "bpe.core.nk_generator.load_preset_template",
+            return_value=template_body,
+        ):
+            content, _ = generate_nk_content(preset, shot, paths, "v001")
+        edit_nk = str(edit_dir).replace("\\", "/")
+        assert f"{edit_nk}/{shot}_edit.####.exr" in content
+        assert "E107_S022_0080_edit" not in content
+
+    def test_repoints_auto_named_edit_read_by_path(self, tmp_path):
+        """edit Read 이름이 Read8 처럼 자동 이름이어도 /edit/ 경로면 교체된다."""
+        shot = "EP01_S01_C0020"
+        paths = self._make_paths(tmp_path, shot)
+        edit_dir = Path(paths["edit"])
+        edit_dir.mkdir(parents=True)
+        (edit_dir / "ep01_s01_c0020_edit_v001.mov").write_bytes(b"")
+        guide_path = (
+            "W:/vfx/project_2026/CRS2_032/03_prod/05_ref/script_guide/"
+            "beluca/aces_1.2/edit/ep01_s05_c0001_edit_v001.mov"
+        )
+        body = (
+            "Read {\n"
+            " inputs 0\n"
+            " file_type mov\n"
+            f" file {guide_path}\n"
+            " colorspace rendering\n"
+            " name Read8\n"
+            "}\n"
+        )
+        result = _patch_read_edit_file_paths(body, shot, paths)
+        edit_nk = str(edit_dir).replace("\\", "/")
+        assert guide_path not in result
+        assert f"{edit_nk}/ep01_s01_c0020_edit_v001.mov" in result
+        # edit Read 의 colorspace 는 그대로 유지
+        assert "colorspace rendering" in result
+
+
+class TestPatchReadColorspaceSkipsEdit:
+    """프로젝트별 edit 컬러스페이스 유지: edit Read 는 프리셋 CS 로 덮어쓰지 않는다."""
+
+    def test_edit_read_colorspace_preserved_plate_changed(self):
+        body = (
+            "Read {\n"
+            " file W:/proj/04_sq/ep01/EP01_S01_C0020/plate/org/v001/hi/x.####.exr\n"
+            ' colorspace "ACES - ACEScg"\n'
+            " name Read1\n"
+            "}\n"
+            "Read {\n"
+            " file W:/proj/04_sq/ep01/EP01_S01_C0020/edit/x_edit_v001.mov\n"
+            " colorspace rendering\n"
+            " name Read8\n"
+            "}\n"
+        )
+        out = _patch_read_colorspace(body, "ACES - ACES2065-1")
+        # 플레이트는 프리셋 CS 로 변경
+        assert '"ACES - ACES2065-1"' in out
+        # edit 은 원본 유지
+        assert "colorspace rendering" in out
+
+    def test_edit_read_colorspace_preserved_different_value(self):
+        """다른 프로젝트의 다른 edit CS 도 그대로 유지된다."""
+        body = (
+            "Read {\n"
+            " file W:/p/edit/clip_edit_v001.mov\n"
+            ' colorspace "Input - Sony - S-Log3 - S-Gamut3.Cine"\n'
+            " name Read12\n"
+            "}\n"
+        )
+        out = _patch_read_colorspace(body, "ACES - ACEScg")
+        assert '"Input - Sony - S-Log3 - S-Gamut3.Cine"' in out
+        assert "ACEScg" not in out
+
+
+class TestIsEditReadFilePath:
+    def test_edit_segment(self):
+        assert _is_edit_read_file_path("W:/proj/04_sq/ep01/shot/edit/x_edit_v001.mov") is True
+
+    def test_guide_edit_segment(self):
+        assert (
+            _is_edit_read_file_path(
+                "W:/proj/03_prod/05_ref/script_guide/beluca/aces_1.2/edit/x_edit_v001.mov"
+            )
+            is True
+        )
+
+    def test_plate_path_false(self):
+        assert _is_edit_read_file_path("W:/proj/shot/plate/org/v001/hi/x.####.exr") is False
+
+    def test_backslash_path(self):
+        assert _is_edit_read_file_path("W:\\proj\\shot\\edit\\x.mov") is True
