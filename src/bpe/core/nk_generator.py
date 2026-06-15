@@ -272,6 +272,10 @@ def _patch_read_plate_file_paths(body: str, shot_name: str, paths: Dict[str, Pat
         new_base = _normalize_plate_basename(basename, shot_name, force_ext=force_ext)
         if discovered is not None:
             new_base = discovered
+        else:
+            disc_mov = _discover_plate_mov_basename(Path(paths["plate_hi"]))
+            if disc_mov is not None:
+                new_base = disc_mov
         new_path = f"{plate_hi}/{new_base}"
         new_inner = _replace_knob_in_block(inner, "file", new_path)
         if new_inner != inner:
@@ -525,6 +529,24 @@ def _discover_plate_sequence_basename(plate_hi: Path, shot_name_hint: str = "") 
     ext = chosen[1]
     orig_prefix = groups[chosen][0][0]
     return f"{orig_prefix}.####.{ext}"
+
+
+def _discover_plate_mov_basename(plate_hi: Path) -> Optional[str]:
+    """``plate_hi``(mov 폴더)에서 실제 MOV/MP4/M4V 파일명 반환. 없으면 None.
+
+    ``_PLATE_VIDEO_GLOBS`` 패턴으로 glob, 알파벳 첫 파일 반환.
+    """
+    if not plate_hi.is_dir():
+        return None
+    try:
+        movs = []
+        for pattern in _PLATE_VIDEO_GLOBS:
+            movs.extend(p for p in plate_hi.glob(pattern) if p.is_file())
+    except OSError:
+        return None
+    if not movs:
+        return None
+    return sorted(movs, key=lambda p: p.name.lower())[0].name
 
 
 def _parse_stts_inner(body: bytes) -> int:
@@ -1023,7 +1045,11 @@ def _generate_nk_minimal(
         plate_read_ft = _plate_read_file_type_for_ext(disc_plate.rsplit(".", 1)[-1])
     else:
         plate_folder_name = Path(paths["plate_hi"]).name.lower()
-        if plate_folder_name in _PLATE_VIDEO_EXTS:
+        disc_mov = _discover_plate_mov_basename(paths["plate_hi"])
+        if disc_mov is not None:
+            plate_tail = disc_mov
+            plate_read_ft = "mov"
+        elif plate_folder_name in _PLATE_VIDEO_EXTS:
             plate_tail = f"{shot_name}_org_v001.{plate_folder_name}"
             plate_read_ft = (
                 "mov" if plate_folder_name in ("mov", "mp4", "m4v") else plate_folder_name

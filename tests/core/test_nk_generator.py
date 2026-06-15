@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from bpe.core.nk_generator import (
     _discover_edit_sequence_basename,
+    _discover_plate_mov_basename,
     _discover_plate_sequence_basename,
     _find_blocks_with_positions,
     _generate_nk_minimal,
@@ -643,19 +644,22 @@ class TestGenerateNkMinimal:
         assert "/E01_S01_0010_comp_v001.mov" in result.replace("\\", "/")
         assert "####.mov" not in result
 
-    def test_minimal_mov_plate_folder(self):
-        """plate_hi가 v001/mov/ 이면 Read_Plate도 MOV로 맞춘다."""
+    def test_minimal_mov_plate_in_hi_folder(self, tmp_path: Path) -> None:
+        """plate_hi가 v001/hi/ 이고 안에 MOV 파일이 있으면 Read_Plate도 MOV로 맞춘다."""
+        plate_hi = tmp_path / "plate" / "org" / "v001" / "hi"
+        plate_hi.mkdir(parents=True)
+        (plate_hi / "E01_S01_0010_org_v001.mov").write_bytes(b"")
         paths = {
-            "shot_root": Path("/shots/E01_S01"),
-            "plate_hi": Path("/shots/E01_S01/plate/org/v001/mov"),
-            "edit": Path("/shots/E01_S01/edit"),
-            "renders": Path("/shots/E01_S01/comp/devl/renders"),
+            "shot_root": tmp_path,
+            "plate_hi": plate_hi,
+            "edit": tmp_path / "edit",
+            "renders": tmp_path / "renders",
         }
         preset = {"fps": "24", "plate_width": 1920, "plate_height": 1080}
         result = _generate_nk_minimal(preset, "E01_S01_0010", paths, "v001")
         norm = result.replace("\\", "/")
         assert "file_type mov" in norm
-        assert "plate/org/v001/mov" in norm
+        assert "plate/org/v001/hi" in norm
         assert "E01_S01_0010_org_v001.mov" in norm
 
 
@@ -894,8 +898,13 @@ class TestGenerateNkContent:
         assert "E102" not in content
         assert 'file_type "mov"' in content.replace("\\", "/")
 
-    def test_plate_read_mov_folder_forces_mov_from_exr_template(self):
-        """plate_hi가 v001/mov면 EXR 템플릿이어도 경로·파일명은 mov로 맞춘다."""
+    def test_plate_read_hi_folder_with_mov_forces_mov_from_exr_template(
+        self, tmp_path: Path
+    ) -> None:
+        """plate_hi가 v001/hi이고 MOV 파일이 있으면 EXR 템플릿이어도 경로·파일명은 mov로 맞춘다."""
+        plate_hi = tmp_path / "plate" / "org" / "v001" / "hi"
+        plate_hi.mkdir(parents=True)
+        (plate_hi / "E109_S002_0050_org_v001.mov").write_bytes(b"")
         template_body = (
             "set cut_paste_input [stack 0]\n"
             "Read {\n"
@@ -906,10 +915,10 @@ class TestGenerateNkContent:
             "}\n"
         )
         paths = {
-            "shot_root": Path("/shots/E109_S002_0050"),
-            "plate_hi": Path("/shots/E109_S002_0050/plate/org/v001/mov"),
-            "edit": Path("/shots/E109_S002_0050/edit"),
-            "renders": Path("/shots/E109_S002_0050/renders"),
+            "shot_root": tmp_path,
+            "plate_hi": plate_hi,
+            "edit": tmp_path / "edit",
+            "renders": tmp_path / "renders",
         }
         preset = {
             "fps": "24",
@@ -923,10 +932,80 @@ class TestGenerateNkContent:
         ):
             content, _ = generate_nk_content(preset, "E109_S002_0050", paths, "v001")
         norm = content.replace("\\", "/")
-        assert "/plate/org/v001/mov/" in norm
+        assert "/plate/org/v001/hi/" in norm
         assert "E109_S002_0050_org_v001.mov" in norm
         assert "E102_S001_0020_org_v001.1001.exr" not in norm
         assert 'file_type "mov"' in norm
+
+
+class TestDiscoverPlateMovBasename:
+    def test_returns_actual_mov_filename_in_hi_folder(self, tmp_path: Path) -> None:
+        hi_dir = tmp_path / "hi"
+        hi_dir.mkdir()
+        (hi_dir / "E107_S030_0160_org_v003.mov").write_bytes(b"")
+        assert _discover_plate_mov_basename(hi_dir) == "E107_S030_0160_org_v003.mov"
+
+    def test_returns_actual_mov_filename_in_h_folder(self, tmp_path: Path) -> None:
+        h_dir = tmp_path / "h"
+        h_dir.mkdir()
+        (h_dir / "EP06_S043_0140_org_v002.mov").write_bytes(b"")
+        assert _discover_plate_mov_basename(h_dir) == "EP06_S043_0140_org_v002.mov"
+
+    def test_returns_none_when_folder_empty(self, tmp_path: Path) -> None:
+        hi_dir = tmp_path / "hi"
+        hi_dir.mkdir()
+        assert _discover_plate_mov_basename(hi_dir) is None
+
+    def test_minimal_nk_uses_discovered_mov_in_hi(self, tmp_path: Path) -> None:
+        plate_hi = tmp_path / "plate" / "org" / "v003" / "hi"
+        plate_hi.mkdir(parents=True)
+        (plate_hi / "E01_S01_0010_org_v003.mov").write_bytes(b"")
+        paths = {
+            "shot_root": tmp_path,
+            "plate_hi": plate_hi,
+            "edit": tmp_path / "edit",
+            "renders": tmp_path / "renders",
+        }
+        preset = {"fps": "24", "plate_width": 1920, "plate_height": 1080}
+        result = _generate_nk_minimal(preset, "E01_S01_0010", paths, "v001")
+        norm = result.replace("\\", "/")
+        assert "plate/org/v003/hi" in norm
+        assert "E01_S01_0010_org_v003.mov" in norm
+        assert "E01_S01_0010_org_v001.mov" not in norm
+
+    def test_template_patch_uses_discovered_mov_in_h_folder(self, tmp_path: Path) -> None:
+        plate_hi = tmp_path / "plate" / "org" / "v002" / "h"
+        plate_hi.mkdir(parents=True)
+        (plate_hi / "EP06_S043_0140_org_v002.mov").write_bytes(b"")
+        template_body = (
+            "set cut_paste_input [stack 0]\n"
+            "Read {\n"
+            " file_type exr\n"
+            ' file "W:/vfx/E102/E102_S001_0020/plate/org/v001/hi/'
+            'E102_S001_0020_org_v001.1001.exr"\n'
+            " name Read1\n"
+            "}\n"
+        )
+        paths = {
+            "shot_root": tmp_path,
+            "plate_hi": plate_hi,
+            "edit": tmp_path / "edit",
+            "renders": tmp_path / "renders",
+        }
+        preset = {
+            "fps": "24",
+            "plate_width": 1920,
+            "plate_height": 1080,
+            "project_code": "PROJ",
+        }
+        with patch(
+            "bpe.core.nk_generator.load_preset_template",
+            return_value=template_body,
+        ):
+            content, _ = generate_nk_content(preset, "EP06_S043_0140", paths, "v001")
+        norm = content.replace("\\", "/")
+        assert "plate/org/v002/h" in norm
+        assert "EP06_S043_0140_org_v002.mov" in norm
 
 
 class TestReadFileTypeFromPlateBasename:

@@ -99,22 +99,55 @@ class TestBuildShotPaths:
         assert paths is not None
         assert paths["shot_root"] == tmp_path / "NWR_033" / "04_sq" / "NWR" / shot
 
-    def test_plate_hi_uses_mov_when_only_mov_folder_exists(self, tmp_path: Path) -> None:
+    def test_plate_hi_uses_hi_folder(self, tmp_path: Path) -> None:
         shot_root = tmp_path / "PRJ" / "04_sq" / "E107" / "E107_S030_0160"
-        (shot_root / "plate" / "org" / "v001" / "mov").mkdir(parents=True)
-        assert _resolve_plate_hi(shot_root).name == "mov"
+        (shot_root / "plate" / "org" / "v001" / "hi").mkdir(parents=True)
+        assert _resolve_plate_hi(shot_root).name == "hi"
 
-    def test_plate_hi_prefers_hi_when_hi_and_mov_exist(self, tmp_path: Path) -> None:
+    def test_plate_hi_uses_h_folder(self, tmp_path: Path) -> None:
+        shot_root = tmp_path / "shot"
+        (shot_root / "plate" / "org" / "v001" / "h").mkdir(parents=True)
+        assert _resolve_plate_hi(shot_root).name == "h"
+
+    def test_plate_hi_prefers_hi_over_h(self, tmp_path: Path) -> None:
         shot_root = tmp_path / "shot"
         base = shot_root / "plate" / "org" / "v001"
         (base / "hi").mkdir(parents=True)
-        (base / "mov").mkdir(parents=True)
+        (base / "h").mkdir(parents=True)
         assert _resolve_plate_hi(shot_root).name == "hi"
+
+    def test_plate_hi_ignores_mov_folder(self, tmp_path: Path) -> None:
+        shot_root = tmp_path / "shot"
+        (shot_root / "plate" / "org" / "v001" / "mov").mkdir(parents=True)
+        assert _resolve_plate_hi(shot_root) == shot_root / "plate" / "org" / "v001" / "hi"
 
     def test_plate_hi_defaults_to_hi_when_no_subfolder(self, tmp_path: Path) -> None:
         shot_root = tmp_path / "shot"
         shot_root.mkdir()
         assert _resolve_plate_hi(shot_root) == shot_root / "plate" / "org" / "v001" / "hi"
+
+    def test_plate_hi_prefers_latest_version_hi(self, tmp_path: Path) -> None:
+        shot_root = tmp_path / "shot"
+        (shot_root / "plate" / "org" / "v001" / "hi").mkdir(parents=True)
+        (shot_root / "plate" / "org" / "v003" / "hi").mkdir(parents=True)
+        assert _resolve_plate_hi(shot_root) == shot_root / "plate" / "org" / "v003" / "hi"
+
+    def test_plate_hi_prefers_latest_version_h(self, tmp_path: Path) -> None:
+        shot_root = tmp_path / "shot"
+        (shot_root / "plate" / "org" / "v011" / "h").mkdir(parents=True)
+        assert _resolve_plate_hi(shot_root) == shot_root / "plate" / "org" / "v011" / "h"
+
+    def test_plate_hi_skips_empty_latest_version(self, tmp_path: Path) -> None:
+        shot_root = tmp_path / "shot"
+        (shot_root / "plate" / "org" / "v003").mkdir(parents=True)
+        (shot_root / "plate" / "org" / "v001" / "hi").mkdir(parents=True)
+        assert _resolve_plate_hi(shot_root) == shot_root / "plate" / "org" / "v001" / "hi"
+
+    def test_plate_hi_numeric_version_order_v10_over_v2(self, tmp_path: Path) -> None:
+        shot_root = tmp_path / "shot"
+        (shot_root / "plate" / "org" / "v002" / "hi").mkdir(parents=True)
+        (shot_root / "plate" / "org" / "v010" / "hi").mkdir(parents=True)
+        assert _resolve_plate_hi(shot_root) == shot_root / "plate" / "org" / "v010" / "hi"
 
 
 # ── comp_devl_structure_exists / ensure_comp_folder_structure ──

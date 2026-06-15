@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -9,18 +10,35 @@ from bpe.core.logging import get_logger
 
 logger = get_logger("shot_builder")
 
+_PLATE_VERSION_DIR_RE = re.compile(r"^v\d+$", re.IGNORECASE)
+
 
 def _resolve_plate_hi(shot_root: Path) -> Path:
     """
-    ``plate/org/v001`` 아래 ``hi``(EXR 시퀀스) vs ``mov``(단일 클립) 중
-    실제로 존재하는 폴더를 고른다. 둘 다 없으면 ``hi``(신규 샷 기본값).
+    ``plate/org/v###`` 중 최신 버전 아래 ``hi`` 또는 ``h`` 폴더를 반환.
+    EXR 시퀀스와 MOV 클립 모두 hi/h 폴더에 위치한다.
+    버전 폴더가 없으면 ``v001/hi``(신규 샷 기본값).
     """
-    base = shot_root / "plate" / "org" / "v001"
-    for sub in ("hi", "mov"):
-        candidate = base / sub
-        if candidate.is_dir():
-            return candidate
-    return base / "hi"
+    plate_org = shot_root / "plate" / "org"
+    if plate_org.is_dir():
+        try:
+            version_dirs = sorted(
+                [
+                    d
+                    for d in plate_org.iterdir()
+                    if d.is_dir() and _PLATE_VERSION_DIR_RE.match(d.name)
+                ],
+                key=lambda d: int(d.name[1:]),
+                reverse=True,
+            )
+            for vdir in version_dirs:
+                for sub in ("hi", "h"):
+                    candidate = vdir / sub
+                    if candidate.is_dir():
+                        return candidate
+        except OSError:
+            pass
+    return shot_root / "plate" / "org" / "v001" / "hi"
 
 
 def parse_shot_name(shot_name: str) -> Optional[Dict[str, str]]:
@@ -103,7 +121,8 @@ def build_shot_paths(
     구조: server_root / project_code / 04_sq / EP / shot_name / ...
     ``04_sq`` 아래에 실제 샷 폴더가 있으면 그 부모를 EP로 쓴다(프로젝트별 네이밍 대응).
     없으면 ``parse_shot_name``의 첫 토큰 EP로 폴백(신규 샷).
-    ``plate_hi`` 키는 ``plate/org/v001/hi`` 또는 ``.../mov`` 중 디스크에 있는 쪽을 가리킨다.
+    ``plate_hi`` 키는 ``plate/org`` 아래 최신 ``v###/hi`` 또는 ``.../mov`` 중
+    디스크에 있는 쪽을 가리킨다.
     shot_name을 파싱할 수 없으면 None.
     """
     parsed = parse_shot_name(shot_name)
