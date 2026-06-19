@@ -25,6 +25,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from bpe.core.mov_colorspace import (
+    DISPLAY_NAME,
+    find_plate_movs_in_dir,
+    inspect_plate_colorspace,
+)
 from bpe.core.nk_finder import find_nukex_exe_and_args, find_server_root_auto
 from bpe.core.nk_generator import generate_nk_content
 from bpe.core.nuke_render_paths import normalize_path_str
@@ -39,6 +44,8 @@ from bpe.core.shot_builder import (
 from bpe.gui import theme
 
 _NK_VERSION = "v001"
+# 플레이트 MOV 컬러스페이스 자동 인식이 적용되는 유일한 프로젝트
+_MMK_PROJECT_CODE = "MMK_028"
 _LOG_RULE = "─" * 42
 _LOG_FONT_PX = theme.FONT_SIZE + 2
 
@@ -327,6 +334,76 @@ class ShotBuilderTab(QWidget):
             }
         )
 
+    def _mmk_abort(self, message: str) -> None:
+        """MMK_028 컬러 자동 인식 실패 시 로그 + 팝업으로 안내하고 중단한다."""
+        self._log.appendPlainText(f"[중단] {message}")
+        QMessageBox.warning(self, "컬러스페이스 자동 인식", message)
+
+    def _select_mmk_preset(
+        self,
+        presets: Dict[str, Any],
+        server_root: str,
+        folder_code: str,
+        shot_name: str,
+    ) -> tuple[Optional[str], Optional[str]]:
+        """MMK_028 전용: 플레이트 MOV 컬러를 인식해 프리셋 키와 로그 노트를 돌려준다.
+
+        작업자에게는 ``MMK_028``(일반) / ``MMK_028_AI``(AI) base 이름만 보여주고,
+        컬러(Rec.709/Gamma)는 화면에 노출하지 않는다. 실제 프리셋 키 =
+        선택한 base + 감지된 컬러. 실패 시 ``(None, None)`` 과 함께 팝업을 띄운다.
+        """
+        paths = build_shot_paths(server_root, folder_code, shot_name)
+        if paths is None:
+            self._mmk_abort("플레이트 경로를 계산할 수 없어 컬러를 인식하지 못했습니다.")
+            return None, None
+
+        plate_hi = paths["plate_hi"]
+        info = inspect_plate_colorspace(plate_hi)
+        if info.result is None:
+            self._mmk_abort(
+                "플레이트 MOV의 컬러스페이스를 자동으로 인식하지 못했습니다.\n"
+                f"근거: {info.reason}\n"
+                f"플레이트 폴더: {normalize_path_str(plate_hi)}\n"
+                "MOV가 있는지, 지원하는 컬러 태그(BT.709 / 태그 없는 ProRes)인지 확인하세요."
+            )
+            return None, None
+
+        color = info.result  # REC709 / GAMMA
+        # base 후보: 실제로 '{base}_{color}' 프리셋이 존재할 때만 노출
+        base_to_key: Dict[str, str] = {}
+        for base in (_MMK_PROJECT_CODE, f"{_MMK_PROJECT_CODE}_AI"):
+            resolved = _resolve_preset_key(presets, f"{base}_{color}")
+            if resolved is not None:
+                base_to_key[base] = resolved
+
+        color_disp = DISPLAY_NAME.get(color, color)
+        if not base_to_key:
+            self._mmk_abort(
+                f"플레이트는 {color_disp}로 인식됐지만, 맞는 프리셋이 없습니다.\n"
+                f"필요한 프리셋: {_MMK_PROJECT_CODE}_{color} 또는 "
+                f"{_MMK_PROJECT_CODE}_AI_{color}\n"
+                "프리셋 이름(철자)을 확인하세요."
+            )
+            return None, None
+
+        bases = list(base_to_key.keys())
+        if len(bases) == 1:
+            chosen_base: Optional[str] = bases[0]
+        else:
+            chosen_base = _pick_preset_dialog(self, bases, _MMK_PROJECT_CODE)
+            if chosen_base is None:
+                self._log.appendPlainText("[취소] 프리셋을 선택하지 않아 NK를 생성하지 않았습니다.")
+                return None, None
+
+        preset_key = base_to_key[chosen_base]
+        note_lines = [
+            f"플레이트 컬러스페이스 : {color_disp} (자동 인식)",
+        ]
+        movs = find_plate_movs_in_dir(plate_hi)
+        if movs:
+            note_lines.append(f"기준 MOV     : {normalize_path_str(movs[0])}")
+        return preset_key, "\n".join(note_lines)
+
     def _append_success_log(
         self,
         preset_name: str,
@@ -334,11 +411,14 @@ class ShotBuilderTab(QWidget):
         nk_path: Path,
         paths: Dict[str, Path],
         warnings: List[str],
+        colorspace_note: Optional[str] = None,
     ) -> None:
         self._log.appendPlainText("[성공] NK 파일이 생성되었습니다.")
         self._log.appendPlainText(_LOG_RULE)
         self._log.appendPlainText(f"샷 이름      : {shot_display}")
         self._log.appendPlainText(f"프리셋       : {preset_name}")
+        if colorspace_note:
+            self._log.appendPlainText(colorspace_note)
         self._log.appendPlainText(_LOG_RULE)
         self._log.appendPlainText(f"NK 파일      : {normalize_path_str(nk_path)}")
         self._log.appendPlainText(f"플레이트 경로 : {normalize_path_str(paths['plate_hi'])}")
@@ -422,6 +502,7 @@ class ShotBuilderTab(QWidget):
         shot_display = parsed["full"]
 
         presets = load_presets()
+        colorspace_note: Optional[str] = None
 
         if self._auto_mode:
             # 자동 모드: project_code 기준으로 매칭되는 프리셋 목록 탐색
@@ -431,8 +512,16 @@ class ShotBuilderTab(QWidget):
             if not matches:
                 self._log.appendPlainText(f"[오류] 프리셋 '{preset_name}'을(를) 찾을 수 없습니다.")
                 return
-            if len(matches) == 1:
-                preset_key: Optional[str] = matches[0]
+            if folder_code.strip().upper() == _MMK_PROJECT_CODE:
+                # MMK_028 전용: 플레이트 MOV 컬러를 자동 인식해 프리셋을 결정한다.
+                preset_key: Optional[str] = None
+                preset_key, colorspace_note = self._select_mmk_preset(
+                    presets, server_root, folder_code, shot_name
+                )
+                if preset_key is None:
+                    return  # 안내·팝업은 헬퍼에서 처리됨
+            elif len(matches) == 1:
+                preset_key = matches[0]
             else:
                 preset_key = _pick_preset_dialog(self, matches, preset_name)
                 if preset_key is None:
@@ -521,7 +610,9 @@ class ShotBuilderTab(QWidget):
         self._open_folder_btn.setEnabled(True)
         self._open_nukex_btn.setEnabled(True)
 
-        self._append_success_log(preset_key, shot_display, nk_path, paths, warnings)
+        self._append_success_log(
+            preset_key, shot_display, nk_path, paths, warnings, colorspace_note
+        )
 
         if not self._auto_mode:
             self._save_settings()
