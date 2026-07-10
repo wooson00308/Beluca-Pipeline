@@ -683,9 +683,7 @@ class _ShotCard(QFrame):
                 project_code,
             )
             return
-        folder = find_shot_folder_by_task(
-            shot_code, project_code, server_root, task_content
-        )
+        folder = find_shot_folder_by_task(shot_code, project_code, server_root, task_content)
         if folder is None or not folder.is_dir():
             logger.warning("폴더 열기: 샷 폴더를 찾을 수 없음 (%s)", shot_code)
             return
@@ -3106,8 +3104,8 @@ class MyTasksTab(QWidget):
 
         dlg = QDialog(self)
         dlg.setWindowTitle("Publish")
-        dlg.setMinimumSize(1050, 880)
-        dlg.resize(1100, 940)
+        dlg.setMinimumSize(1050, 940)
+        dlg.resize(1100, 1000)
 
         lay = QVBoxLayout(dlg)
         lay.setContentsMargins(0, 0, 0, 0)

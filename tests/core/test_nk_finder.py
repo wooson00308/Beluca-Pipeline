@@ -269,6 +269,61 @@ class TestFindCompRenderMov:
         self._make_renders_tree(tmp_path, "E01_S01_002")
         assert find_comp_render_mov("E01_S01_002", "PRJ", str(tmp_path)) is None
 
+    def test_exclude_lut_stem_prefers_non_lut(self, tmp_path):
+        """exclude_lut_stem=True면 같은 버전에서 _lut.mov를 건너뛴다."""
+        shot = "EP01_S08_C0070"
+        ep = "EP01"
+        shot_root = tmp_path / "CRS2_032" / "04_sq" / ep / shot
+        rd = shot_root / "comp" / "devl" / "renders"
+        rd.mkdir(parents=True)
+        non_lut = rd / f"{shot}_comp_v003.mov"
+        lut = rd / f"{shot}_comp_v003_lut.mov"
+        non_lut.write_bytes(b"a")
+        lut.write_bytes(b"b")
+        # lut가 더 최신이어도 non-lut 선택
+        import os
+        import time
+
+        older = time.time() - 100
+        newer = time.time()
+        os.utime(non_lut, (older, older))
+        os.utime(lut, (newer, newer))
+
+        result = find_comp_render_mov(shot, "CRS2_032", str(tmp_path), exclude_lut_stem=True)
+        assert result is not None
+        assert result.name == f"{shot}_comp_v003.mov"
+        assert "_lut" not in result.stem
+
+    def test_exclude_lut_stem_only_lut_returns_none(self, tmp_path):
+        shot = "EP01_S08_C0070"
+        ep = "EP01"
+        rd = tmp_path / "CRS2_032" / "04_sq" / ep / shot / "comp" / "devl" / "renders"
+        rd.mkdir(parents=True)
+        (rd / f"{shot}_comp_v003_lut.mov").write_bytes(b"b")
+
+        assert find_comp_render_mov(shot, "CRS2_032", str(tmp_path), exclude_lut_stem=True) is None
+
+    def test_without_exclude_lut_mtime_can_pick_lut(self, tmp_path):
+        """기본(False)이면 다른 프로젝트처럼 mtime 우선 — lut가 최신이면 lut."""
+        shot = "E01_S01_001"
+        self._make_renders_tree(tmp_path, shot)
+        rd = tmp_path / "PRJ" / "04_sq" / "E01" / shot / "comp" / "devl" / "renders"
+        non_lut = rd / f"{shot}_comp_v003.mov"
+        lut = rd / f"{shot}_comp_v003_lut.mov"
+        non_lut.write_bytes(b"a")
+        lut.write_bytes(b"b")
+        import os
+        import time
+
+        older = time.time() - 100
+        newer = time.time()
+        os.utime(non_lut, (older, older))
+        os.utime(lut, (newer, newer))
+
+        result = find_comp_render_mov(shot, "PRJ", str(tmp_path))
+        assert result is not None
+        assert result.name.endswith("_lut.mov")
+
     def test_returns_none_when_renders_missing(self, tmp_path):
         ep = "E01_S01_003".split("_")[0].upper()
         shot_root = tmp_path / "PRJ" / "04_sq" / ep / "E01_S01_003"
@@ -484,8 +539,7 @@ class TestFindShotFolderByTask:
         devl = shot_root / "comp" / "devl"
         devl.mkdir(parents=True)
         assert (
-            find_shot_folder_by_task("E01_S01_011", "PRJ", str(tmp_path), "COMP")
-            == devl.resolve()
+            find_shot_folder_by_task("E01_S01_011", "PRJ", str(tmp_path), "COMP") == devl.resolve()
         )
 
     def test_comp_fallback_shot_root_when_devl_missing(self, tmp_path):

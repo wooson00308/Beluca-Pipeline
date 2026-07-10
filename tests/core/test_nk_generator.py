@@ -644,6 +644,23 @@ class TestGenerateNkMinimal:
         assert "/E01_S01_0010_comp_v001.mov" in result.replace("\\", "/")
         assert "####.mov" not in result
 
+    def test_minimal_mov_write_lowercase_shot_slug(self):
+        """샷 빌드가 넘기는 소문자 슬러그로 Write 경로가 소문자로 생성된다."""
+        paths = {
+            "shot_root": Path("/shots/E01_S01"),
+            "plate_hi": Path("/shots/E01_S01/plate/org/v001/hi"),
+            "edit": Path("/shots/E01_S01/edit"),
+            "renders": Path("/shots/E01_S01/comp/devl/renders"),
+        }
+        preset = {
+            "fps": "24",
+            "plate_width": 1920,
+            "plate_height": 1080,
+            "delivery_format": "ProRes 422 HQ",
+        }
+        result = _generate_nk_minimal(preset, "e01_s01_0010", paths, "v001")
+        assert "/e01_s01_0010_comp_v001.mov" in result.replace("\\", "/")
+
     def test_minimal_mov_plate_in_hi_folder(self, tmp_path: Path) -> None:
         """plate_hi가 v001/hi/ 이고 안에 MOV 파일이 있으면 Read_Plate도 MOV로 맞춘다."""
         plate_hi = tmp_path / "plate" / "org" / "v001" / "hi"

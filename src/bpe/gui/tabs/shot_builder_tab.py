@@ -549,7 +549,9 @@ class ShotBuilderTab(QWidget):
 
         nuke_dir = paths["nuke_dir"]
         nk_v001_dir = nuke_dir / _NK_VERSION
-        nk_filename = f"{shot_display}_comp_{_NK_VERSION}.nk"
+        # NK 파일명·스크립트 내부 Write 슬러그는 항상 소문자 (서버 샷 폴더는 대문자 유지)
+        nk_slug = shot_display.lower()
+        nk_filename = f"{nk_slug}_comp_{_NK_VERSION}.nk"
         nk_path = nk_v001_dir / nk_filename
 
         if nk_v001_dir.exists():
@@ -591,7 +593,7 @@ class ShotBuilderTab(QWidget):
                 self._log.appendPlainText(f"[오류] 폴더 생성 실패: {e}")
                 return
 
-        nk_content, warnings = generate_nk_content(preset_data, shot_display, paths, _NK_VERSION)
+        nk_content, warnings = generate_nk_content(preset_data, nk_slug, paths, _NK_VERSION)
 
         try:
             nk_v001_dir.mkdir(parents=True, exist_ok=True)

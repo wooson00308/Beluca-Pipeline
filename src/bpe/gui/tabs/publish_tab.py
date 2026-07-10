@@ -9,7 +9,6 @@ from typing import Any, Dict, List, Optional
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QComboBox,
-    QDoubleSpinBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -22,6 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from bpe.gui.widgets.duration_widget import DurationWidget
 from bpe.gui.workers.sg_worker import ShotGridWorker
 from bpe.gui.workers.upload_worker import UploadWorker
 from bpe.shotgrid.client import get_default_sg, get_shotgun_for_version_mutation, resolve_sudo_login
@@ -36,6 +36,7 @@ from bpe.shotgrid.versions import create_version
 logger = logging.getLogger(__name__)
 
 _LABEL_W = 130
+_CRS2_032_PROJECT_CODE = "CRS2_032"
 
 
 def _info_row(label_text: str, widget: QWidget) -> QHBoxLayout:
@@ -182,19 +183,12 @@ class PublishTab(QWidget):
         tl_block = QVBoxLayout()
         tl_block.setSpacing(10)
 
-        self._timelog_hours = QDoubleSpinBox()
-        self._timelog_hours.setRange(0.0, 24.0)
-        self._timelog_hours.setSingleStep(0.5)
-        self._timelog_hours.setDecimals(1)
-        self._timelog_hours.setValue(0.0)
-        self._timelog_hours.setSuffix(" 시간")
-        self._timelog_hours.setSpecialValueText("(기록 안 함)")
-        self._timelog_hours.setFixedWidth(140)
-        tl_block.addLayout(_input_row("작업 시간", self._timelog_hours))
-
         self._timelog_desc = QLineEdit()
-        self._timelog_desc.setPlaceholderText("TimeLog 내용 (선택)")
-        tl_block.addLayout(_input_row("TimeLog 내용", self._timelog_desc))
+        self._timelog_desc.setPlaceholderText("Description:")
+        tl_block.addLayout(_input_row("Description:", self._timelog_desc))
+
+        self._timelog_duration = DurationWidget(placeholder="Duration:")
+        tl_block.addLayout(_input_row("Duration:", self._timelog_duration))
 
         root.addLayout(tl_block)
         root.addSpacing(20)
@@ -280,7 +274,14 @@ class PublishTab(QWidget):
             server_root = find_server_root_auto(project_code) or env_root
             if not server_root:
                 return None
-            mov = find_comp_render_mov(shot_code, project_code, server_root)
+            # CRS2_032 퍼블리시만: _lut.mov 제외 (납품용 일반 mov)
+            exclude_lut = (project_code or "").strip().upper() == _CRS2_032_PROJECT_CODE
+            mov = find_comp_render_mov(
+                shot_code,
+                project_code,
+                server_root,
+                exclude_lut_stem=exclude_lut,
+            )
             return str(mov) if mov else None
 
         w = ShotGridWorker(_find)
@@ -458,12 +459,11 @@ class PublishTab(QWidget):
             return
         self._timelog_phase_done = True
 
-        hours = self._timelog_hours.value()
-        if hours <= 0.0:
+        duration_minutes = self._timelog_duration.total_minutes()
+        if duration_minutes < 1:
             self._finish_publish()
             return
 
-        duration_minutes = max(1, round(hours * 60))
         tl_desc = self._timelog_desc.text().strip()
         td = self._task_data
         project_id = td.get("project_id")

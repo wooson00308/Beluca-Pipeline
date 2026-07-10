@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import urllib.request
 from datetime import date
 from typing import Any, Callable, Dict, Optional
@@ -30,6 +29,7 @@ from PySide6.QtWidgets import (
 from bpe.core.logging import get_logger
 from bpe.core.nuke_render_paths import normalize_path_str
 from bpe.gui import theme
+from bpe.gui.widgets.duration_widget import DurationWidget as _DurationWidget
 from bpe.gui.workers.sg_worker import ShotGridWorker
 from bpe.shotgrid.client import get_default_sg
 from bpe.shotgrid.projects import find_project_by_code
@@ -42,7 +42,6 @@ logger = get_logger("gui.widgets.time_log_dialog")
 PROD_PROJECT_CODE = "PROD"
 _THUMB_W = 56
 _THUMB_H = 42
-_MAX_DURATION_MIN = 1440
 _CAL_MIN_W = int(320 * 1.5)
 _CAL_MIN_H = int(220 * 1.5)
 
@@ -52,43 +51,6 @@ def _format_duration_minutes(total: int) -> str:
         return "0h 0m"
     h, m = divmod(int(total), 60)
     return f"{h}h {m}m"
-
-
-def _format_minutes_for_field(mins: int) -> str:
-    m = max(0, min(_MAX_DURATION_MIN, int(mins)))
-    if m == 0:
-        return ""
-    h, mm = divmod(m, 60)
-    if h and mm:
-        return f"{h}h {mm}m"
-    if h:
-        return f"{h}h"
-    return f"{mm}m"
-
-
-def _parse_duration_minutes(text: str) -> int:
-    """Parse free-text duration into minutes (cap 24h). Supports e.g. 1h 30m, 2h, 90m, 1.5h."""
-    s = (text or "").strip().lower()
-    if not s:
-        return 0
-    total = 0.0
-    rest = s
-    for m in re.finditer(r"(\d+(?:\.\d+)?)\s*h", rest):
-        total += float(m.group(1)) * 60.0
-    rest = re.sub(r"\d+(?:\.\d+)?\s*h", " ", rest)
-    for m in re.finditer(r"(\d+)\s*m", rest):
-        total += float(m.group(1))
-    rest = re.sub(r"\d+\s*m", " ", rest)
-    rest_stripped = re.sub(r"\s+", "", rest)
-    if total <= 0 and rest_stripped:
-        if re.fullmatch(r"\d+(?:\.\d+)?", rest_stripped):
-            val = float(rest_stripped)
-            if val <= 24 and (val != int(val) or val <= 12):
-                total = val * 60.0
-            else:
-                total = val
-    out = int(round(total))
-    return max(0, min(_MAX_DURATION_MIN, out))
 
 
 def _calendar_dark_stylesheet() -> str:
@@ -137,54 +99,6 @@ def _apply_dark_date_edit(date_edit: QDateEdit) -> None:
     cal.setMinimumSize(_CAL_MIN_W, _CAL_MIN_H)
     cal.setStyleSheet(_calendar_dark_stylesheet())
     cal.setVerticalHeaderFormat(QCalendarWidget.VerticalHeaderFormat.NoVerticalHeader)
-
-
-class _DurationWidget(QWidget):
-    """Manual duration text field; +1h / −1h below, right-aligned."""
-
-    def __init__(
-        self,
-        parent: Optional[QWidget] = None,
-        *,
-        placeholder: str = "Duration:",
-    ) -> None:
-        super().__init__(parent)
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(6)
-
-        self._edit = QLineEdit()
-        self._edit.setPlaceholderText(placeholder)
-        outer.addWidget(self._edit)
-
-        btn_row = QHBoxLayout()
-        btn_row.addStretch(1)
-        self._minus = QPushButton("−1h")
-        self._minus.setFixedSize(52, 32)
-        self._minus.clicked.connect(self._on_minus_h)
-        self._plus = QPushButton("+1h")
-        self._plus.setFixedSize(52, 32)
-        self._plus.clicked.connect(self._on_plus_h)
-        btn_row.addWidget(self._minus)
-        btn_row.addWidget(self._plus)
-        outer.addLayout(btn_row)
-
-    def _on_minus_h(self) -> None:
-        m = _parse_duration_minutes(self._edit.text())
-        self._edit.setText(_format_minutes_for_field(max(0, m - 60)))
-
-    def _on_plus_h(self) -> None:
-        m = _parse_duration_minutes(self._edit.text())
-        self._edit.setText(_format_minutes_for_field(min(_MAX_DURATION_MIN, m + 60)))
-
-    def line_edit(self) -> QLineEdit:
-        return self._edit
-
-    def total_minutes(self) -> int:
-        return _parse_duration_minutes(self._edit.text())
-
-    def reset(self) -> None:
-        self._edit.clear()
 
 
 def _fetch_timelog_state(user_id: int, target_date: date, prod_code: str) -> Dict[str, Any]:

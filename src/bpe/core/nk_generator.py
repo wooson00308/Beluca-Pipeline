@@ -158,7 +158,7 @@ def _preset_first_part(preset_data: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
-_SHOT_CODE_TOKEN = re.compile(r"^E\d+_S\d+_\d+")
+_SHOT_CODE_TOKEN = re.compile(r"^E\d+_S\d+_\d+", re.IGNORECASE)
 
 # 플레이트 파일명 정규화: EXR·DPX 등은 ####, MOV·MP4 등은 단일 클립으로 취급
 _PLATE_SEQUENCE_EXTS = frozenset({"exr", "dpx", "tif", "tiff"})
@@ -1205,12 +1205,13 @@ def generate_nk_content(
     body = _patch_read_plate_file_paths(body, shot_name, paths)
     body = _patch_read_edit_file_paths(body, shot_name, paths)
 
-    # Patch comp version in Viewer NDISender etc.
+    # Patch comp version in Viewer NDISender etc. (템플릿 대문자 / 슬러그 소문자 모두 허용)
     body = re.sub(
         rf"(monitorOutNDISenderName \"NukeX - {re.escape(shot_name)}_comp_)v\d+",
         rf"\g<1>{nk_version}",
         body,
         count=1,
+        flags=re.IGNORECASE,
     )
 
     fps = str(preset_data.get("fps", "23.976"))

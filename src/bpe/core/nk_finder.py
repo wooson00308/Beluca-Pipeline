@@ -946,10 +946,17 @@ def find_comp_render_video(
     version_code: Optional[str] = None,
     extensions: Tuple[str, ...] = (".mov", ".mp4", ".mxf", ".mkv"),
     fallback_latest_if_version_unmatched: bool = False,
+    exclude_lut_stem: bool = False,
 ) -> Optional[Path]:
     """샷 루트 아래 여러 후보 폴더에서 영상 파일을 찾는다.
 
     ``find_comp_render_mov`` 보다 확장자·폴더 범위가 넓다. 동일한 버전 매칭 규칙을 쓴다.
+
+    Parameters
+    ----------
+    exclude_lut_stem :
+        True이면 파일 stem이 ``_lut`` 로 끝나는 후보를 제외한다.
+        제외 후 후보가 없으면 None (기본 False — RV/피드백 등 기존 동작 유지).
     """
     sn = (shot_name or "").strip()
     pc = (project_code or "").strip()
@@ -994,6 +1001,17 @@ def find_comp_render_video(
                     candidates.append(p)
             except OSError as exc:
                 logger.debug("find_comp_render_video glob 실패 %s: %s", d, exc)
+
+    if exclude_lut_stem and candidates:
+        non_lut = [p for p in candidates if not p.stem.lower().endswith("_lut")]
+        if not non_lut:
+            logger.warning(
+                "find_comp_render_video: _lut 제외 후 후보 없음 shot=%s project=%s",
+                sn,
+                pc,
+            )
+            return None
+        candidates = non_lut
 
     if not candidates:
         logger.warning(
@@ -1148,6 +1166,7 @@ def find_comp_render_mov(
     server_root: str,
     *,
     version_code: Optional[str] = None,
+    exclude_lut_stem: bool = False,
 ) -> Optional[Path]:
     """``comp/devl/renders`` 등 후보 폴더에서 ``.mov`` 만 찾는다 (RV 등 기존 호출 호환).
 
@@ -1157,6 +1176,8 @@ def find_comp_render_mov(
         ShotGrid Version 엔티티의 ``code`` 값 (예: ``"S100_0140_comp_v007"``).
         지정하면 해당 버전 파일만 반환 — stem 완전 일치 우선, 포함 일치 폴백.
         None이면 버전 번호 최대(동률 시 mtime) 파일을 반환.
+    exclude_lut_stem :
+        True이면 stem이 ``_lut`` 로 끝나는 파일을 제외 (퍼블리시 CRS2 등).
 
     샷 루트는 ``_resolve_shot_root`` (``build_shot_paths`` → BFS 휴리스틱)로 구한다.
     """
@@ -1166,6 +1187,7 @@ def find_comp_render_mov(
         server_root,
         version_code=version_code,
         extensions=(".mov",),
+        exclude_lut_stem=exclude_lut_stem,
     )
 
 

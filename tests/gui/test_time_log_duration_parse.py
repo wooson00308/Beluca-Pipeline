@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from bpe.gui.widgets.time_log_dialog import _parse_duration_minutes
+from bpe.gui.widgets.duration_widget import parse_duration_minutes as _parse_duration_minutes
 
 
 def test_parse_duration_h_m() -> None:
