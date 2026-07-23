@@ -1,9 +1,9 @@
+# @cursor-change: 2026-07-23, 0.8.28, NukeX 여러 버전 설치 시 버전 선택 팝업 연결
 """Shot Builder tab — build server paths and generate NK files from presets."""
 
 from __future__ import annotations
 
 import os
-import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -30,7 +30,11 @@ from bpe.core.mov_colorspace import (
     find_plate_movs_in_dir,
     inspect_plate_colorspace,
 )
-from bpe.core.nk_finder import find_nukex_exe_and_args, find_server_root_auto
+from bpe.core.nk_finder import (
+    find_all_nukex_launchers,
+    find_server_root_auto,
+    launch_nk_with_launcher,
+)
 from bpe.core.nk_generator import generate_nk_content
 from bpe.core.nuke_render_paths import normalize_path_str
 from bpe.core.presets import find_matching_preset_keys, load_presets
@@ -42,6 +46,7 @@ from bpe.core.shot_builder import (
     parse_shot_name,
 )
 from bpe.gui import theme
+from bpe.gui.widgets.nukex_version_dialog import choose_nukex_launcher
 
 _NK_VERSION = "v001"
 # 플레이트 MOV 컬러스페이스 자동 인식이 적용되는 유일한 프로젝트
@@ -631,8 +636,9 @@ class ShotBuilderTab(QWidget):
     def _open_nukex(self) -> None:
         if self._last_nk_path is None or not self._last_nk_path.is_file():
             return
-        exe, extra_args = find_nukex_exe_and_args()
-        if exe is None:
+        # NukeX가 여러 버전 설치되어 있으면 버전 선택 팝업, 1개면 바로, 0개면 경고.
+        launchers = find_all_nukex_launchers()
+        if not launchers:
             QMessageBox.warning(
                 self,
                 "NukeX",
@@ -640,10 +646,10 @@ class ShotBuilderTab(QWidget):
                 "Nuke 설치 후 다시 시도하거나 BPE_NUKEX_EXE 환경 변수를 설정하세요.",
             )
             return
+        launcher = choose_nukex_launcher(self, launchers)
+        if launcher is None:
+            return  # 사용자가 취소
         try:
-            subprocess.Popen(
-                [str(exe), *extra_args, normalize_path_str(self._last_nk_path)],
-                close_fds=True,
-            )
+            launch_nk_with_launcher(self._last_nk_path, launcher)
         except OSError as e:
             QMessageBox.warning(self, "NukeX", f"NK 파일을 열 수 없습니다:\n{e}")

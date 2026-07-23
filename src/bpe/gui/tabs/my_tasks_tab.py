@@ -1,10 +1,11 @@
-# @cursor-change: 2026-05-15, 0.8.23, 마이 태스크 Publish 버튼·다이얼로그 제목 영문
+# @cursor-change: 2026-07-23, 0.8.28, NukeX 여러 버전 설치 시 버전 선택 팝업 연결
 """My Tasks tab — ShotGrid comp task list with thumbnails, NukeX open, shot folder."""
 
 from __future__ import annotations
 
 import os
 import re
+import sys
 from datetime import date, datetime
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -43,6 +44,7 @@ from PySide6.QtWidgets import (
 
 from bpe.core.logging import get_logger
 from bpe.core.nk_finder import (
+    find_all_nukex_launchers,
     find_latest_comp_version_display,
     find_latest_nk_and_open,
     find_server_root_auto,
@@ -56,6 +58,7 @@ from bpe.core.shotgrid_settings import get_shotgrid_settings
 from bpe.gui import theme
 from bpe.gui.shotgrid_open_shot import setup_copy_shot_name_button, setup_shotgrid_open_shot_button
 from bpe.gui.widgets.clickable_image import ClickableImage
+from bpe.gui.widgets.nukex_version_dialog import choose_nukex_launcher
 from bpe.gui.workers.sg_worker import ShotGridWorker
 from bpe.shotgrid.client import get_default_sg
 from bpe.shotgrid.notes import (
@@ -704,8 +707,25 @@ class _ShotCard(QFrame):
                 project_code,
             )
             return
+        # Windows: NukeX가 여러 버전 설치되어 있으면 버전 선택 팝업을 띄운다.
+        # 그 외 OS는 기존 동작(open/xdg-open)을 그대로 유지한다.
         try:
-            find_latest_nk_and_open(shot_code, project_code, server_root)
+            if sys.platform == "win32":
+                launchers = find_all_nukex_launchers()
+                if not launchers:
+                    QMessageBox.warning(
+                        self,
+                        "NukeX",
+                        "NukeX 실행 파일을 찾지 못했습니다.\n"
+                        "Nuke 설치 후 다시 시도하거나 BPE_NUKEX_EXE 환경 변수를 설정하세요.",
+                    )
+                    return
+                launcher = choose_nukex_launcher(self, launchers)
+                if launcher is None:
+                    return  # 사용자가 취소
+                find_latest_nk_and_open(shot_code, project_code, server_root, launcher=launcher)
+            else:
+                find_latest_nk_and_open(shot_code, project_code, server_root)
         except Exception as e:
             logger.warning("NK 열기 실패: %s", e)
 

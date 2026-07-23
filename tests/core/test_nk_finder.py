@@ -1,4 +1,4 @@
-# @cursor-change: 2026-05-15, 0.8.23, find_shot_folder_by_task 테스트 추가
+# @cursor-change: 2026-07-23, 0.8.28, find_all_nukex_launchers/launcher 인자 테스트 추가
 """Tests for bpe.core.nk_finder."""
 
 from __future__ import annotations
@@ -10,11 +10,14 @@ import pytest
 
 from bpe.core.nk_finder import (
     _NK_VERSION_RE,
+    NukexLauncher,
     _find_nukex_exe_under_roots,
     _find_server_root_from_drive_roots,
     _nk_is_junk_file,
+    find_all_nukex_launchers,
     find_comp_render_mov,
     find_latest_comp_version_display,
+    find_latest_nk_and_open,
     find_latest_nk_path,
     find_nukex_exe,
     find_nukex_exe_and_args,
@@ -768,3 +771,104 @@ class TestResolveCompRendersDir:
         got = resolve_comp_renders_dir(shot_name, project_code, str(server_root))
         assert got is not None
         assert got.resolve() == target.resolve()
+
+
+# ── find_all_nukex_launchers ─────────────────────────────────────
+
+
+class TestFindAllNukexLaunchers:
+    def test_multiple_installs_sorted_desc(self, tmp_path, monkeypatch):
+        pf = tmp_path / "pf"
+        (pf / "Nuke14.0" / "NukeX14.0.exe").parent.mkdir(parents=True)
+        (pf / "Nuke14.0" / "NukeX14.0.exe").write_text("exe")
+        (pf / "Nuke17.0" / "NukeX17.0.exe").parent.mkdir(parents=True)
+        (pf / "Nuke17.0" / "NukeX17.0.exe").write_text("exe")
+        monkeypatch.setattr("bpe.core.nk_finder._nuke_program_dirs", lambda: [pf])
+        # Start Menu 스캔은 비워둔다 (legacy 경로만 검증).
+        monkeypatch.setattr("bpe.core.nk_finder._collect_start_menu_candidates", lambda: [])
+        monkeypatch.delenv("BPE_NUKEX_EXE", raising=False)
+
+        got = find_all_nukex_launchers()
+        assert [nl.version for nl in got] == [(17, 0, 0), (14, 0, 0)]
+        assert got[0].label == "NukeX 17.0"
+        assert got[1].label == "NukeX 14.0"
+        assert all(nl.args == [] for nl in got)
+
+    def test_dedupe_by_major_minor_prefers_start_menu(self, tmp_path, monkeypatch):
+        pf = tmp_path / "pf"
+        (pf / "Nuke14.1" / "NukeX14.1.exe").parent.mkdir(parents=True)
+        (pf / "Nuke14.1" / "NukeX14.1.exe").write_text("exe")
+        sm_exe = pf / "Nuke14.1" / "Nuke14.1.exe"
+        sm_exe.write_text("exe")
+        monkeypatch.setattr("bpe.core.nk_finder._nuke_program_dirs", lambda: [pf])
+        monkeypatch.setattr(
+            "bpe.core.nk_finder._collect_start_menu_candidates",
+            lambda: [((14, 1, 4), sm_exe)],
+        )
+        monkeypatch.delenv("BPE_NUKEX_EXE", raising=False)
+
+        got = find_all_nukex_launchers()
+        # (14, 1) 은 Start Menu 후보가 우선 → --nukex, exe 는 Nuke14.1.exe
+        assert len(got) == 1
+        assert got[0].args == ["--nukex"]
+        assert got[0].exe == sm_exe
+
+    def test_env_override_returns_single(self, tmp_path, monkeypatch):
+        exe = tmp_path / "Nuke15.1" / "NukeX_custom.exe"
+        exe.parent.mkdir(parents=True)
+        exe.write_text("x")
+        monkeypatch.setenv("BPE_NUKEX_EXE", str(exe))
+        # override 시 스캔 함수를 타면 안 된다.
+        monkeypatch.setattr(
+            "bpe.core.nk_finder._collect_start_menu_candidates",
+            lambda: (_ for _ in ()).throw(AssertionError("should not scan")),
+        )
+        got = find_all_nukex_launchers()
+        assert len(got) == 1
+        assert got[0].exe == exe.resolve()
+        assert got[0].args == []
+
+    def test_empty_when_none(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("bpe.core.nk_finder._nuke_program_dirs", lambda: [tmp_path / "empty"])
+        monkeypatch.setattr("bpe.core.nk_finder._collect_start_menu_candidates", lambda: [])
+        monkeypatch.delenv("BPE_NUKEX_EXE", raising=False)
+        assert find_all_nukex_launchers() == []
+
+
+# ── find_latest_nk_and_open(launcher=...) ────────────────────────
+
+
+class TestFindLatestNkAndOpenLauncher:
+    def test_uses_given_launcher(self, tmp_path, monkeypatch):
+        nk = tmp_path / "shot_v001.nk"
+        nk.write_text("nk")
+        monkeypatch.setattr("sys.platform", "win32")
+        monkeypatch.setattr("bpe.core.nk_finder.find_latest_nk_path", lambda *a, **k: nk)
+        monkeypatch.setattr(
+            "bpe.core.nk_finder.patch_nk_string_trim_in_place", lambda *a, **k: False
+        )
+
+        calls = {}
+
+        def fake_popen(args, **kwargs):
+            calls["args"] = args
+            calls["kwargs"] = kwargs
+
+        monkeypatch.setattr("bpe.core.nk_finder.subprocess.Popen", fake_popen)
+        # 지정 launcher 를 쓰면 find_nukex_exe_and_args 를 타면 안 된다.
+        monkeypatch.setattr(
+            "bpe.core.nk_finder.find_nukex_exe_and_args",
+            lambda: (_ for _ in ()).throw(AssertionError("should not be called")),
+        )
+
+        launcher = NukexLauncher(
+            version=(14, 0, 0),
+            exe=Path("C:/Program Files/Nuke14.0/NukeX14.0.exe"),
+            args=["--nukex"],
+            label="NukeX 14.0",
+        )
+        find_latest_nk_and_open("SHOT", "PRJ", str(tmp_path), launcher=launcher)
+
+        assert calls["args"][0] == str(launcher.exe)
+        assert calls["args"][1] == "--nukex"
+        assert calls["kwargs"].get("close_fds") is True

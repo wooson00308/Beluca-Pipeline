@@ -1,4 +1,4 @@
-# @cursor-change: 2026-05-15, 0.8.23, 마이테스크 폴더 열기 태스크별 경로(comp/devl, fx, matte)
+# @cursor-change: 2026-07-23, 0.8.28, NukeX 다중 버전 선택 지원(find_all_nukex_launchers)
 """NK file discovery — find the latest .nk for a given shot."""
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ import subprocess
 import sys
 from collections import deque
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from bpe.core.logging import get_logger
 from bpe.core.nuke_render_paths import normalize_path_str
@@ -172,8 +172,10 @@ def _is_nukex_executable_basename(filename: str, *, require_exe_suffix: bool) ->
     return True
 
 
-def _find_nukex_exe_under_roots(search_roots: List[Path]) -> Optional[Path]:
-    """search_roots 아래 ``Nuke*`` 폴더에서 ``nukex*.exe`` 만 고른다 (일반 Nuke 제외)."""
+def _collect_nukex_exe_candidates(
+    search_roots: List[Path],
+) -> List[Tuple[Tuple[int, int, int], Path]]:
+    """search_roots 아래 ``Nuke*`` 폴더의 ``nukex*.exe`` 후보를 모두 수집한다 (일반 Nuke 제외)."""
     candidates: List[Tuple[Tuple[int, int, int], Path]] = []
     for base in search_roots:
         try:
@@ -203,7 +205,12 @@ def _find_nukex_exe_under_roots(search_roots: List[Path]) -> Optional[Path]:
                 candidates.append((ver_t, nukex_exe))
         except OSError:
             continue
+    return candidates
 
+
+def _find_nukex_exe_under_roots(search_roots: List[Path]) -> Optional[Path]:
+    """search_roots 아래 ``Nuke*`` 폴더에서 ``nukex*.exe`` 만 고른다 (일반 Nuke 제외)."""
+    candidates = _collect_nukex_exe_candidates(search_roots)
     if not candidates:
         return None
 
@@ -271,19 +278,16 @@ def _program_files_nuke_exe_path(major: int, minor: int, patch: int) -> List[Pat
     return [root / inst / exe_name for root in _nuke_program_dirs()]
 
 
-def _find_nukex_via_start_menu() -> Optional[Tuple[Path, List[str]]]:
-    """Start Menu의 The Foundry / ``Nuke x.xvx`` + ``NukeX x.xvx.lnk``로 Nuke 14+ 실행 경로 탐색.
-
-    Nuke 14+ 는 ``Nuke14.1.exe --nukex`` 형태이며 ``nukex*.exe`` 단일 파일이 없을 수 있다.
-    """
+def _collect_start_menu_candidates() -> List[Tuple[Tuple[int, int, int], Path]]:
+    """Start Menu The Foundry / ``Nuke x.xvx`` + ``NukeX x.xvx.lnk`` 기반 Nuke 14+ 후보 수집."""
     if sys.platform != "win32":
-        return None
+        return []
     root = _start_menu_foundry_root()
     try:
         if not root.is_dir():
-            return None
+            return []
     except OSError:
-        return None
+        return []
 
     candidates: List[Tuple[Tuple[int, int, int], Path]] = []
     try:
@@ -312,8 +316,16 @@ def _find_nukex_via_start_menu() -> Optional[Tuple[Path, List[str]]]:
                 except OSError:
                     continue
     except OSError:
-        return None
+        return []
+    return candidates
 
+
+def _find_nukex_via_start_menu() -> Optional[Tuple[Path, List[str]]]:
+    """Start Menu의 The Foundry / ``Nuke x.xvx`` + ``NukeX x.xvx.lnk``로 Nuke 14+ 실행 경로 탐색.
+
+    Nuke 14+ 는 ``Nuke14.1.exe --nukex`` 형태이며 ``nukex*.exe`` 단일 파일이 없을 수 있다.
+    """
+    candidates = _collect_start_menu_candidates()
     if not candidates:
         return None
     best = max(candidates, key=lambda x: (x[0], str(x[1]).lower()))
@@ -341,6 +353,60 @@ def find_nukex_exe_and_args() -> Tuple[Optional[Path], List[str]]:
     if legacy is not None:
         return (legacy, [])
     return (None, [])
+
+
+class NukexLauncher(NamedTuple):
+    """설치된 NukeX 실행 후보 하나. GUI 버전 선택 팝업에서 사용."""
+
+    version: Tuple[int, int, int]  # (major, minor, patch)
+    exe: Path  # 실행 파일 경로
+    args: List[str]  # 추가 인자 (예: ["--nukex"]) — NK 경로 앞에 붙는다
+    label: str  # 사용자 표시용 (예: "NukeX 17.0")
+
+
+def _nukex_label(version: Tuple[int, int, int]) -> str:
+    """버전 튜플을 사용자 표시 라벨로. 예: (17, 0, 0) → "NukeX 17.0"."""
+    major, minor, _patch = version
+    return f"NukeX {major}.{minor}"
+
+
+def find_all_nukex_launchers() -> List[NukexLauncher]:
+    """설치된 모든 NukeX 실행 후보를 버전 내림차순으로 반환한다.
+
+    - ``BPE_NUKEX_EXE`` 환경 변수가 있으면 그 1개만 반환(추가 인자 없음).
+    - 아니면 Start Menu(Nuke 14+, ``--nukex``)와 legacy(``nukex*.exe``) 후보를 모두 모아
+      ``(major, minor)`` 기준으로 중복 제거(Start Menu 우선) 후 정렬한다.
+    - 설치가 없으면 빈 리스트.
+
+    기존 ``find_nukex_exe_and_args()``(최신 1개 자동 선택)는 그대로 두고, GUI에서
+    여러 버전 중 선택할 수 있게 하려고 별도로 추가한 함수다.
+    """
+    override = (os.environ.get("BPE_NUKEX_EXE") or "").strip()
+    if override:
+        legacy = find_nukex_exe()
+        if legacy is None:
+            return []
+        version = _parse_nuke_folder_version(legacy.parent.name)
+        return [NukexLauncher(version=version, exe=legacy, args=[], label=_nukex_label(version))]
+
+    # (major, minor) → NukexLauncher. Start Menu 후보를 먼저 넣어 우선권을 준다.
+    by_key: Dict[Tuple[int, int], NukexLauncher] = {}
+
+    for version, exe in _collect_start_menu_candidates():
+        key = (version[0], version[1])
+        existing = by_key.get(key)
+        if existing is None or version > existing.version:
+            by_key[key] = NukexLauncher(
+                version=version, exe=exe, args=["--nukex"], label=_nukex_label(version)
+            )
+
+    for version, exe in _collect_nukex_exe_candidates(_nuke_program_dirs()):
+        key = (version[0], version[1])
+        if key in by_key:
+            continue  # Start Menu(--nukex) 후보 우선
+        by_key[key] = NukexLauncher(version=version, exe=exe, args=[], label=_nukex_label(version))
+
+    return sorted(by_key.values(), key=lambda nl: nl.version, reverse=True)
 
 
 # ---------------------------------------------------------------------------
@@ -748,7 +814,22 @@ def patch_nk_string_trim_in_place(path: Path) -> bool:
         return False
 
 
-def find_latest_nk_and_open(shot_name: str, project_code: str, server_root: str) -> Optional[Path]:
+def launch_nk_with_launcher(nk_path: Path, launcher: NukexLauncher) -> None:
+    """지정한 NukeX 실행 후보로 NK 파일을 연다 (Windows).
+
+    NK 경로는 반드시 ``normalize_path_str``로 정규화하고, 추가 인자(``--nukex`` 등)는
+    NK 경로 앞에 붙인다. ``close_fds=True``로 자식 프로세스가 부모 핸들을 물지 않게 한다.
+    """
+    launch = normalize_path_str(nk_path)
+    subprocess.Popen([str(launcher.exe), *launcher.args, launch], close_fds=True)
+
+
+def find_latest_nk_and_open(
+    shot_name: str,
+    project_code: str,
+    server_root: str,
+    launcher: Optional[NukexLauncher] = None,
+) -> Optional[Path]:
     """최신 NK를 찾아 연다.
 
     열기 전에 ``string trim`` 기반 렌더 경로 식을 ``file dirname`` 기반으로
@@ -756,6 +837,7 @@ def find_latest_nk_and_open(shot_name: str, project_code: str, server_root: str)
     반영된다.
 
     Windows: NukeX 실행 파일로만 연다. 일반 Nuke나 파일 연결 프로그램으로는 열지 않는다.
+    ``launcher``가 주어지면(win32) 최신 버전 자동 선택 대신 그 실행 후보로 연다.
     """
     path = find_latest_nk_path(shot_name, project_code, server_root)
     if path is None:
@@ -768,14 +850,17 @@ def find_latest_nk_and_open(shot_name: str, project_code: str, server_root: str)
         if sys.platform == "darwin":
             subprocess.run(["open", launch], check=False)
         elif sys.platform == "win32":
-            exe, extra_args = find_nukex_exe_and_args()
-            if exe is not None:
-                subprocess.Popen([str(exe), *extra_args, launch], close_fds=True)
+            if launcher is not None:
+                launch_nk_with_launcher(path, launcher)
             else:
-                logger.warning(
-                    "NukeX 실행 파일을 찾지 못해 NK를 열지 않음: %s",
-                    path,
-                )
+                exe, extra_args = find_nukex_exe_and_args()
+                if exe is not None:
+                    subprocess.Popen([str(exe), *extra_args, launch], close_fds=True)
+                else:
+                    logger.warning(
+                        "NukeX 실행 파일을 찾지 못해 NK를 열지 않음: %s",
+                        path,
+                    )
         else:
             subprocess.run(["xdg-open", launch], check=False)
     except Exception:
