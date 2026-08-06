@@ -1,8 +1,10 @@
+# @cursor-change: 2026-08-06, 0.2.x, 태스크별 샷 빌드 — task slug·경로
 """Shot name parsing and server-path construction."""
 
 from __future__ import annotations
 
 import re
+import unicodedata
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -11,6 +13,48 @@ from bpe.core.logging import get_logger
 logger = get_logger("shot_builder")
 
 _PLATE_VERSION_DIR_RE = re.compile(r"^v\d+$", re.IGNORECASE)
+
+DEFAULT_TASK_FOLDER = "comp"
+_COMP_ALIASES = frozenset(
+    {
+        "comp",
+        "compositing",
+        "composite",
+        "comp2d",
+        "comp_2d",
+        "2dcomp",
+    }
+)
+_EXCLUDED_TASKS = frozenset({"fx", "matte"})
+_WIN_RESERVED = frozenset(
+    {
+        "con",
+        "prn",
+        "aux",
+        "nul",
+        *(f"com{i}" for i in range(1, 10)),
+        *(f"lpt{i}" for i in range(1, 10)),
+    }
+)
+_NON_SLUG_RE = re.compile(r"[^a-z0-9_]+")
+_MULTI_UNDERSCORE_RE = re.compile(r"_+")
+
+
+def canonical_task_slug(task_content: str) -> str:
+    """SG Task Name → 샷 폴더 아래 작업 폴더 이름.
+
+    판단 불가·제외·예약어·comp 별칭이면 ``comp`` (기존 동작과 동일).
+    """
+    raw = unicodedata.normalize("NFKC", task_content or "").strip().lower()
+    if not raw:
+        return DEFAULT_TASK_FOLDER
+    slug = _NON_SLUG_RE.sub("_", raw)
+    slug = _MULTI_UNDERSCORE_RE.sub("_", slug).strip("_.")
+    if not slug:
+        return DEFAULT_TASK_FOLDER
+    if slug in _COMP_ALIASES or slug in _EXCLUDED_TASKS or slug in _WIN_RESERVED:
+        return DEFAULT_TASK_FOLDER
+    return slug
 
 
 def _resolve_plate_hi(shot_root: Path) -> Path:
@@ -113,14 +157,35 @@ def _resolve_ep_segment_for_disk(
     return candidates_sorted[0]
 
 
+def _resolve_task_segment_for_disk(shot_root: Path, task_slug: str) -> str:
+    """샷 루트 직계 자식 중 대소문자만 다른 폴더가 있으면 그 실제 이름을 쓴다."""
+    want = (task_slug or "").strip().lower()
+    if not want or want == DEFAULT_TASK_FOLDER:
+        return DEFAULT_TASK_FOLDER
+    try:
+        if not shot_root.is_dir():
+            return want
+        for child in shot_root.iterdir():
+            if child.is_dir() and child.name.lower() == want:
+                return child.name
+    except OSError:
+        pass
+    return want
+
+
 def build_shot_paths(
-    server_root: str, project_code: str, shot_name: str
+    server_root: str,
+    project_code: str,
+    shot_name: str,
+    task: str = DEFAULT_TASK_FOLDER,
 ) -> Optional[Dict[str, Path]]:
     """샷의 서버 경로 딕셔너리를 반환한다.
 
-    구조: server_root / project_code / 04_sq / EP / shot_name / ...
+    구조: server_root / project_code / 04_sq / EP / shot_name / {task} / devl / ...
     ``04_sq`` 아래에 실제 샷 폴더가 있으면 그 부모를 EP로 쓴다(프로젝트별 네이밍 대응).
     없으면 ``parse_shot_name``의 첫 토큰 EP로 폴백(신규 샷).
+    ``task`` 가 ``comp`` 이면 리터럴 ``comp`` 경로를 쓰고(기존과 동일),
+    그 외에는 디스크에 대소문자만 다른 폴더가 있으면 그 이름을 재사용한다.
     ``plate_hi`` 키는 ``plate/org`` 아래 최신 ``v###/hi`` 또는 ``.../mov`` 중
     디스크에 있는 쪽을 가리킨다.
     shot_name을 파싱할 수 없으면 None.
@@ -130,24 +195,31 @@ def build_shot_paths(
         return None
     ep_seg = _resolve_ep_segment_for_disk(server_root, project_code, parsed["ep"], parsed["full"])
     shot_root = Path(server_root) / project_code / "04_sq" / ep_seg / parsed["full"]
-    nuke_dir = shot_root / "comp" / "devl" / "nuke"
+    task_raw = (task or DEFAULT_TASK_FOLDER).strip() or DEFAULT_TASK_FOLDER
+    if task_raw == DEFAULT_TASK_FOLDER:
+        task_seg = DEFAULT_TASK_FOLDER
+    else:
+        task_seg = _resolve_task_segment_for_disk(shot_root, task_raw)
+    task_root = shot_root / task_seg
+    nuke_dir = task_root / "devl" / "nuke"
     return {
         "shot_root": shot_root,
+        "task_root": task_root,
         "nuke_dir": nuke_dir,
         "plate_hi": _resolve_plate_hi(shot_root),
         "edit": shot_root / "edit",
-        "renders": shot_root / "comp" / "devl" / "renders",
-        "element": shot_root / "comp" / "devl" / "element",
+        "renders": task_root / "devl" / "renders",
+        "element": task_root / "devl" / "element",
     }
 
 
 def comp_devl_structure_exists(paths: Dict[str, Path]) -> bool:
-    """``comp/devl`` 아래 nuke·renders·element 폴더가 모두 있으면 True."""
+    """작업 폴더(``task_root`` 또는 ``comp``) 아래 nuke·renders·element 가 모두 있으면 True."""
     shot = paths["shot_root"]
-    comp = shot / "comp"
-    if not comp.is_dir():
+    task_root = paths.get("task_root") or (shot / DEFAULT_TASK_FOLDER)
+    if not task_root.is_dir():
         return False
-    devl = comp / "devl"
+    devl = task_root / "devl"
     if not devl.is_dir():
         return False
     return paths["nuke_dir"].is_dir() and paths["renders"].is_dir() and paths["element"].is_dir()
@@ -155,7 +227,7 @@ def comp_devl_structure_exists(paths: Dict[str, Path]) -> bool:
 
 def ensure_comp_folder_structure(paths: Dict[str, Path], nk_version: str = "v001") -> List[str]:
     """
-    ``comp/devl/nuke/{nk_version}``, ``renders``, ``element`` 가 없으면 생성한다.
+    ``{task}/devl/nuke/{nk_version}``, ``renders``, ``element`` 가 없으면 생성한다.
 
     Returns:
         생성된 디렉터리 경로 문자열 목록 (이미 있던 것은 제외).

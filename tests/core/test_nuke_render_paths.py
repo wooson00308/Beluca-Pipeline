@@ -114,6 +114,24 @@ class TestRendersDirFromNkPathRobust:
     def test_no_comp_returns_none(self):
         assert renders_dir_from_nk_path_robust("W:/tmp/shot.nk") is None
 
+    def test_rnd_devl_nuke_standard(self):
+        root = (
+            "W:/vfx/project_2026/SBS_030/04_sq/E102/E102_S012_0340/"
+            "rnd/devl/nuke/v001/E102_S012_0340_rnd_v001.nk"
+        )
+        got = renders_dir_from_nk_path_robust(root)
+        assert got == ("W:/vfx/project_2026/SBS_030/04_sq/E102/E102_S012_0340/rnd/devl/renders")
+
+    def test_crowd_devl_nuke_standard(self):
+        root = "W:/vfx/p/PRJ/04_sq/E01/E01_S01_0010/crowd/devl/nuke/v002/e01_s01_0010_crowd_v002.nk"
+        got = renders_dir_from_nk_path_robust(root)
+        assert got == "W:/vfx/p/PRJ/04_sq/E01/E01_S01_0010/crowd/devl/renders"
+
+    def test_nonstandard_without_devl_no_comp_returns_none(self):
+        """rnd/nuke/v### (devl 없음) 는 폴백하지 않음."""
+        root = "W:/vfx/p/PRJ/04_sq/E01/E01_S01_0010/rnd/nuke/v001/x_rnd_v001.nk"
+        assert renders_dir_from_nk_path_robust(root) is None
+
 
 class TestNormalizeUncToDrive:
     def test_maps_longest_prefix_first(self):

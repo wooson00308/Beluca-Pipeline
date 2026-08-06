@@ -1,3 +1,4 @@
+# @cursor-change: 2026-08-06, 0.2.x, 태스크별 샷 빌드 — rnd 등 renders 경로 폴백
 """NK ``root.name`` 에서 comp/devl/renders 경로 계산 (UNC ``//`` 보존).
 
 ``pathlib.Path`` / ``str().replace("\\\\", "/")`` 는 UNC 선행 ``//`` 를 잃어
@@ -7,8 +8,11 @@ Nuke가 상대경로로 해석하는 문제가 있어, 슬래시로 ``split``/``
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Dict, Optional, Tuple, Union
+
+_VERSION_DIR_RE = re.compile(r"^v\d+$", re.IGNORECASE)
 
 
 def comp_devl_dir_from_nk_path(root_name: str) -> Optional[str]:
@@ -33,10 +37,13 @@ def comp_devl_dir_from_nk_path(root_name: str) -> Optional[str]:
 
 
 def renders_dir_from_nk_path_robust(root_name: str) -> Optional[str]:
-    """``root.name`` 에서 ``.../comp/devl/renders`` 경로를 반환한다.
+    """``root.name`` 에서 ``.../{task}/devl/renders`` 경로를 반환한다.
 
     ``comp/devl/nuke/v###/shot.nk`` 표준 구조뿐 아니라 ``comp/nuke/v###/shot.nk`` 처럼
     ``devl`` 이 빠진 비표준 구조에서도 ``comp`` 세그먼트를 찾아 ``comp/devl/renders`` 로 고정한다.
+
+    ``/comp/`` 가 없을 때(``rnd/devl/nuke/v###`` 등)는 표준 ``{task}/devl/nuke/v###`` 모양일
+    때만 ``{task}/devl/renders`` 를 반환한다.
 
     UNC 선행 ``//`` 는 보존된다.
     """
@@ -47,11 +54,22 @@ def renders_dir_from_nk_path_robust(root_name: str) -> Optional[str]:
     lower = normalized.lower()
     key = "/comp/"
     idx = lower.find(key)
-    if idx == -1:
+    if idx != -1:
+        # ``.../comp`` 까지 (``/comp/`` 의 선행 ``/`` 위치 ``idx`` 에서 ``/comp`` 5글자)
+        base = normalized[: idx + len("/comp")]
+        return f"{base}/devl/renders"
+
+    # 비-comp: ``.../{task}/devl/nuke/v###/file.nk`` 모양만 허용
+    parts = normalized.split("/")
+    if len(parts) < 5:
         return None
-    # ``.../comp`` 까지 (``/comp/`` 의 선행 ``/`` 위치 ``idx`` 에서 ``/comp`` 5글자)
-    base = normalized[: idx + len("/comp")]
-    return f"{base}/devl/renders"
+    if (
+        parts[-4].lower() == "devl"
+        and parts[-3].lower() == "nuke"
+        and _VERSION_DIR_RE.match(parts[-2])
+    ):
+        return "/".join(parts[:-3]) + "/renders"
+    return None
 
 
 def normalize_unc_to_drive(path: str, unc_mappings: Dict[str, str]) -> str:

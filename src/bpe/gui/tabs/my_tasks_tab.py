@@ -1,3 +1,4 @@
+# @cursor-change: 2026-08-06, 0.2.x, 태스크별 샷 빌드 — NukeX task_content 전달
 # @cursor-change: 2026-07-23, 0.8.28, NukeX 여러 버전 설치 시 버전 선택 팝업 연결
 """My Tasks tab — ShotGrid comp task list with thumbnails, NukeX open, shot folder."""
 
@@ -723,9 +724,20 @@ class _ShotCard(QFrame):
                 launcher = choose_nukex_launcher(self, launchers)
                 if launcher is None:
                     return  # 사용자가 취소
-                find_latest_nk_and_open(shot_code, project_code, server_root, launcher=launcher)
+                find_latest_nk_and_open(
+                    shot_code,
+                    project_code,
+                    server_root,
+                    launcher=launcher,
+                    task_content=d.get("task_content", ""),
+                )
             else:
-                find_latest_nk_and_open(shot_code, project_code, server_root)
+                find_latest_nk_and_open(
+                    shot_code,
+                    project_code,
+                    server_root,
+                    task_content=d.get("task_content", ""),
+                )
         except Exception as e:
             logger.warning("NK 열기 실패: %s", e)
 

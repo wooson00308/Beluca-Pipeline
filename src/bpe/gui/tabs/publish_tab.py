@@ -1,10 +1,11 @@
+# @cursor-change: 2026-08-06, 0.2.x, UploadWorker.done 시그널 + job 큐 중복 방어
 """Publish tab — 완전 자동 채움 방식으로 MOV 업로드 + TimeLog 생성."""
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
@@ -21,6 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from bpe.core.nuke_render_paths import normalize_path_str
 from bpe.gui.widgets.duration_widget import DurationWidget
 from bpe.gui.workers.sg_worker import ShotGridWorker
 from bpe.gui.workers.upload_worker import UploadWorker
@@ -37,6 +39,7 @@ logger = logging.getLogger(__name__)
 
 _LABEL_W = 130
 _CRS2_032_PROJECT_CODE = "CRS2_032"
+_MMK_PROJECT_CODE = "MMK_028"
 
 
 def _info_row(label_text: str, widget: QWidget) -> QHBoxLayout:
@@ -86,9 +89,18 @@ class PublishTab(QWidget):
         self._user_name = user_name
         self._sudo_login: Optional[str] = None
         self._mov_path: Optional[str] = None
+        self._lut_mov_path: Optional[str] = None
         self._workers: List[Any] = []
         self._publish_in_flight: bool = False
         self._timelog_phase_done: bool = False
+        self._finalize_started: bool = False
+        # job 큐: (version_name, mov_path)
+        self._jobs: List[Tuple[str, str]] = []
+        self._job_index: int = 0
+        self._completed_versions: List[int] = []
+        self._active_upload_version_id: Optional[int] = None
+        self._publish_description: str = ""
+        self._publish_status_code: Optional[str] = None
 
         self._build_ui()
         QTimer.singleShot(50, self._init_background)
@@ -143,6 +155,11 @@ class PublishTab(QWidget):
 
         self._mov_label = _read_only_line("렌더 MOV 탐색 중...")
         info_block.addLayout(_info_row("MOV 파일", self._mov_label))
+
+        self._lut_mov_label = _read_only_line("")
+        self._lut_mov_row = _info_row("LUT MOV", self._lut_mov_label)
+        info_block.addLayout(self._lut_mov_row)
+        self._set_lut_row_visible(False)
 
         root.addLayout(info_block)
         root.addSpacing(16)
@@ -248,6 +265,14 @@ class PublishTab(QWidget):
 
         root.addLayout(btn_row)
 
+    def _set_lut_row_visible(self, visible: bool) -> None:
+        """LUT MOV 행(라벨+필드) 표시/숨김."""
+        for i in range(self._lut_mov_row.count()):
+            item = self._lut_mov_row.itemAt(i)
+            w = item.widget() if item is not None else None
+            if w is not None:
+                w.setVisible(visible)
+
     # ── Background init ─────────────────────────────────────────────
 
     def _init_background(self) -> None:
@@ -265,24 +290,43 @@ class PublishTab(QWidget):
             self._log_msg("MOV 탐색 불가: task_data에 shot_code 또는 project_code 없음")
             return
 
-        def _find() -> Optional[str]:
+        def _find() -> Dict[str, Optional[str]]:
             import os
 
-            from bpe.core.nk_finder import find_comp_render_mov, find_server_root_auto
+            from bpe.core.nk_finder import (
+                find_comp_render_mov,
+                find_comp_render_mov_pair,
+                find_server_root_auto,
+            )
 
             env_root = (os.environ.get("BPE_SERVER_ROOT") or "").strip()
             server_root = find_server_root_auto(project_code) or env_root
             if not server_root:
-                return None
-            # CRS2_032 퍼블리시만: _lut.mov 제외 (납품용 일반 mov)
-            exclude_lut = (project_code or "").strip().upper() == _CRS2_032_PROJECT_CODE
+                return {"mov": None, "lut": None}
+
+            proj_u = (project_code or "").strip().upper()
+            if proj_u == _MMK_PROJECT_CODE:
+                mov, lut = find_comp_render_mov_pair(shot_code, project_code, server_root)
+                return {
+                    "mov": str(mov) if mov else None,
+                    "lut": str(lut) if lut else None,
+                }
+            if proj_u == _CRS2_032_PROJECT_CODE:
+                mov = find_comp_render_mov(
+                    shot_code,
+                    project_code,
+                    server_root,
+                    exclude_lut_stem=True,
+                )
+                return {"mov": str(mov) if mov else None, "lut": None}
+
             mov = find_comp_render_mov(
                 shot_code,
                 project_code,
                 server_root,
-                exclude_lut_stem=exclude_lut,
+                exclude_lut_stem=False,
             )
-            return str(mov) if mov else None
+            return {"mov": str(mov) if mov else None, "lut": None}
 
         w = ShotGridWorker(_find)
         w.finished.connect(self._on_mov_found)
@@ -291,25 +335,50 @@ class PublishTab(QWidget):
         self._workers.append(w)
 
     def _on_mov_found(self, result: object) -> None:
-        mov_path = result
-        if not mov_path or not isinstance(mov_path, str):
+        mov_path: Optional[str] = None
+        lut_path: Optional[str] = None
+        if isinstance(result, dict):
+            raw_mov = result.get("mov")
+            raw_lut = result.get("lut")
+            mov_path = raw_mov if isinstance(raw_mov, str) else None
+            lut_path = raw_lut if isinstance(raw_lut, str) else None
+        elif isinstance(result, str):
+            # 하위 호환 (단일 문자열)
+            mov_path = result
+
+        if not mov_path:
             self._mov_label.setText("렌더된 MOV 없음")
             self._mov_label.setStyleSheet("color: #e07070;")
             self._version_label.setText("—")
+            self._set_lut_row_visible(False)
             self._log_msg("comp/devl/renders/ 아래 .mov 파일을 찾을 수 없습니다.")
             return
 
-        self._mov_path = mov_path
-        mov_name = Path(mov_path).name
-        self._mov_label.setText(mov_path)
-        self._mov_label.setStyleSheet("")
-
         from bpe.shotgrid.parser import parse_version_name_from_filename
+
+        self._mov_path = mov_path
+        safe_mov = normalize_path_str(mov_path)
+        mov_name = Path(mov_path).name
+        self._mov_label.setText(safe_mov)
+        self._mov_label.setStyleSheet("")
 
         ver_name = parse_version_name_from_filename(mov_path)
         self._version_label.setText(ver_name)
-
         self._log_msg(f"MOV 발견: {mov_name}")
+
+        if lut_path and Path(lut_path).is_file():
+            self._lut_mov_path = lut_path
+            safe_lut = normalize_path_str(lut_path)
+            self._lut_mov_label.setText(safe_lut)
+            self._set_lut_row_visible(True)
+            lut_ver = parse_version_name_from_filename(lut_path)
+            self._version_label.setText(f"{ver_name}  +  {lut_ver}")
+            self._log_msg(f"LUT MOV 발견: {Path(lut_path).name}")
+            self._log_msg("2개 파일 감지 — 일반 + LUT 동시 업로드")
+        else:
+            self._lut_mov_path = None
+            self._set_lut_row_visible(False)
+
         self._try_enable_publish()
 
     def _on_mov_error(self, err: str) -> None:
@@ -343,7 +412,7 @@ class PublishTab(QWidget):
         if self._mov_path and Path(self._mov_path).is_file():
             self._publish_btn.setEnabled(True)
 
-    # ── Publish flow ────────────────────────────────────────────────
+    # ── Publish flow (job queue) ─────────────────────────────────────
 
     def _on_publish(self) -> None:
         if self._publish_in_flight:
@@ -355,32 +424,63 @@ class PublishTab(QWidget):
         td = self._task_data
         project_id = td.get("project_id")
         shot_id = td.get("shot_id")
-        task_id = td.get("task_id")
 
         if not project_id or not shot_id:
             self._log_msg("Shot/Project ID를 확인할 수 없습니다.")
             return
 
-        version_name = self._version_label.text().strip()
-        if not version_name or version_name in ("—", "탐색 중...", ""):
-            self._log_msg("Version Name을 확인할 수 없습니다.")
+        from bpe.shotgrid.parser import parse_version_name_from_filename
+
+        jobs: List[Tuple[str, str]] = []
+        jobs.append((parse_version_name_from_filename(self._mov_path), self._mov_path))
+        if self._lut_mov_path and Path(self._lut_mov_path).is_file():
+            jobs.append((parse_version_name_from_filename(self._lut_mov_path), self._lut_mov_path))
+
+        if not jobs:
+            self._log_msg("퍼블리쉬할 MOV 파일이 없습니다.")
             return
 
-        description = self._desc_edit.toPlainText().strip()
-        mov_path = self._mov_path
-
-        # status_code를 publish 시점에 읽어 Version 생성과 Task 업데이트 모두에 사용
-        status_code = parse_task_status_selection(self._status_combo.currentText())
+        self._jobs = jobs
+        self._job_index = 0
+        self._completed_versions = []
+        self._active_upload_version_id = None
+        self._publish_description = self._desc_edit.toPlainText().strip()
+        self._publish_status_code = parse_task_status_selection(self._status_combo.currentText())
 
         self._publish_in_flight = True
         self._timelog_phase_done = False
+        self._finalize_started = False
         self._publish_btn.setEnabled(False)
         self._cancel_btn.setEnabled(False)
         self._set_progress(5, "Version 생성 중...")
-        self._log_msg("Version 생성 중...")
+        if len(jobs) > 1:
+            self._log_msg(f"퍼블리시 시작 — Version {len(jobs)}개 (일반 + LUT)")
+        else:
+            self._log_msg("Version 생성 중...")
 
+        self._start_next_job()
+
+    def _start_next_job(self) -> None:
+        if self._job_index >= len(self._jobs):
+            self._update_task_status()
+            return
+
+        version_name, _mov = self._jobs[self._job_index]
+        n = len(self._jobs)
+        td = self._task_data
+        project_id = td.get("project_id")
+        shot_id = td.get("shot_id")
+        task_id = td.get("task_id")
+        description = self._publish_description
+        status_code = self._publish_status_code
         sudo_login = self._sudo_login
         user_id = self._user_id
+
+        self._log_msg(f"[{self._job_index + 1}/{n}] Version 생성: {version_name}")
+        self._set_progress(
+            int(5 + (self._job_index / max(n, 1)) * 85),
+            f"Version 생성 중... ({self._job_index + 1}/{n})",
+        )
 
         def _create() -> Dict[str, Any]:
             sg = get_shotgun_for_version_mutation(sudo_login)
@@ -396,38 +496,83 @@ class PublishTab(QWidget):
             )
 
         w = ShotGridWorker(_create)
-        w.finished.connect(lambda ver: self._on_version_created(ver, mov_path))
+        w.finished.connect(self._on_version_created)
         w.error.connect(self._on_create_error)
         w.start()
         self._workers.append(w)
 
-    def _on_version_created(self, result: object, mov_path: str) -> None:
+    def _on_version_created(self, result: object) -> None:
+        if self._job_index >= len(self._jobs):
+            logger.warning(
+                "version_created ignored: job_index=%s jobs=%s",
+                self._job_index,
+                len(self._jobs),
+            )
+            return
+
         ver = result
         if not isinstance(ver, dict) or "id" not in ver:
             self._log_msg(f"Version 생성 실패: {ver}")
-            self._publish_in_flight = False
-            self._publish_btn.setEnabled(True)
-            self._cancel_btn.setEnabled(True)
+            self._handle_job_failure("Version 생성 오류")
             return
 
         ver_id = ver["id"]
+        _ver_name, mov_path = self._jobs[self._job_index]
+        n = len(self._jobs)
         self._log_msg(f"Version #{ver_id} 생성 완료. MOV 업로드 시작...")
-        self._set_progress(10, "MOV 업로드 중...")
 
+        base = 5 + (self._job_index / max(n, 1)) * 85
+        span = 85 / max(n, 1)
+
+        self._active_upload_version_id = ver_id
         uw = UploadWorker(ver_id, mov_path)
-        uw.progress.connect(lambda v: self._set_progress(int(10 + v * 80)))
+        uw.progress.connect(lambda v, b=base, s=span: self._set_progress(int(b + v * s)))
         uw.status.connect(lambda s: self._status_msg.setText(s))
-        uw.finished.connect(lambda: self._on_upload_done(ver_id))
+        uw.done.connect(lambda vid=ver_id: self._on_upload_done(vid))
         uw.error.connect(self._on_upload_error)
         uw.start()
         self._workers.append(uw)
 
     def _on_upload_done(self, version_id: int) -> None:
-        self._set_progress(92, "Task 상태 업데이트 중...")
+        if self._active_upload_version_id != version_id:
+            logger.debug(
+                "upload_done ignored (duplicate or stale): got=%s active=%s",
+                version_id,
+                self._active_upload_version_id,
+            )
+            return
+        self._active_upload_version_id = None
+        self._completed_versions.append(version_id)
         self._log_msg(f"MOV 업로드 완료! (Version #{version_id})")
-        self._update_task_status(version_id)
+        self._job_index += 1
+        if self._job_index < len(self._jobs):
+            self._start_next_job()
+        else:
+            self._set_progress(92, "Task 상태 업데이트 중...")
+            self._update_task_status()
+
+    def _handle_job_failure(self, status: str) -> None:
+        """job 실패 시 복구. 부분 성공이면 Publish 재활성화 금지."""
+        self._active_upload_version_id = None
+        self._status_msg.setText(status)
+        if len(self._jobs) > 1 and self._completed_versions:
+            self._log_msg(
+                f"부분 완료: Version {self._completed_versions}. "
+                "이미 올라간 Version이 있어 재Publish를 막았습니다."
+            )
+            self._publish_btn.setEnabled(False)
+            # _publish_in_flight 유지 — 중복 방지
+        else:
+            self._publish_in_flight = False
+            self._publish_btn.setEnabled(True)
+        self._cancel_btn.setText("닫기")
+        self._cancel_btn.setEnabled(True)
 
     def _update_task_status(self, version_id: Optional[int] = None) -> None:
+        if self._finalize_started:
+            return
+        self._finalize_started = True
+
         status_sel = self._status_combo.currentText()
         status_code = parse_task_status_selection(status_sel)
         task_id = self._task_data.get("task_id")
@@ -502,23 +647,20 @@ class PublishTab(QWidget):
 
     def _finish_publish(self) -> None:
         self._set_progress(100, "퍼블리쉬 완료!")
-        self._log_msg("===== 퍼블리쉬 완료 =====")
+        if len(self._completed_versions) > 1:
+            self._log_msg(f"===== 퍼블리쉬 완료 (Version {self._completed_versions}) =====")
+        else:
+            self._log_msg("===== 퍼블리쉬 완료 =====")
         self._cancel_btn.setText("닫기")
         self._cancel_btn.setEnabled(True)
 
     def _on_upload_error(self, err: str) -> None:
-        self._status_msg.setText("업로드 오류")
         self._log_msg(f"업로드 오류: {err}")
-        self._publish_in_flight = False
-        self._publish_btn.setEnabled(True)
-        self._cancel_btn.setEnabled(True)
+        self._handle_job_failure("업로드 오류")
 
     def _on_create_error(self, err: str) -> None:
-        self._status_msg.setText("Version 생성 오류")
         self._log_msg(f"Version 생성 오류: {err}")
-        self._publish_in_flight = False
-        self._publish_btn.setEnabled(True)
-        self._cancel_btn.setEnabled(True)
+        self._handle_job_failure("Version 생성 오류")
 
     # ── Cancel ──────────────────────────────────────────────────────
 

@@ -16,6 +16,7 @@ from bpe.core.nk_finder import (
     _nk_is_junk_file,
     find_all_nukex_launchers,
     find_comp_render_mov,
+    find_comp_render_mov_pair,
     find_latest_comp_version_display,
     find_latest_nk_and_open,
     find_latest_nk_path,
@@ -170,6 +171,30 @@ class TestFindLatestNkPath:
         assert result is not None
         assert "v003" in str(result).replace("\\", "/")
         assert "v003" in result.name
+
+    def test_task_content_rnd_prefers_rnd_folder(self, tmp_path):
+        """task_content=RND 이고 rnd/devl/nuke 가 있으면 그쪽 NK만 고른다."""
+        shot_root = self._make_shot_tree(tmp_path, "E01_S01_060")
+        comp_nuke = shot_root / "comp" / "devl" / "nuke"
+        (comp_nuke / "E01_S01_060_comp_v009.nk").write_text("comp")
+        rnd_nuke = shot_root / "rnd" / "devl" / "nuke" / "v001"
+        rnd_nuke.mkdir(parents=True)
+        (rnd_nuke / "E01_S01_060_rnd_v001.nk").write_text("rnd")
+
+        result = find_latest_nk_path("E01_S01_060", "PRJ", str(tmp_path), task_content="RND")
+        assert result is not None
+        assert "rnd" in result.name.lower()
+        assert "comp" not in result.name.lower()
+
+    def test_task_content_rnd_falls_back_to_comp_when_missing(self, tmp_path):
+        """rnd 폴더가 없으면 기존처럼 comp NK를 찾는다."""
+        shot_root = self._make_shot_tree(tmp_path, "E01_S01_061")
+        nuke_dir = shot_root / "comp" / "devl" / "nuke"
+        (nuke_dir / "E01_S01_061_comp_v001.nk").write_text("comp")
+
+        result = find_latest_nk_path("E01_S01_061", "PRJ", str(tmp_path), task_content="RND")
+        assert result is not None
+        assert "comp" in result.name.lower()
 
 
 # ── find_latest_comp_version_display ───────────────────────────────
@@ -332,6 +357,86 @@ class TestFindCompRenderMov:
         shot_root = tmp_path / "PRJ" / "04_sq" / ep / "E01_S01_003"
         (shot_root / "comp" / "devl" / "nuke").mkdir(parents=True)
         assert find_comp_render_mov("E01_S01_003", "PRJ", str(tmp_path)) is None
+
+
+class TestFindCompRenderMovPair:
+    """MMK용 일반 + _lut MOV 쌍 탐색."""
+
+    def test_picks_highest_version_pair(self, tmp_path):
+        shot = "EP06_S007_0020"
+        rd = tmp_path / "MMK_028" / "04_sq" / "EP06" / shot / "comp" / "devl" / "renders"
+        rd.mkdir(parents=True)
+        for name in (
+            f"{shot}_comp_v001.mov",
+            f"{shot}_comp_v001_lut.mov",
+            f"{shot}_comp_v002.mov",
+            f"{shot}_comp_v002_lut.mov",
+        ):
+            (rd / name).write_bytes(b"x")
+
+        primary, lut = find_comp_render_mov_pair(shot, "MMK_028", str(tmp_path))
+        assert primary is not None
+        assert lut is not None
+        assert primary.name == f"{shot}_comp_v002.mov"
+        assert lut.name == f"{shot}_comp_v002_lut.mov"
+
+    def test_lut_missing_returns_primary_only(self, tmp_path):
+        shot = "EP06_S007_0020"
+        rd = tmp_path / "MMK_028" / "04_sq" / "EP06" / shot / "comp" / "devl" / "renders"
+        rd.mkdir(parents=True)
+        (rd / f"{shot}_comp_v003.mov").write_bytes(b"x")
+
+        primary, lut = find_comp_render_mov_pair(shot, "MMK_028", str(tmp_path))
+        assert primary is not None
+        assert primary.name == f"{shot}_comp_v003.mov"
+        assert lut is None
+
+    def test_only_lut_at_highest_version(self, tmp_path):
+        """최고 버전에 LUT만 있으면 (lut, None) — 1개 업로드."""
+        shot = "EP06_S007_0020"
+        rd = tmp_path / "MMK_028" / "04_sq" / "EP06" / shot / "comp" / "devl" / "renders"
+        rd.mkdir(parents=True)
+        (rd / f"{shot}_comp_v001.mov").write_bytes(b"a")
+        (rd / f"{shot}_comp_v002_lut.mov").write_bytes(b"b")
+
+        primary, lut = find_comp_render_mov_pair(shot, "MMK_028", str(tmp_path))
+        assert primary is not None
+        assert primary.name == f"{shot}_comp_v002_lut.mov"
+        assert lut is None
+
+    def test_case_insensitive_lut_ext(self, tmp_path):
+        shot = "EP06_S007_0020"
+        rd = tmp_path / "MMK_028" / "04_sq" / "EP06" / shot / "comp" / "devl" / "renders"
+        rd.mkdir(parents=True)
+        (rd / f"{shot}_comp_v002.mov").write_bytes(b"a")
+        (rd / f"{shot}_comp_v002_LUT.MOV").write_bytes(b"b")
+
+        primary, lut = find_comp_render_mov_pair(shot, "MMK_028", str(tmp_path))
+        assert primary is not None
+        assert lut is not None
+        assert lut.stem.lower().endswith("_lut")
+
+    def test_lut_in_middle_not_matched_as_lut(self, tmp_path):
+        """stem 끝이 _lut 가 아니면 LUT 로 보지 않는다."""
+        shot = "EP06_S007_0020"
+        rd = tmp_path / "MMK_028" / "04_sq" / "EP06" / shot / "comp" / "devl" / "renders"
+        rd.mkdir(parents=True)
+        (rd / f"{shot}_comp_v002.mov").write_bytes(b"a")
+        (rd / f"{shot}_lut_v002.mov").write_bytes(b"b")  # 중간에 lut
+
+        primary, lut = find_comp_render_mov_pair(shot, "MMK_028", str(tmp_path))
+        assert primary is not None
+        # 둘 다 non-lut (stem.endswith("_lut") false) → lut는 None
+        assert lut is None
+
+    def test_empty_returns_none_pair(self, tmp_path):
+        shot = "EP06_S007_0020"
+        (tmp_path / "MMK_028" / "04_sq" / "EP06" / shot / "comp" / "devl" / "renders").mkdir(
+            parents=True
+        )
+        primary, lut = find_comp_render_mov_pair(shot, "MMK_028", str(tmp_path))
+        assert primary is None
+        assert lut is None
 
 
 # ── find_server_root_auto / drive scan ───────────────────────────
@@ -573,6 +678,21 @@ class TestFindShotFolderByTask:
         nuke_dir.mkdir(parents=True)
         got = find_shot_folder_by_task("E01_S01_040", "PRJ", str(tmp_path), "Lighting")
         assert got == nuke_dir.resolve()
+
+    def test_rnd_opens_rnd_devl_when_nuke_exists(self, tmp_path):
+        shot_root = self._make_standard_shot(tmp_path, "E01_S01_050")
+        rnd_nuke = shot_root / "rnd" / "devl" / "nuke"
+        rnd_nuke.mkdir(parents=True)
+        got = find_shot_folder_by_task("E01_S01_050", "PRJ", str(tmp_path), "RND")
+        assert got == (shot_root / "rnd" / "devl").resolve()
+
+    def test_rnd_without_nuke_falls_back_to_comp(self, tmp_path):
+        shot_root = self._make_standard_shot(tmp_path, "E01_S01_051")
+        (shot_root / "rnd" / "devl").mkdir(parents=True)  # nuke 없음
+        comp_nuke = shot_root / "comp" / "devl" / "nuke"
+        comp_nuke.mkdir(parents=True)
+        got = find_shot_folder_by_task("E01_S01_051", "PRJ", str(tmp_path), "RND")
+        assert got == comp_nuke.resolve()
 
     def test_empty_task_content_delegates_to_find_shot_folder(self, tmp_path):
         shot_root = self._make_standard_shot(tmp_path, "E01_S01_041")

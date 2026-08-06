@@ -1,3 +1,4 @@
+# @cursor-change: 2026-08-06, 0.2.x, 태스크별 샷 빌드 — task slug 연결
 # @cursor-change: 2026-07-23, 0.8.28, NukeX 여러 버전 설치 시 버전 선택 팝업 연결
 """Shot Builder tab — build server paths and generate NK files from presets."""
 
@@ -40,7 +41,9 @@ from bpe.core.nuke_render_paths import normalize_path_str
 from bpe.core.presets import find_matching_preset_keys, load_presets
 from bpe.core.settings import get_shot_builder_settings, save_shot_builder_settings
 from bpe.core.shot_builder import (
+    DEFAULT_TASK_FOLDER,
     build_shot_paths,
+    canonical_task_slug,
     comp_devl_structure_exists,
     ensure_comp_folder_structure,
     parse_shot_name,
@@ -140,6 +143,8 @@ class ShotBuilderTab(QWidget):
         self._server_root_str: str = ""
         self._preset_name_str: str = ""
         self._shot_display_str: str = ""
+        self._task_slug: str = DEFAULT_TASK_FOLDER
+        self._task_content_raw: str = ""
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -220,6 +225,8 @@ class ShotBuilderTab(QWidget):
         project_code = (
             task_data.get("project_code") or task_data.get("project_folder") or ""
         ).strip()
+        self._task_content_raw = (task_data.get("task_content") or "").strip()
+        self._task_slug = canonical_task_slug(self._task_content_raw)
         env_root = (os.environ.get("BPE_SERVER_ROOT") or "").strip()
         server_root = (find_server_root_auto(project_code) if project_code else None) or env_root
         self._server_root_str = server_root.strip()
@@ -234,7 +241,9 @@ class ShotBuilderTab(QWidget):
         self._path_label.setStyleSheet(f"color: {theme.TEXT}; font-size: {theme.FONT_SIZE}px;")
 
         if self._server_root_str and project_code and parsed:
-            paths = build_shot_paths(self._server_root_str, project_code, shot_code)
+            paths = build_shot_paths(
+                self._server_root_str, project_code, shot_code, task=self._task_slug
+            )
             if paths:
                 nk_v001 = paths["nuke_dir"] / _NK_VERSION
                 self._path_label.setText(normalize_path_str(str(nk_v001)))
@@ -261,6 +270,13 @@ class ShotBuilderTab(QWidget):
         hint_auto.setWordWrap(True)
         hint_auto.setContentsMargins(132, 0, 0, 0)
         form.addWidget(hint_auto)
+
+        task_display = self._task_slug
+        if self._task_content_raw and self._task_content_raw.lower() != self._task_slug:
+            task_display = f"{self._task_slug}  (Task: {self._task_content_raw})"
+        self._task_folder_label_ro = QLabel(task_display or "—")
+        self._task_folder_label_ro.setStyleSheet(f"color: {theme.TEXT};")
+        form.addLayout(_form_row("작업 폴더", self._task_folder_label_ro))
 
         self._preset_label_ro = QLabel(project_code or "—")
         self._preset_label_ro.setStyleSheet(f"color: {theme.TEXT};")
@@ -357,7 +373,7 @@ class ShotBuilderTab(QWidget):
         컬러(Rec.709/Gamma)는 화면에 노출하지 않는다. 실제 프리셋 키 =
         선택한 base + 감지된 컬러. 실패 시 ``(None, None)`` 과 함께 팝업을 띄운다.
         """
-        paths = build_shot_paths(server_root, folder_code, shot_name)
+        paths = build_shot_paths(server_root, folder_code, shot_name, task=self._task_slug)
         if paths is None:
             self._mmk_abort("플레이트 경로를 계산할 수 없어 컬러를 인식하지 못했습니다.")
             return None, None
@@ -547,7 +563,7 @@ class ShotBuilderTab(QWidget):
             self._log.appendPlainText(f"[오류] 프리셋 '{preset_key}' 데이터가 올바르지 않습니다.")
             return
 
-        paths = build_shot_paths(server_root, folder_code, shot_name)
+        paths = build_shot_paths(server_root, folder_code, shot_name, task=self._task_slug)
         if paths is None:
             self._log.appendPlainText("[오류] 경로를 생성할 수 없습니다.")
             return
@@ -556,8 +572,15 @@ class ShotBuilderTab(QWidget):
         nk_v001_dir = nuke_dir / _NK_VERSION
         # NK 파일명·스크립트 내부 Write 슬러그는 항상 소문자 (서버 샷 폴더는 대문자 유지)
         nk_slug = shot_display.lower()
-        nk_filename = f"{nk_slug}_comp_{_NK_VERSION}.nk"
+        nk_filename = f"{nk_slug}_{self._task_slug}_{_NK_VERSION}.nk"
         nk_path = nk_v001_dir / nk_filename
+
+        if self._auto_mode and self._task_content_raw:
+            raw_lower = self._task_content_raw.strip().lower()
+            if raw_lower != self._task_slug:
+                self._log.appendPlainText(
+                    f'[안내] Task "{self._task_content_raw}" → 작업 폴더 {self._task_slug}'
+                )
 
         if nk_v001_dir.exists():
             existing_nks = list(nk_v001_dir.glob("*.nk"))
@@ -571,13 +594,18 @@ class ShotBuilderTab(QWidget):
                 return
 
         if not nk_v001_dir.exists():
+            task_root = paths.get("task_root") or (paths["shot_root"] / self._task_slug)
+            task_devl = normalize_path_str(task_root / "devl")
             if not comp_devl_structure_exists(paths):
                 msg = (
-                    "comp/devl 아래 표준 폴더 구조(nuke, renders, element)가 없습니다.\n"
-                    "지금 생성할까요?"
+                    f"{self._task_slug}/devl 아래 표준 폴더 구조(nuke, renders, element)가 "
+                    f"없습니다.\n경로: {task_devl}\n지금 생성할까요?"
                 )
             else:
-                msg = "nuke/v001 폴더가 없습니다. 생성할까요?"
+                msg = (
+                    f"nuke/v001 폴더가 없습니다.\n경로: {normalize_path_str(nk_v001_dir)}\n"
+                    "생성할까요?"
+                )
             reply = QMessageBox.question(
                 self,
                 "폴더 생성",
@@ -598,7 +626,9 @@ class ShotBuilderTab(QWidget):
                 self._log.appendPlainText(f"[오류] 폴더 생성 실패: {e}")
                 return
 
-        nk_content, warnings = generate_nk_content(preset_data, nk_slug, paths, _NK_VERSION)
+        nk_content, warnings = generate_nk_content(
+            preset_data, nk_slug, paths, _NK_VERSION, task=self._task_slug
+        )
 
         try:
             nk_v001_dir.mkdir(parents=True, exist_ok=True)

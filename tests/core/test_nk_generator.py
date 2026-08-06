@@ -7,10 +7,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from bpe.core.nk_generator import (
+    _body_has_edit_read,
+    _count_mov_frames,
     _discover_edit_sequence_basename,
     _discover_plate_mov_basename,
     _discover_plate_sequence_basename,
     _find_blocks_with_positions,
+    _find_vide_stts_sample_total,
     _generate_nk_minimal,
     _is_edit_read_block,
     _is_edit_read_file_path,
@@ -19,6 +22,7 @@ from bpe.core.nk_generator import (
     _parse_stts_inner,
     _patch_read_colorspace,
     _patch_read_edit_file_paths,
+    _patch_read_edit_frame_range,
     _patch_read_frame_range,
     _patch_viewer_fps,
     _patch_write2_from_preset,
@@ -26,6 +30,7 @@ from bpe.core.nk_generator import (
     _preset_first_part,
     _read_file_type_from_plate_basename,
     _replace_knob_in_block,
+    _scan_edit_frame_range,
     _scan_plate_frame_range,
     _template_sample_path_warnings,
     _to_nk_path,
@@ -661,6 +666,24 @@ class TestGenerateNkMinimal:
         result = _generate_nk_minimal(preset, "e01_s01_0010", paths, "v001")
         assert "/e01_s01_0010_comp_v001.mov" in result.replace("\\", "/")
 
+    def test_minimal_mov_write_task_rnd(self):
+        """task=rnd 이면 Write 파일명이 _rnd_ 접미사를 쓴다."""
+        paths = {
+            "shot_root": Path("/shots/E01_S01"),
+            "plate_hi": Path("/shots/E01_S01/plate/org/v001/hi"),
+            "edit": Path("/shots/E01_S01/edit"),
+            "renders": Path("/shots/E01_S01/rnd/devl/renders"),
+        }
+        preset = {
+            "fps": "24",
+            "plate_width": 1920,
+            "plate_height": 1080,
+            "delivery_format": "ProRes 422 HQ",
+        }
+        result = _generate_nk_minimal(preset, "e01_s01_0010", paths, "v001", task="rnd")
+        assert "/e01_s01_0010_rnd_v001.mov" in result.replace("\\", "/")
+        assert "_comp_v001" not in result
+
     def test_minimal_mov_plate_in_hi_folder(self, tmp_path: Path) -> None:
         """plate_hi가 v001/hi/ 이고 안에 MOV 파일이 있으면 Read_Plate도 MOV로 맞춘다."""
         plate_hi = tmp_path / "plate" / "org" / "v001" / "hi"
@@ -699,6 +722,53 @@ class TestGenerateNkContent:
         assert len(warnings) == 1
         assert "최소 NK" in warnings[0]
         assert "customOCIOConfigPath" not in content
+
+    def test_ndisender_comp_keeps_comp_suffix(self):
+        """task=comp 이면 NDISender 접미사가 _comp_ 로 유지된다."""
+        template_body = (
+            "set cut_paste_input [stack 0]\n"
+            "version 14.1 v4\n"
+            "Viewer {\n"
+            ' monitorOutNDISenderName "NukeX - E01_S01_0010_comp_v001 - Viewer1"\n'
+            "}\n"
+        )
+        paths = {
+            "shot_root": Path("/shots/E01_S01"),
+            "plate_hi": Path("/shots/E01_S01/plate/org/v001/hi"),
+            "edit": Path("/shots/E01_S01/edit"),
+            "renders": Path("/shots/E01_S01/comp/devl/renders"),
+        }
+        preset = {"fps": "24", "plate_width": 1920, "plate_height": 1080, "project_code": "X"}
+        with patch(
+            "bpe.core.nk_generator.load_preset_template",
+            return_value=template_body,
+        ):
+            content, _ = generate_nk_content(preset, "E01_S01_0010", paths, "v002", task="comp")
+        assert "E01_S01_0010_comp_v002" in content
+
+    def test_ndisender_rnd_replaces_task_suffix(self):
+        """task=rnd 이면 NDISender 접미사가 _rnd_ 로 바뀐다."""
+        template_body = (
+            "set cut_paste_input [stack 0]\n"
+            "version 14.1 v4\n"
+            "Viewer {\n"
+            ' monitorOutNDISenderName "NukeX - E01_S01_0010_comp_v001 - Viewer1"\n'
+            "}\n"
+        )
+        paths = {
+            "shot_root": Path("/shots/E01_S01"),
+            "plate_hi": Path("/shots/E01_S01/plate/org/v001/hi"),
+            "edit": Path("/shots/E01_S01/edit"),
+            "renders": Path("/shots/E01_S01/rnd/devl/renders"),
+        }
+        preset = {"fps": "24", "plate_width": 1920, "plate_height": 1080, "project_code": "X"}
+        with patch(
+            "bpe.core.nk_generator.load_preset_template",
+            return_value=template_body,
+        ):
+            content, _ = generate_nk_content(preset, "E01_S01_0010", paths, "v001", task="rnd")
+        assert "E01_S01_0010_rnd_v001" in content
+        assert "E01_S01_0010_comp_v001" not in content
 
     def test_injected_root_omits_ocio_when_ocio_path_empty(self):
         template_body = "set cut_paste_input [stack 0]\nversion 14.1 v4\nRead {\n name Read1\n}\n"
@@ -1405,3 +1475,286 @@ class TestIsEditReadFilePath:
 
     def test_backslash_path(self):
         assert _is_edit_read_file_path("W:\\proj\\shot\\edit\\x.mov") is True
+
+
+# ---------------------------------------------------------------------------
+# Edit frame range scan / patch
+# ---------------------------------------------------------------------------
+
+
+def _make_stts_box(sample_count: int) -> bytes:
+    """최소 stts 박스 (version+flags + 1 entry)."""
+    inner = (
+        struct.pack(">B", 0)
+        + b"\x00\x00\x00"
+        + struct.pack(">I", 1)
+        + struct.pack(">I", sample_count)
+        + struct.pack(">I", 1000)
+    )
+    return struct.pack(">I", 8 + len(inner)) + b"stts" + inner
+
+
+def _make_hdlr_box(handler: bytes) -> bytes:
+    """최소 hdlr 박스 (handler_type 4바이트)."""
+    # version+flags(4) + pre_defined(4) + handler(4) + reserved(12) + name(1)
+    inner = b"\x00\x00\x00\x00" + b"\x00\x00\x00\x00" + handler + (b"\x00" * 12) + b"\x00"
+    return struct.pack(">I", 8 + len(inner)) + b"hdlr" + inner
+
+
+def _wrap_box(typ: bytes, content: bytes) -> bytes:
+    return struct.pack(">I", 8 + len(content)) + typ + content
+
+
+def _make_trak(handler: bytes, sample_count: int) -> bytes:
+    stts = _make_stts_box(sample_count)
+    stbl = _wrap_box(b"stbl", stts)
+    # minf needs hdlr(url) optionally — skip, just stbl under minf
+    minf = _wrap_box(b"minf", stbl)
+    hdlr = _make_hdlr_box(handler)
+    mdia = _wrap_box(b"mdia", hdlr + minf)
+    return _wrap_box(b"trak", mdia)
+
+
+class TestCountMovFramesVidePrefer:
+    def test_prefers_vide_over_earlier_soun(self, tmp_path):
+        """오디오 trak 이 앞에 있어도 vide stts(34) 를 선택한다."""
+        soun_trak = _make_trak(b"soun", 48000)
+        vide_trak = _make_trak(b"vide", 34)
+        moov = _wrap_box(b"moov", soun_trak + vide_trak)
+        # ftyp stub + moov
+        ftyp = _wrap_box(b"ftyp", b"isom" + b"\x00" * 4)
+        data = ftyp + moov
+        p = tmp_path / "clip.mov"
+        p.write_bytes(data)
+        assert _count_mov_frames(p) == 34
+
+    def test_vide_stts_helper(self):
+        soun_trak = _make_trak(b"soun", 999)
+        vide_trak = _make_trak(b"vide", 25)
+        moov = _wrap_box(b"moov", soun_trak + vide_trak)
+        assert _find_vide_stts_sample_total(moov, 0, len(moov)) == 25
+
+
+class TestScanEditFrameRange:
+    def test_scan_edit_exr_sequence_normal(self, tmp_path):
+        edit_dir = tmp_path / "edit"
+        edit_dir.mkdir()
+        for fr in range(1001, 1051):
+            (edit_dir / f"EP06_edit.{fr}.exr").write_bytes(b"")
+        assert _scan_edit_frame_range(edit_dir, "EP06_edit.####.exr") == (1001, 1050)
+
+    def test_scan_edit_exr_sequence_with_frame_gaps(self, tmp_path):
+        edit_dir = tmp_path / "edit"
+        edit_dir.mkdir()
+        for fr in (1001, 1002, 1010):
+            (edit_dir / f"EP06_edit.{fr}.exr").write_bytes(b"")
+        assert _scan_edit_frame_range(edit_dir, "EP06_edit.####.exr") == (1001, 1010)
+
+    def test_scan_edit_multiple_prefixes_uses_basename_hint(self, tmp_path):
+        edit_dir = tmp_path / "edit"
+        edit_dir.mkdir()
+        (edit_dir / "ref_alt.1001.exr").write_bytes(b"")
+        for fr in range(1001, 1006):
+            (edit_dir / f"EP06_edit.{fr}.exr").write_bytes(b"")
+        assert _scan_edit_frame_range(edit_dir, "EP06_edit.####.exr") == (1001, 1005)
+
+    def test_scan_edit_mov_single_file(self, tmp_path):
+        edit_dir = tmp_path / "edit"
+        edit_dir.mkdir()
+        mov = edit_dir / "ep06_edit_v001.mov"
+        mov.write_bytes(b"fake")
+        with patch("bpe.core.nk_generator._count_mov_frames", return_value=277):
+            assert _scan_edit_frame_range(edit_dir, "ep06_edit_v001.mov") == (1, 277)
+
+    def test_scan_edit_mov_basename_but_file_missing(self, tmp_path):
+        edit_dir = tmp_path / "edit"
+        edit_dir.mkdir()
+        (edit_dir / "other.1001.exr").write_bytes(b"")
+        assert _scan_edit_frame_range(edit_dir, "foo_edit_v001.mov") is None
+
+    def test_scan_edit_dir_not_exists(self, tmp_path):
+        assert _scan_edit_frame_range(tmp_path / "nope", "x.####.exr") is None
+
+    def test_scan_edit_empty_dir(self, tmp_path):
+        edit_dir = tmp_path / "edit"
+        edit_dir.mkdir()
+        assert _scan_edit_frame_range(edit_dir, "EP06_edit.####.exr") is None
+
+    def test_scan_edit_uppercase_extension(self, tmp_path):
+        edit_dir = tmp_path / "edit"
+        edit_dir.mkdir()
+        (edit_dir / "EP06_edit.1001.EXR").write_bytes(b"")
+        (edit_dir / "EP06_edit.1005.EXR").write_bytes(b"")
+        assert _scan_edit_frame_range(edit_dir, "EP06_edit.####.exr") == (1001, 1005)
+
+    def test_scan_edit_basename_percent04d_notation(self, tmp_path):
+        edit_dir = tmp_path / "edit"
+        edit_dir.mkdir()
+        (edit_dir / "EP06_edit.1001.exr").write_bytes(b"")
+        (edit_dir / "EP06_edit.1020.exr").write_bytes(b"")
+        assert _scan_edit_frame_range(edit_dir, "EP06_edit.%04d.exr") == (1001, 1020)
+
+
+class TestBodyHasEditRead:
+    def test_detects_edit_path(self):
+        body = 'Read {\n file "W:/shot/edit/x.mov"\n name Read2\n}\n'
+        assert _body_has_edit_read(body) is True
+
+    def test_no_edit(self):
+        body = 'Read {\n file "W:/shot/plate/x.exr"\n name Read4\n}\n'
+        assert _body_has_edit_read(body) is False
+
+
+class TestPatchReadEditFrameRange:
+    def test_patch_edit_read_missing_first_line_field_case(self):
+        """현장 NK: first 줄 없이 last/origlast/origset true 만."""
+        nk = (
+            "Read {\n"
+            " inputs 0\n"
+            " file_type mov\n"
+            " file W:/proj/shot/edit/ep06_edit_v001.mov\n"
+            ' format "1920 1080 0 0 1920 1080 1 HD_1080"\n'
+            " last 25\n"
+            " origlast 25\n"
+            " origset true\n"
+            " name Read2\n"
+            "}\n"
+            "Retime {\n"
+            " input.last 25\n"
+            " output.first 1001\n"
+            " output.first_lock true\n"
+            " output.last 1025\n"
+            ' time ""\n'
+            " name Retime1\n"
+            "}\n"
+        )
+        out = _patch_read_edit_frame_range(nk, 1, 34)
+        assert " last 34" in out
+        assert " origlast 34" in out
+        assert "origset false" in out
+        assert " first " not in out.split("Retime")[0]  # first 줄 삽입 안 함
+        assert " input.last 34" in out
+        assert " output.last 1034" in out
+
+    def test_patch_edit_read_no_edit_read_is_noop(self):
+        body = (
+            "Read {\n"
+            ' file "W:/proj/plate/org/v001/hi/E01.1001.exr"\n'
+            " first 1001\n"
+            " last 1123\n"
+            " name Read4\n"
+            "}\n"
+        )
+        assert _patch_read_edit_frame_range(body, 1, 34) == body
+
+    def test_patch_plate_read_unchanged_when_edit_also_present(self):
+        body = (
+            "Read {\n"
+            ' file "W:/proj/plate/org/v001/hi/E01.1001.exr"\n'
+            " first 1001\n"
+            " last 1123\n"
+            " name Read4\n"
+            "}\n"
+            "Read {\n"
+            ' file "W:/proj/edit/x.mov"\n'
+            " last 25\n"
+            " origlast 25\n"
+            " origset true\n"
+            " name Read2\n"
+            "}\n"
+        )
+        out = _patch_read_edit_frame_range(body, 1, 34)
+        assert " last 1123" in out  # plate
+        assert " last 34" in out  # edit
+
+    def test_patch_retime_speed_changed_not_modified(self):
+        """속도 변경 Retime(스팬 불일치)은 건드리지 않는다."""
+        nk = (
+            "Read {\n"
+            " file W:/proj/edit/x.mov\n"
+            " first 1\n"
+            " last 25\n"
+            " origset true\n"
+            " name Read2\n"
+            "}\n"
+            "Retime {\n"
+            " input.first 1\n"
+            " input.last 25\n"
+            " output.first 1001\n"
+            " output.last 1013\n"
+            " name Retime1\n"
+            "}\n"
+        )
+        out = _patch_read_edit_frame_range(nk, 1, 34)
+        assert " last 34" in out  # Read 는 패치
+        assert " input.last 25" in out  # Retime 유지
+        assert " output.last 1013" in out
+
+    def test_patch_retime_disable_true_not_modified(self):
+        nk = (
+            "Read {\n"
+            " file W:/proj/edit/x.####.exr\n"
+            " first 1001\n"
+            " last 1123\n"
+            " origset true\n"
+            " name Read_Edit\n"
+            "}\n"
+            "Retime {\n"
+            " input.last 1\n"
+            " output.first 1001\n"
+            " output.last 1001\n"
+            " name Retime1\n"
+            " disable true\n"
+            "}\n"
+        )
+        out = _patch_read_edit_frame_range(nk, 1001, 1034)
+        assert " last 1034" in out
+        assert " input.last 1" in out
+        assert "disable true" in out
+
+    def test_patch_retime_after_other_read_not_modified(self):
+        nk = (
+            "Read {\n"
+            " file W:/proj/plate/x.exr\n"
+            " first 1001\n"
+            " last 1123\n"
+            " name Read4\n"
+            "}\n"
+            "Retime {\n"
+            " input.last 25\n"
+            " output.first 1001\n"
+            " output.last 1025\n"
+            " name Retime1\n"
+            "}\n"
+            "Read {\n"
+            " file W:/proj/edit/x.mov\n"
+            " first 1\n"
+            " last 25\n"
+            " origset true\n"
+            " name Read2\n"
+            "}\n"
+        )
+        out = _patch_read_edit_frame_range(nk, 1, 34)
+        assert " input.last 25" in out  # plate 뒤 Retime 유지
+
+    def test_patch_edit_read_does_not_touch_viewer_or_root(self):
+        nk = (
+            "Root {\n"
+            " first_frame 1001\n"
+            " last_frame 1034\n"
+            "}\n"
+            "Read {\n"
+            " file W:/proj/edit/x.mov\n"
+            " last 25\n"
+            " origlast 25\n"
+            " origset true\n"
+            " name Read2\n"
+            "}\n"
+            "Viewer {\n"
+            " frame_range 1001-1025\n"
+            "}\n"
+        )
+        out = _patch_read_edit_frame_range(nk, 1, 34)
+        assert "last_frame 1034" in out
+        assert "frame_range 1001-1025" in out
+        assert " last 34" in out

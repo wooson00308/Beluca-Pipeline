@@ -1,3 +1,5 @@
+# @cursor-change: 2026-08-06, 0.2.x, MMK LUT MOV 쌍 탐색 (find_comp_render_mov_pair)
+# @cursor-change: 2026-08-06, 0.2.x, 태스크별 샷 빌드 — NK·폴더 탐색 task 지원
 # @cursor-change: 2026-07-23, 0.8.28, NukeX 다중 버전 선택 지원(find_all_nukex_launchers)
 """NK file discovery — find the latest .nk for a given shot."""
 
@@ -14,7 +16,7 @@ from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from bpe.core.logging import get_logger
 from bpe.core.nuke_render_paths import normalize_path_str
-from bpe.core.shot_builder import build_shot_paths
+from bpe.core.shot_builder import DEFAULT_TASK_FOLDER, build_shot_paths, canonical_task_slug
 
 logger = get_logger("nk_finder")
 
@@ -532,7 +534,8 @@ def find_shot_folder_by_task(
     * ``comp`` → ``shot_root/comp/devl`` (있으면)
     * ``fx`` → ``shot_root/fx``
     * ``matte`` → ``shot_root/matte``
-    * 그 외·빈 문자열 → :func:`find_shot_folder` 와 동일 ( ``comp/devl/nuke`` 우선 등 )
+    * 그 외(``rnd`` 등) → ``shot_root/<slug>/devl`` (``devl/nuke`` 가 있을 때만)
+    * 폴더 없거나 빈 문자열 → :func:`find_shot_folder` 와 동일 ( ``comp/devl/nuke`` 우선 등 )
     """
     sn = (shot_name or "").strip()
     pc = (project_code or "").strip()
@@ -543,23 +546,35 @@ def find_shot_folder_by_task(
     tc_key = (task_content or "").strip().lower()
     rel_parts = _FOLDER_OPEN_BY_TASK_CONTENT.get(tc_key)
 
-    if not rel_parts:
-        return find_shot_folder(shot_name, project_code, server_root)
+    if rel_parts:
+        shot_root = _resolve_shot_root(sr, pc, sn)
+        if shot_root is None:
+            return None
+        target = shot_root.joinpath(*rel_parts)
+        try:
+            if target.is_dir():
+                return Path(normalize_path_str(target.resolve()))
+        except OSError:
+            pass
+        try:
+            return Path(normalize_path_str(shot_root.resolve()))
+        except OSError:
+            return Path(normalize_path_str(shot_root))
 
-    shot_root = _resolve_shot_root(sr, pc, sn)
-    if shot_root is None:
-        return None
+    # 미등록 태스크: Shot Build로 만든 {slug}/devl/nuke 가 있으면 그 devl 열기
+    slug = canonical_task_slug(task_content)
+    if slug and slug != DEFAULT_TASK_FOLDER:
+        shot_root = _resolve_shot_root(sr, pc, sn)
+        if shot_root is not None:
+            nuke_dir = shot_root / slug / "devl" / "nuke"
+            try:
+                if nuke_dir.is_dir():
+                    devl = shot_root / slug / "devl"
+                    return Path(normalize_path_str(devl.resolve()))
+            except OSError:
+                pass
 
-    target = shot_root.joinpath(*rel_parts)
-    try:
-        if target.is_dir():
-            return Path(normalize_path_str(target.resolve()))
-    except OSError:
-        pass
-    try:
-        return Path(normalize_path_str(shot_root.resolve()))
-    except OSError:
-        return Path(normalize_path_str(shot_root))
+    return find_shot_folder(shot_name, project_code, server_root)
 
 
 # ---------------------------------------------------------------------------
@@ -567,9 +582,34 @@ def find_shot_folder_by_task(
 # ---------------------------------------------------------------------------
 
 
-def _nk_search_roots_from_shot_root(shot_root: Path) -> List[Path]:
-    """shot_root 하위에서 NK 파일을 찾아볼 디렉토리 목록을 반환한다."""
+def _nk_search_roots_from_shot_root(shot_root: Path, task_slug: str = "") -> List[Path]:
+    """shot_root 하위에서 NK 파일을 찾아볼 디렉토리 목록을 반환한다.
+
+    *task_slug* 가 ``comp`` 가 아니고 ``{slug}/devl/nuke`` 가 실재하면
+    해당 태스크 폴더만 탐색한다. 그렇지 않으면 기존(comp 우선) 목록을 쓴다.
+    """
     roots: List[Path] = []
+    slug = (task_slug or "").strip().lower()
+    if slug and slug != DEFAULT_TASK_FOLDER:
+        task_nuke = shot_root / slug / "devl" / "nuke"
+        try:
+            if task_nuke.is_dir():
+                for rel in (
+                    task_nuke,
+                    shot_root / slug / "devl",
+                    shot_root / slug,
+                ):
+                    try:
+                        p = Path(normalize_path_str(Path(rel).resolve()))
+                        if p.is_dir():
+                            roots.append(p)
+                    except OSError:
+                        continue
+                if roots:
+                    return roots
+        except OSError:
+            pass
+
     for rel in (
         shot_root / "comp" / "devl" / "nuke",
         shot_root / "comp",
@@ -619,11 +659,17 @@ def find_latest_comp_version_display(
     return f"v{max(merged):03d}"
 
 
-def find_latest_nk_path(shot_name: str, project_code: str, server_root: str) -> Optional[Path]:
+def find_latest_nk_path(
+    shot_name: str,
+    project_code: str,
+    server_root: str,
+    task_content: str = "",
+) -> Optional[Path]:
     """샷 폴더 하위에서 최신 .nk 경로를 탐색한다.
 
     버전 접미사(v###)가 있으면 최대 버전, 없으면 mtime 기준.
     build_shot_paths 실패 시 BFS 휴리스틱으로 폴백.
+    *task_content* 가 비-comp 이고 해당 태스크 NK 폴더가 있으면 그 쪽만 탐색한다.
     """
     sn = (shot_name or "").strip()
     pc = (project_code or "").strip()
@@ -635,7 +681,8 @@ def find_latest_nk_path(shot_name: str, project_code: str, server_root: str) -> 
     if shot_root is None:
         return None
 
-    roots = _nk_search_roots_from_shot_root(shot_root)
+    task_slug = canonical_task_slug(task_content) if (task_content or "").strip() else ""
+    roots = _nk_search_roots_from_shot_root(shot_root, task_slug=task_slug)
     if not roots:
         return None
 
@@ -829,6 +876,7 @@ def find_latest_nk_and_open(
     project_code: str,
     server_root: str,
     launcher: Optional[NukexLauncher] = None,
+    task_content: str = "",
 ) -> Optional[Path]:
     """최신 NK를 찾아 연다.
 
@@ -838,8 +886,9 @@ def find_latest_nk_and_open(
 
     Windows: NukeX 실행 파일로만 연다. 일반 Nuke나 파일 연결 프로그램으로는 열지 않는다.
     ``launcher``가 주어지면(win32) 최신 버전 자동 선택 대신 그 실행 후보로 연다.
+    *task_content* 가 있으면 해당 태스크 폴더의 NK를 우선 탐색한다.
     """
-    path = find_latest_nk_path(shot_name, project_code, server_root)
+    path = find_latest_nk_path(shot_name, project_code, server_root, task_content=task_content)
     if path is None:
         return None
 
@@ -1023,6 +1072,40 @@ def _pick_newest_among_candidates(paths: List[Path]) -> Path:
     return max(paths, key=_sk)
 
 
+def _collect_render_video_candidates(
+    shot_root: Path,
+    extensions: Tuple[str, ...],
+) -> Tuple[List[Path], List[str]]:
+    """``_RENDER_SUBDIRS`` 아래 영상 파일 후보와 시도한 디렉터리 목록을 반환한다."""
+    candidates: List[Path] = []
+    seen: set = set()
+    tried_dirs: List[str] = []
+    for parts in _RENDER_SUBDIRS:
+        d = shot_root.joinpath(*parts)
+        tried_dirs.append(str(d))
+        try:
+            if not d.is_dir():
+                continue
+        except OSError:
+            continue
+        for ext in extensions:
+            try:
+                for p in d.glob(f"*{ext}"):
+                    if not p.is_file():
+                        continue
+                    try:
+                        rp = p.resolve()
+                    except OSError:
+                        rp = p
+                    if rp in seen:
+                        continue
+                    seen.add(rp)
+                    candidates.append(p)
+            except OSError as exc:
+                logger.debug("find_comp_render_video glob 실패 %s: %s", d, exc)
+    return candidates, tried_dirs
+
+
 def find_comp_render_video(
     shot_name: str,
     project_code: str,
@@ -1060,32 +1143,7 @@ def find_comp_render_video(
     if not exts:
         exts = (".mov", ".mp4", ".mxf", ".mkv")
 
-    candidates: List[Path] = []
-    seen: set = set()
-    tried_dirs: List[str] = []
-    for parts in _RENDER_SUBDIRS:
-        d = shot_root.joinpath(*parts)
-        tried_dirs.append(str(d))
-        try:
-            if not d.is_dir():
-                continue
-        except OSError:
-            continue
-        for ext in exts:
-            try:
-                for p in d.glob(f"*{ext}"):
-                    if not p.is_file():
-                        continue
-                    try:
-                        rp = p.resolve()
-                    except OSError:
-                        rp = p
-                    if rp in seen:
-                        continue
-                    seen.add(rp)
-                    candidates.append(p)
-            except OSError as exc:
-                logger.debug("find_comp_render_video glob 실패 %s: %s", d, exc)
+    candidates, tried_dirs = _collect_render_video_candidates(shot_root, exts)
 
     if exclude_lut_stem and candidates:
         non_lut = [p for p in candidates if not p.stem.lower().endswith("_lut")]
@@ -1274,6 +1332,66 @@ def find_comp_render_mov(
         extensions=(".mov",),
         exclude_lut_stem=exclude_lut_stem,
     )
+
+
+def find_comp_render_mov_pair(
+    shot_name: str,
+    project_code: str,
+    server_root: str,
+) -> Tuple[Optional[Path], Optional[Path]]:
+    """최신 버전 번호의 일반 MOV 와 ``_lut`` MOV 쌍을 반환한다.
+
+    Returns
+    -------
+    (primary, lut)
+        primary 는 stem 이 ``_lut`` 로 끝나지 않는 파일.
+        lut 는 같은 최고 버전 번호의 ``*_lut.mov``.
+        일반이 없고 LUT 만 있으면 ``(lut, None)`` — 1개만 업로드할 수 있게.
+        후보가 없으면 ``(None, None)``.
+    """
+    sn = (shot_name or "").strip()
+    pc = (project_code or "").strip()
+    sr = (server_root or "").strip()
+    shot_root = _resolve_shot_root(sr, pc, sn)
+    if shot_root is None:
+        return None, None
+
+    candidates, _tried = _collect_render_video_candidates(shot_root, (".mov",))
+    if not candidates:
+        return None, None
+
+    # 최고 버전 번호
+    max_v = -1
+    for p in candidates:
+        nums = _version_ints_from_mov_filename(p)
+        if nums:
+            max_v = max(max_v, max(nums))
+
+    if max_v < 0:
+        # 버전 번호 없으면 기존 최신 1개만
+        primary = _pick_newest_among_candidates(candidates)
+        return primary, None
+
+    at_ver = [p for p in candidates if max_v in _version_ints_from_mov_filename(p)]
+    if not at_ver:
+        primary = _pick_newest_among_candidates(candidates)
+        return primary, None
+
+    non_lut = [p for p in at_ver if not p.stem.lower().endswith("_lut")]
+    lut_list = [p for p in at_ver if p.stem.lower().endswith("_lut")]
+
+    primary: Optional[Path] = None
+    lut: Optional[Path] = None
+    if non_lut:
+        primary = _pick_newest_among_candidates(non_lut)
+    if lut_list:
+        lut = _pick_newest_among_candidates(lut_list)
+
+    if primary is None and lut is not None:
+        # LUT만 있는 버전 → 1개 업로드 (기존처럼)
+        return lut, None
+
+    return primary, lut
 
 
 def open_comp_render_in_rv(

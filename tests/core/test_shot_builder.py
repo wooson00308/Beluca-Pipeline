@@ -7,8 +7,10 @@ from pathlib import Path
 import pytest
 
 from bpe.core.shot_builder import (
+    DEFAULT_TASK_FOLDER,
     _resolve_plate_hi,
     build_shot_paths,
+    canonical_task_slug,
     comp_devl_structure_exists,
     ensure_comp_folder_structure,
     parse_shot_name,
@@ -51,6 +53,44 @@ class TestParseShotName:
         assert parse_shot_name(bad_input) is None
 
 
+# ── canonical_task_slug ──────────────────────────────────────────
+
+
+class TestCanonicalTaskSlug:
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("ENV", "env"),
+            ("crowd", "crowd"),
+            ("RND", "rnd"),
+            ("Render", "render"),
+            ("SIM", "sim"),
+            ("fx_smoke", "fx_smoke"),
+            ("AI", "ai"),
+            ("TEST", "test"),
+            ("fx", "comp"),
+            ("matte", "comp"),
+            ("Matte", "comp"),
+            ("", "comp"),
+            ("   ", "comp"),
+            ("합성", "comp"),
+            ("CON", "comp"),
+            ("prn", "comp"),
+            ("Compositing", "comp"),
+            ("comp", "comp"),
+            ("COMP", "comp"),
+            ("comp_2d", "comp"),
+            ("2dcomp", "comp"),
+            ("comp 2", "comp_2"),
+        ],
+    )
+    def test_slug_table(self, raw: str, expected: str) -> None:
+        assert canonical_task_slug(raw) == expected
+
+    def test_default_constant(self) -> None:
+        assert DEFAULT_TASK_FOLDER == "comp"
+
+
 # ── build_shot_paths ─────────────────────────────────────────────
 
 
@@ -60,6 +100,7 @@ class TestBuildShotPaths:
         assert paths is not None
         root = Path("/server/PRJ/04_sq/E107/E107_S022_0080")
         assert paths["shot_root"] == root
+        assert paths["task_root"] == root / "comp"
         assert paths["nuke_dir"] == root / "comp" / "devl" / "nuke"
         assert paths["plate_hi"] == root / "plate" / "org" / "v001" / "hi"
         assert paths["edit"] == root / "edit"
@@ -69,7 +110,15 @@ class TestBuildShotPaths:
     def test_all_keys_present(self):
         paths = build_shot_paths("/s", "P", "A_B")
         assert paths is not None
-        expected_keys = {"shot_root", "nuke_dir", "plate_hi", "edit", "renders", "element"}
+        expected_keys = {
+            "shot_root",
+            "task_root",
+            "nuke_dir",
+            "plate_hi",
+            "edit",
+            "renders",
+            "element",
+        }
         assert set(paths.keys()) == expected_keys
 
     def test_invalid_shot_returns_none(self):
@@ -80,6 +129,36 @@ class TestBuildShotPaths:
         assert paths is not None
         for v in paths.values():
             assert isinstance(v, Path)
+
+    def test_task_rnd_paths(self):
+        paths = build_shot_paths("/server", "PRJ", "E107_S022_0080", task="rnd")
+        assert paths is not None
+        root = Path("/server/PRJ/04_sq/E107/E107_S022_0080")
+        assert paths["task_root"] == root / "rnd"
+        assert paths["nuke_dir"] == root / "rnd" / "devl" / "nuke"
+        assert paths["renders"] == root / "rnd" / "devl" / "renders"
+        assert paths["element"] == root / "rnd" / "devl" / "element"
+        # plate/edit are shot-level, not task-level
+        assert paths["plate_hi"] == root / "plate" / "org" / "v001" / "hi"
+        assert paths["edit"] == root / "edit"
+
+    def test_task_comp_literal_unchanged(self):
+        """task=comp 는 디스크 조회 없이 리터럴 comp 경로 (기존과 동일)."""
+        paths = build_shot_paths("/server", "PRJ", "E107_S022_0080", task="comp")
+        assert paths is not None
+        root = Path("/server/PRJ/04_sq/E107/E107_S022_0080")
+        assert paths["task_root"] == root / "comp"
+        assert paths["nuke_dir"] == root / "comp" / "devl" / "nuke"
+
+    def test_reuses_existing_task_folder_case(self, tmp_path: Path) -> None:
+        """디스크에 RND 폴더가 있으면 그 실제 이름을 재사용한다."""
+        shot = "E107_S022_0080"
+        shot_root = tmp_path / "PRJ" / "04_sq" / "E107" / shot
+        (shot_root / "RND").mkdir(parents=True)
+        paths = build_shot_paths(str(tmp_path), "PRJ", shot, task="rnd")
+        assert paths is not None
+        assert paths["task_root"] == shot_root / "RND"
+        assert paths["nuke_dir"] == shot_root / "RND" / "devl" / "nuke"
 
     def test_disk_ep_folder_overrides_parsed_prefix(self, tmp_path: Path) -> None:
         """``04_sq`` 아래 실제 에피소드 폴더가 있으면 ``parse_shot_name`` 첫 토큰보다 우선한다."""
@@ -175,3 +254,12 @@ class TestCompDevlFolders:
         ensure_comp_folder_structure(paths, "v001")
         second = ensure_comp_folder_structure(paths, "v001")
         assert second == []
+
+    def test_rnd_structure(self, tmp_path: Path) -> None:
+        paths = build_shot_paths(str(tmp_path), "PRJ", "E107_S022_0080", task="rnd")
+        assert paths is not None
+        assert comp_devl_structure_exists(paths) is False
+        ensure_comp_folder_structure(paths, "v001")
+        assert (paths["nuke_dir"] / "v001").is_dir()
+        assert paths["task_root"].name == "rnd"
+        assert comp_devl_structure_exists(paths) is True

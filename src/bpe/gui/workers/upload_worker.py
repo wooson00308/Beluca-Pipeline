@@ -1,3 +1,4 @@
+# @cursor-change: 2026-08-06, 0.2.x, QThread.finished 충돌 회피 — done 시그널로 변경
 """QThread worker specifically for MOV upload with progress reporting."""
 
 from __future__ import annotations
@@ -10,7 +11,8 @@ from PySide6.QtCore import QThread, Signal
 class UploadWorker(QThread):
     """Upload a movie file to a ShotGrid Version in a background thread."""
 
-    finished = Signal()
+    # QThread.finished() 와 이름·시그니처가 겹치면 완료 콜백이 두 번 호출됨.
+    done = Signal()
     error = Signal(str)
     progress = Signal(float)
     status = Signal(str)
@@ -50,7 +52,7 @@ class UploadWorker(QThread):
                 movie_path=self._movie_path,
             )
 
-            self.finished.emit()
+            self.done.emit()
         except Exception as e:
             self.error.emit(str(e))
 

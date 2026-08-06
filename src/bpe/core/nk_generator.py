@@ -1,3 +1,4 @@
+# @cursor-change: 2026-08-06, 0.2.x, edit Read 프레임 범위 자동 반영
 """Generate and patch Nuke .nk script content from presets."""
 
 from __future__ import annotations
@@ -565,10 +566,8 @@ def _parse_stts_inner(body: bytes) -> int:
     return total
 
 
-def _find_stts_sample_total(data: bytes, start: int, end: int) -> Optional[int]:
-    """ISO BMFF 트리에서 첫 ``stts`` 의 총 샘플 수 (일반적으로 비디오 트랙)."""
-    pos = start
-    containers = {
+_ISO_BMFF_CONTAINERS = frozenset(
+    {
         b"moov",
         b"trak",
         b"mdia",
@@ -579,6 +578,13 @@ def _find_stts_sample_total(data: bytes, start: int, end: int) -> Optional[int]:
         b"traf",
         b"meta",
     }
+)
+
+
+def _iter_iso_bmff_boxes(data: bytes, start: int, end: int) -> List[Tuple[bytes, int, int]]:
+    """ISO BMFF 박스 목록 ``(typ, content_start, box_end)`` 을 반환한다."""
+    results: List[Tuple[bytes, int, int]] = []
+    pos = start
     while pos + 8 <= end:
         size = struct.unpack_from(">I", data, pos)[0]
         typ = data[pos + 4 : pos + 8]
@@ -598,27 +604,79 @@ def _find_stts_sample_total(data: bytes, start: int, end: int) -> Optional[int]:
         box_end = pos + box_len
         if box_end > end:
             box_end = end
-        content_start = pos + header
+        results.append((typ, pos + header, box_end))
+        pos = box_end
+    return results
+
+
+def _find_stts_sample_total(data: bytes, start: int, end: int) -> Optional[int]:
+    """ISO BMFF 트리에서 첫 ``stts`` 의 총 샘플 수 (폴백용)."""
+    for typ, content_start, box_end in _iter_iso_bmff_boxes(data, start, end):
         if typ == b"stts":
             n = _parse_stts_inner(data[content_start:box_end])
             return n if n > 0 else None
-        if typ in containers:
+        if typ in _ISO_BMFF_CONTAINERS:
             sub = _find_stts_sample_total(data, content_start, box_end)
             if sub is not None:
                 return sub
-        pos = box_end
+    return None
+
+
+def _trak_handler_and_stts(
+    data: bytes, trak_start: int, trak_end: int
+) -> Tuple[Optional[bytes], Optional[int]]:
+    """``trak`` 박스에서 ``hdlr`` handler type 과 ``stts`` 샘플 수를 추출한다."""
+    handler: Optional[bytes] = None
+    stts_total: Optional[int] = None
+    for typ, cs, be in _iter_iso_bmff_boxes(data, trak_start, trak_end):
+        if typ == b"mdia":
+            for t2, cs2, be2 in _iter_iso_bmff_boxes(data, cs, be):
+                if t2 == b"hdlr":
+                    # version(1)+flags(3)+pre_defined(4)+handler_type(4)
+                    if cs2 + 12 <= be2:
+                        handler = data[cs2 + 8 : cs2 + 12]
+                elif t2 == b"minf":
+                    for t3, cs3, be3 in _iter_iso_bmff_boxes(data, cs2, be2):
+                        if t3 == b"stbl":
+                            for t4, cs4, be4 in _iter_iso_bmff_boxes(data, cs3, be3):
+                                if t4 == b"stts":
+                                    n = _parse_stts_inner(data[cs4:be4])
+                                    if n > 0:
+                                        stts_total = n
+    return handler, stts_total
+
+
+def _find_vide_stts_sample_total(data: bytes, start: int, end: int) -> Optional[int]:
+    """``vide``(영상) 트랙의 ``stts`` 샘플 수만 반환. 없으면 None."""
+    for typ, cs, be in _iter_iso_bmff_boxes(data, start, end):
+        if typ == b"moov":
+            for t2, cs2, be2 in _iter_iso_bmff_boxes(data, cs, be):
+                if t2 != b"trak":
+                    continue
+                handler, stts_total = _trak_handler_and_stts(data, cs2, be2)
+                if handler == b"vide" and stts_total is not None:
+                    return stts_total
+        elif typ in _ISO_BMFF_CONTAINERS and typ != b"trak":
+            sub = _find_vide_stts_sample_total(data, cs, be)
+            if sub is not None:
+                return sub
     return None
 
 
 def _count_mov_frames(path: Path) -> Optional[int]:
-    """MOV/MP4/M4V 파일에서 비디오 샘플 수(프레임 수)를 순수 Python으로 읽는다."""
+    """MOV/MP4/M4V 파일에서 비디오 샘플 수(프레임 수)를 순수 Python으로 읽는다.
+
+    ``vide`` 트랙 ``stts`` 를 우선하고, 없으면 첫 ``stts`` 로 폴백한다.
+    """
     try:
         data = path.read_bytes()
     except OSError:
         return None
     if len(data) < 32:
         return None
-    total = _find_stts_sample_total(data, 0, len(data))
+    total = _find_vide_stts_sample_total(data, 0, len(data))
+    if total is None:
+        total = _find_stts_sample_total(data, 0, len(data))
     return total if total is not None and total > 0 else None
 
 
@@ -704,6 +762,164 @@ def _patch_read_frame_range(body: str, first: int, last: int) -> str:
         result,
         count=1,
     )
+    return result
+
+
+def _scan_edit_frame_range(edit_dir: Path, basename: str) -> Optional[Tuple[int, int]]:
+    """edit 폴더의 실제 파일에서 (first, last) 프레임 범위를 구한다.
+
+    - ``prefix.####.ext`` (exr/dpx/tif/tiff) → 같은 prefix/ext 파일의 min/max
+    - mov/mp4/m4v/mxf → ``_count_mov_frames`` 로 N → ``(1, N)``
+    - 실패 시 None
+    """
+    bn = (basename or "").strip()
+    if not bn or not edit_dir.is_dir():
+        return None
+
+    # %04d → #### 정규화
+    bn_norm = re.sub(r"%0\d*d", "####", bn, flags=re.IGNORECASE)
+
+    m = re.search(r"^(.+)\.####\.(exr|dpx|tif|tiff)$", bn_norm, re.IGNORECASE)
+    if m:
+        prefix, ext = m.group(1), m.group(2).lower()
+        nums: List[int] = []
+        try:
+            for p in edit_dir.iterdir():
+                if not p.is_file():
+                    continue
+                fm = _PLATE_SEQ_FRAME_RE.match(p.name)
+                if not fm:
+                    continue
+                if fm.group(1).lower() == prefix.lower() and fm.group(3).lower() == ext:
+                    nums.append(int(fm.group(2)))
+        except OSError:
+            return None
+        if nums:
+            return (min(nums), max(nums))
+        return None
+
+    m2 = re.search(r"\.(mov|mp4|m4v|mxf)$", bn_norm, re.IGNORECASE)
+    if m2:
+        target = edit_dir / bn
+        if not target.is_file():
+            # 대소문자 무시 매칭
+            try:
+                for p in edit_dir.iterdir():
+                    if p.is_file() and p.name.lower() == bn.lower():
+                        target = p
+                        break
+                else:
+                    return None
+            except OSError:
+                return None
+        n = _count_mov_frames(target)
+        if n is not None and n > 0:
+            return (1, n)
+        return None
+
+    return None
+
+
+def _body_has_edit_read(body: str) -> bool:
+    """NK 본문에 edit Read(``/edit/`` 경로 또는 ``Read_Edit``)가 있는지."""
+    for _start, _end, inner in _find_blocks_with_positions(body, "Read"):
+        fp = _read_file_path_from_inner(inner)
+        if (fp is not None and _is_edit_read_file_path(fp)) or _is_edit_read_block(inner):
+            return True
+    return False
+
+
+def _read_int_knob(inner: str, knob: str) -> Optional[int]:
+    """블록 inner 에서 `` knobs N`` 정수 값을 읽는다."""
+    m = re.search(rf"(?m)^ {re.escape(knob)} (\d+)\s*$", inner)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def _patch_read_edit_frame_range(body: str, first: int, last: int) -> str:
+    """
+    edit Read 의 first/last/orig* 를 실제 파일 길이로 맞추고,
+    직후 1:1 Retime 의 input.last/output.last 도 동기화한다.
+
+    - 이미 존재하는 노브 줄만 치환 (없는 줄은 삽입하지 않음).
+    - ``origset true`` → ``origset false``.
+    - Viewer / Root / plate Read 는 건드리지 않는다.
+    - Retime 은 다음 조건을 모두 만족할 때만 패치:
+      · edit Read 끝 ~ 다음 Read 시작 구간의 첫 Retime
+      · ``disable true`` 아님
+      · input.first(없으면 1) == old_first, input.last == old_last
+      · (output.last - output.first) == (input.last - input.first)
+    - 문자열 치환은 (start, end, new_text) 수집 후 start 내림차순 일괄 적용.
+    """
+    read_blocks = _find_blocks_with_positions(body, "Read")
+    retime_blocks = _find_blocks_with_positions(body, "Retime")
+    replacements: List[Tuple[int, int, str]] = []
+
+    for i, (start, end, inner) in enumerate(read_blocks):
+        fp = _read_file_path_from_inner(inner)
+        is_edit = (fp is not None and _is_edit_read_file_path(fp)) or _is_edit_read_block(inner)
+        if not is_edit:
+            continue
+
+        old_first = _read_int_knob(inner, "first")
+        old_last = _read_int_knob(inner, "last")
+        # first 줄이 없으면 Nuke 기본값(파일 의존, MOV는 보통 1)
+        effective_old_first = old_first if old_first is not None else 1
+        if old_last is None:
+            # last 도 없으면 패치할 프레임 노브가 거의 없음 — origset만 처리
+            pass
+
+        new_inner = inner
+        new_inner = re.sub(r"(?m)^ first \d+$", f" first {first}", new_inner)
+        new_inner = re.sub(r"(?m)^ last \d+$", f" last {last}", new_inner)
+        new_inner = re.sub(r"(?m)^ origfirst \d+$", f" origfirst {first}", new_inner)
+        new_inner = re.sub(r"(?m)^ origlast \d+$", f" origlast {last}", new_inner)
+        new_inner = re.sub(r"(?m)^ origset true$", " origset false", new_inner)
+        if new_inner != inner:
+            replacements.append((start, end, f"Read {{{new_inner}}}"))
+
+        # 짝 Retime: edit Read 끝 ~ 다음 Read 시작
+        next_read_start = read_blocks[i + 1][0] if i + 1 < len(read_blocks) else len(body)
+        if old_last is None:
+            continue
+
+        for rt_start, rt_end, rt_inner in retime_blocks:
+            if rt_start < end or rt_start >= next_read_start:
+                continue
+            # disable true → skip
+            if re.search(r"(?m)^ disable true\s*$", rt_inner):
+                break
+            rt_in_first = _read_int_knob(rt_inner, "input.first")
+            if rt_in_first is None:
+                rt_in_first = 1
+            rt_in_last = _read_int_knob(rt_inner, "input.last")
+            rt_out_first = _read_int_knob(rt_inner, "output.first")
+            rt_out_last = _read_int_knob(rt_inner, "output.last")
+            if rt_in_last is None or rt_out_first is None or rt_out_last is None:
+                break
+            if rt_in_first != effective_old_first or rt_in_last != old_last:
+                break
+            if (rt_out_last - rt_out_first) != (rt_in_last - rt_in_first):
+                break
+            # 1:1 오프셋 — 동기화
+            new_out_last = rt_out_first + (last - first)
+            new_rt = rt_inner
+            if _read_int_knob(rt_inner, "input.first") is not None:
+                new_rt = re.sub(r"(?m)^ input\.first \d+$", f" input.first {first}", new_rt)
+            new_rt = re.sub(r"(?m)^ input\.last \d+$", f" input.last {last}", new_rt)
+            new_rt = re.sub(r"(?m)^ output\.last \d+$", f" output.last {new_out_last}", new_rt)
+            if new_rt != rt_inner:
+                replacements.append((rt_start, rt_end, f"Retime {{{new_rt}}}"))
+            break  # 첫 Retime만
+
+    if not replacements:
+        return body
+
+    replacements.sort(key=lambda t: t[0], reverse=True)
+    result = body
+    for start, end, new_text in replacements:
+        result = result[:start] + new_text + result[end:]
     return result
 
 
@@ -1029,8 +1245,10 @@ def _generate_nk_minimal(
     shot_name: str,
     paths: Dict[str, Path],
     nk_version: str,
+    task: str = "comp",
 ) -> str:
     """Generate a bare-bones .nk when no template is available."""
+    task_slug = (task or "comp").strip() or "comp"
     fps = preset_data.get("fps", "23.976")
     width = int(float(preset_data.get("plate_width", 1920)))
     height = int(float(preset_data.get("plate_height", 1080)))
@@ -1072,9 +1290,9 @@ def _generate_nk_minimal(
     # 처리하려다 "cannot be executed for multiple frames" 오류가 난다.
     renders = _to_nk_path(paths["renders"])
     if write_file_type == "mov":
-        write_file = f"{renders}/{shot_name}_comp_{nk_version}.{write_ext}"
+        write_file = f"{renders}/{shot_name}_{task_slug}_{nk_version}.{write_ext}"
     else:
-        write_file = f"{renders}/{shot_name}_comp_{nk_version}.####.{write_ext}"
+        write_file = f"{renders}/{shot_name}_{task_slug}_{nk_version}.####.{write_ext}"
     channels = preset_data.get("write_channels", "all") or "all"
     datatype_val = _preset_datatype_string(preset_data)
     comp_raw = preset_data.get("write_compression", "PIZ Wavelet (32 scanlines)") or ""
@@ -1168,6 +1386,7 @@ def generate_nk_content(
     shot_name: str,
     paths: Dict[str, Path],
     nk_version: str,
+    task: str = "comp",
 ) -> Tuple[str, List[str]]:
     """
     Build a full .nk script from a template + preset data.
@@ -1176,10 +1395,14 @@ def generate_nk_content(
     + path/Write/Viewer patches.  Falls back to a minimal graph when no
     template is found.
 
+    Args:
+        task: 작업 폴더 슬러그 (기본 ``comp``). NK 파일명·NDISender 접미사에 사용.
+
     Returns:
         ``(nk_content, warnings)`` — *warnings* lists any patch failures.
     """
     warnings: List[str] = []
+    task_slug = (task or "comp").strip() or "comp"
 
     preset_name = (preset_data.get("project_code") or "").strip().upper()
     custom_body = load_preset_template(preset_name) if preset_name else None
@@ -1188,9 +1411,10 @@ def generate_nk_content(
     else:
         tpl_path = get_shot_node_template_path()
         if tpl_path is None:
-            return _generate_nk_minimal(preset_data, shot_name, paths, nk_version), [
-                "⚠ shot_node_template.nk 를 찾지 못해 최소 NK로 생성되었습니다."
-            ]
+            return (
+                _generate_nk_minimal(preset_data, shot_name, paths, nk_version, task=task_slug),
+                ["⚠ shot_node_template.nk 를 찾지 못해 최소 NK로 생성되었습니다."],
+            )
         body = tpl_path.read_text(encoding="utf-8", errors="replace")
 
     shot_root_norm = _to_nk_path(paths["shot_root"])
@@ -1201,18 +1425,33 @@ def generate_nk_content(
     body = body.replace("/palte/", "/plate/")
     body = body.replace("\\palte\\", "\\plate\\")
 
+    # 비-comp 태스크: 커스텀 템플릿에 남은 /comp/devl/ 절대경로를 작업 폴더로 치환
+    if task_slug != "comp":
+        body = body.replace("/comp/devl/", f"/{task_slug}/devl/")
+        body = body.replace("\\comp\\devl\\", f"\\{task_slug}\\devl\\")
+
     # 템플릿이 E107 고정값이 아닌 다른 샷(E102 등)으로 저장된 경우 Read file 경로가 남는 문제
     body = _patch_read_plate_file_paths(body, shot_name, paths)
     body = _patch_read_edit_file_paths(body, shot_name, paths)
 
-    # Patch comp version in Viewer NDISender etc. (템플릿 대문자 / 슬러그 소문자 모두 허용)
-    body = re.sub(
-        rf"(monitorOutNDISenderName \"NukeX - {re.escape(shot_name)}_comp_)v\d+",
-        rf"\g<1>{nk_version}",
-        body,
-        count=1,
-        flags=re.IGNORECASE,
-    )
+    # Patch task version in Viewer NDISender etc.
+    # comp: 기존 정규식 유지 (커스텀 템플릿 _COMP_ casing 회귀 방지)
+    if task_slug == "comp":
+        body = re.sub(
+            rf"(monitorOutNDISenderName \"NukeX - {re.escape(shot_name)}_comp_)v\d+",
+            rf"\g<1>{nk_version}",
+            body,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+    else:
+        body = re.sub(
+            rf"(monitorOutNDISenderName \"NukeX - {re.escape(shot_name)}_)[A-Za-z0-9_]+_v\d+",
+            rf"\g<1>{task_slug}_{nk_version}",
+            body,
+            count=1,
+            flags=re.IGNORECASE,
+        )
 
     fps = str(preset_data.get("fps", "23.976"))
     width = int(float(preset_data.get("plate_width", 1920)))
@@ -1273,6 +1512,18 @@ def generate_nk_content(
             "플레이트 Read·Root 범위를 확인하세요."
         )
 
+    # edit Read: 템플릿에 남은 first/last(예: 25)를 실제 edit 파일 길이로 맞춤
+    if _body_has_edit_read(body) and paths.get("edit"):
+        edit_dir = Path(paths["edit"])
+        edit_basename = _default_edit_basename(edit_dir, shot_name)
+        edit_fr = _scan_edit_frame_range(edit_dir, edit_basename)
+        if edit_fr:
+            body = _patch_read_edit_frame_range(body, edit_fr[0], edit_fr[1])
+        else:
+            warnings.append(
+                "⚠ edit 파일의 프레임 수를 읽지 못했습니다. NK의 edit Read 범위를 확인하세요."
+            )
+
     # Root block override (inserted after version line)
     # ocio_path 가 비어 있으면 OCIO 줄 생략 (빈 customOCIOConfigPath 로 Nuke 오류 방지)
     # NK 프로젝트 범위는 항상 1001 기준 (플레이트가 MOV여도 동일)
@@ -1299,6 +1550,13 @@ def generate_nk_content(
     final_body = body[:insert_pos] + root_block + body[insert_pos:]
     final_body = _patch_all_root_frame_range(final_body, proj_first, proj_last)
     warnings.extend(_template_sample_path_warnings(final_body))
+    if task_slug != "comp":
+        lower_body = final_body.replace("\\", "/").lower()
+        if "/comp/" in lower_body:
+            warnings.append(
+                f"⚠ NK에 /comp/ 경로가 남아 있습니다 (작업 폴더: {task_slug}). "
+                "커스텀 템플릿 Write·절대경로를 확인하세요."
+            )
     return final_body, warnings
 
 
