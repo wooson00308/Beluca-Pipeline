@@ -1076,10 +1076,20 @@ def _collect_render_video_candidates(
     shot_root: Path,
     extensions: Tuple[str, ...],
 ) -> Tuple[List[Path], List[str]]:
-    """``_RENDER_SUBDIRS`` 아래 영상 파일 후보와 시도한 디렉터리 목록을 반환한다."""
+    """``_RENDER_SUBDIRS`` 아래 영상 파일 후보와 시도한 디렉터리 목록을 반환한다.
+
+    확장자 비교는 대소문자 무시 (Linux/macOS 대소문자 구분 FS 대응).
+    """
     candidates: List[Path] = []
     seen: set = set()
     tried_dirs: List[str] = []
+    ext_set = {
+        (e if e.startswith(".") else f".{e}").lower()
+        for e in extensions
+        if e
+    }
+    if not ext_set:
+        return candidates, tried_dirs
     for parts in _RENDER_SUBDIRS:
         d = shot_root.joinpath(*parts)
         tried_dirs.append(str(d))
@@ -1088,21 +1098,22 @@ def _collect_render_video_candidates(
                 continue
         except OSError:
             continue
-        for ext in extensions:
-            try:
-                for p in d.glob(f"*{ext}"):
-                    if not p.is_file():
-                        continue
-                    try:
-                        rp = p.resolve()
-                    except OSError:
-                        rp = p
-                    if rp in seen:
-                        continue
-                    seen.add(rp)
-                    candidates.append(p)
-            except OSError as exc:
-                logger.debug("find_comp_render_video glob 실패 %s: %s", d, exc)
+        try:
+            for p in d.iterdir():
+                if not p.is_file():
+                    continue
+                if p.suffix.lower() not in ext_set:
+                    continue
+                try:
+                    rp = p.resolve()
+                except OSError:
+                    rp = p
+                if rp in seen:
+                    continue
+                seen.add(rp)
+                candidates.append(p)
+        except OSError as exc:
+            logger.debug("find_comp_render_video iterdir 실패 %s: %s", d, exc)
     return candidates, tried_dirs
 
 
