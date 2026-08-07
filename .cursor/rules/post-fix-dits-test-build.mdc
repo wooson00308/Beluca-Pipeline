@@ -1,0 +1,26 @@
+---
+description: 디버깅·수정 마무리 시 W 드라이브 dits-test 로 테스트 exe 자동 빌드
+alwaysApply: true
+---
+
+# 디버그/픽스 종료 시 `dits-test` 빌드 (Windows)
+
+이 저장소에서 **버그 디버깅을 마치거나**, **수정을 마무리하고 사용자에게 검증을 넘길 때** (이번 턴 작업이 끝날 때), 팀 공용 테스트 경로에 **로컬 테스트 exe**를 갱신한다.
+
+## 절차 (에이전트가 직접 실행)
+
+저장소 루트에서 PowerShell:
+
+```powershell
+$env:BPE_LOCAL_TEST_EXE_DIR = 'W:\team\_Pipeline\dits-test'
+.\scripts\build_test_exe.ps1
+```
+
+- `BPE-Windows\Test_exe` 기본 경로가 아니라 **위 폴더**에 `BPE_dev.exe`가 복사되도록 한다.
+- 빌드가 실패하면 로그를 보고 고치거나 사용자에게 알린다. 성공 시 **`W:\team\_Pipeline\dits-test\BPE_dev.exe`** 경로를 한 줄로 안내한다.
+- 릴리즈 태그·`release.yml`·VERSION 범프 절차는 이 스크립트로 **대체하지 않는다** (기존 CI/CD 규칙과 동일).
+
+## 예외
+
+- 사용자가 “빌드 안 함”, “소스만”, “CI만” 등으로 명시하면 빌드하지 않는다.
+- macOS/Linux만 다루는 변경이면 이 규칙은 해당 없음.

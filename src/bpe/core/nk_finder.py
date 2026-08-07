@@ -1083,11 +1083,7 @@ def _collect_render_video_candidates(
     candidates: List[Path] = []
     seen: set = set()
     tried_dirs: List[str] = []
-    ext_set = {
-        (e if e.startswith(".") else f".{e}").lower()
-        for e in extensions
-        if e
-    }
+    ext_set = {(e if e.startswith(".") else f".{e}").lower() for e in extensions if e}
     if not ext_set:
         return candidates, tried_dirs
     for parts in _RENDER_SUBDIRS:
