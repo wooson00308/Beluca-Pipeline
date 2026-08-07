@@ -15,6 +15,8 @@ class MockShotgun:
         self._entities: Dict[str, List[Dict[str, Any]]] = {}
         self._next_id = 1
         self._schema: Dict[str, Dict[str, Any]] = {}
+        # 마지막 schema_field_read 호출에 넘어온 project_entity (테스트 검증용)
+        self.last_schema_project_entity: Optional[Dict[str, Any]] = None
         # config stub
         self.config = _ConfigStub()
 
@@ -153,7 +155,9 @@ class MockShotgun:
         self,
         entity_type: str,
         field_name: Optional[str] = None,
+        project_entity: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        self.last_schema_project_entity = copy.deepcopy(project_entity)
         et_schema = self._schema.get(entity_type, {})
         if field_name:
             return et_schema.get(field_name, {})

@@ -54,11 +54,13 @@ from bpe.core.nk_finder import (
     open_plate_in_rv,
 )
 from bpe.core.nuke_render_paths import normalize_path_str
+from bpe.core.shot_filter_logic import ShotFacetField, matching_shot_ids, selection_value_count
 from bpe.core.shotgrid_browser import build_project_overview_url, try_launch_chrome_app_url
 from bpe.core.shotgrid_settings import get_shotgrid_settings
 from bpe.gui import theme
 from bpe.gui.shotgrid_open_shot import setup_copy_shot_name_button, setup_shotgrid_open_shot_button
 from bpe.gui.widgets.clickable_image import ClickableImage
+from bpe.gui.widgets.facet_filter_panel import FacetFilterPanel
 from bpe.gui.widgets.nukex_version_dialog import choose_nukex_launcher
 from bpe.gui.workers.sg_worker import ShotGridWorker
 from bpe.shotgrid.client import get_default_sg
@@ -69,6 +71,7 @@ from bpe.shotgrid.notes import (
     list_notes_for_shots,
 )
 from bpe.shotgrid.projects import list_active_projects
+from bpe.shotgrid.shot_filters import discover_shot_facet_fields, fetch_shot_facet_data
 from bpe.shotgrid.shots import search_shots_by_code_for_autocomplete
 from bpe.shotgrid.tasks import (
     BELUCA_TASK_STATUS_PRESETS,
@@ -843,6 +846,16 @@ class MyTasksTab(QWidget):
         self._shot_suggest_list: Optional[QListWidget] = None
         self._tag_filter_value: Optional[str] = None
         self._tag_filter_popup: Optional[QFrame] = None
+        # ── Shot 다중 카테고리 필터 (시퀀스·상태·태그 등, ShotGrid Shot 패널 방식) ──
+        self._facet_panel: Optional[FacetFilterPanel] = None
+        self._facet_fields: List[ShotFacetField] = []
+        self._facet_shot_rows: List[Dict[str, Any]] = []
+        self._facet_selection: Dict[str, Set[str]] = {}
+        self._facet_cache_project_id: Optional[int] = None
+        self._facet_req_seq: int = 0
+        self._facet_loading: bool = False
+        # 선택/데이터가 바뀔 때만 다시 계산 (상태 클릭·정렬 변경마다 전체 샷을 훑지 않도록)
+        self._facet_allowed_ids: Optional[Set[int]] = None
 
         self._build_ui()
         app = QApplication.instance()
@@ -1011,6 +1024,17 @@ class MyTasksTab(QWidget):
         self._tag_filter_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._tag_filter_btn.clicked.connect(self._toggle_tag_filter_popup)
         shot_hdr.addWidget(self._tag_filter_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        # 샷 카테고리 필터 — Shot 스키마 로드에 성공하면 위 태그 버튼을 대체한다
+        self._facet_filter_btn = QPushButton(f"필터  {chr(0x25BE)}")
+        self._facet_filter_btn.setObjectName("filter_combo_like_btn")
+        self._facet_filter_btn.setMinimumWidth(130)
+        self._facet_filter_btn.setFixedHeight(34)
+        self._facet_filter_btn.setToolTip("시퀀스·상태·태그 등 샷 정보로 목록 좁히기")
+        self._facet_filter_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._facet_filter_btn.setVisible(False)
+        self._facet_filter_btn.clicked.connect(self._toggle_facet_panel)
+        shot_hdr.addWidget(self._facet_filter_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
         _sort_lbl = QLabel("샷 정렬")
         _sort_lbl.setObjectName("page_subtitle")
@@ -1341,6 +1365,159 @@ class MyTasksTab(QWidget):
         p = getattr(self, "_tag_filter_popup", None)
         if p is not None and p.isVisible():
             p.hide()
+        self._clear_facet_selection()
+
+    # ── Shot 카테고리 필터 (시퀀스·상태·태그 …) ──────────────────────
+
+    def _clear_facet_selection(self) -> None:
+        self._facet_selection = {}
+        self._facet_allowed_ids = None
+        panel = getattr(self, "_facet_panel", None)
+        if panel is not None:
+            panel.clear_selection(emit=False)
+            if panel.isVisible():
+                panel.hide()
+        self._update_facet_button_label()
+
+    def _update_facet_button_label(self) -> None:
+        btn = getattr(self, "_facet_filter_btn", None)
+        if btn is None:
+            return
+        n = selection_value_count(self._facet_selection)
+        btn.setText(f"필터 {n}  {chr(0x25BE)}" if n else f"필터  {chr(0x25BE)}")
+
+    def _toggle_facet_panel(self) -> None:
+        panel = self._facet_panel
+        if panel is not None and panel.isVisible():
+            panel.hide()
+            return
+        if not self._facet_fields:
+            QMessageBox.information(
+                self, "필터", "샷 정보를 아직 불러오지 못했습니다. 잠시 후 다시 시도하세요."
+            )
+            return
+        if panel is None:
+            panel = FacetFilterPanel(self)
+            panel.selectionChanged.connect(self._on_facet_selection_changed)
+            panel.set_facets(self._facet_fields, self._facet_shot_rows)
+            self._facet_panel = panel
+        panel.show_under(self._facet_filter_btn)
+
+    def _on_facet_selection_changed(self, selection: object) -> None:
+        sel: Dict[str, Set[str]] = {}
+        if isinstance(selection, dict):
+            for k, v in selection.items():
+                if isinstance(v, (set, list, tuple)) and v:
+                    sel[str(k)] = {str(x) for x in v}
+        self._facet_selection = sel
+        self._facet_allowed_ids = None
+        self._update_facet_button_label()
+        self._apply_filter_and_sort()
+
+    def _ensure_facet_data(self, project_id: Optional[Any]) -> None:
+        """프로젝트의 Shot 카테고리·값을 백그라운드로 받아온다 (프로젝트당 1회)."""
+        if project_id is None:
+            return
+        try:
+            pid = int(project_id)
+        except (TypeError, ValueError):
+            return
+        if self._facet_loading:
+            return
+        if self._facet_cache_project_id == pid and self._facet_fields:
+            # 같은 프로젝트면 새로 받아올 게 없다. 여기서 패널을 다시 만들면 상태 칩을 누를 때마다
+            # 사용자가 펼쳐 둔 카테고리와 체크한 값이 초기화되므로 아무것도 건드리지 않는다.
+            return
+
+        self._facet_loading = True
+        self._facet_req_seq += 1
+        seq = self._facet_req_seq
+
+        def _fetch() -> Dict[str, Any]:
+            sg = get_default_sg()
+            fields = discover_shot_facet_fields(sg, pid)
+            rows = fetch_shot_facet_data(sg, pid, fields) if fields else []
+            return {"project_id": pid, "fields": fields, "rows": rows}
+
+        w = ShotGridWorker(_fetch)
+        w.finished.connect(lambda r: self._on_facet_data_loaded(r, seq))
+        w.error.connect(lambda e: self._on_facet_data_failed(e, seq))
+        w.start()
+        self._workers.append(w)
+
+    def _on_facet_data_loaded(self, result: object, seq: int) -> None:
+        if seq != self._facet_req_seq:
+            return
+        self._facet_loading = False
+        if not isinstance(result, dict):
+            self._on_facet_data_failed("잘못된 응답", seq)
+            return
+        fields = result.get("fields")
+        rows = result.get("rows")
+        self._facet_fields = [f for f in (fields or []) if isinstance(f, ShotFacetField)]
+        self._facet_shot_rows = [r for r in (rows or []) if isinstance(r, dict)]
+        self._facet_cache_project_id = result.get("project_id")
+        self._facet_selection = {}
+        self._facet_allowed_ids = None
+        self._apply_facet_data_to_ui()
+
+    def _on_facet_data_failed(self, msg: object, seq: int) -> None:
+        if seq != self._facet_req_seq:
+            return
+        self._facet_loading = False
+        logger.warning("샷 카테고리 필터 로드 실패: %s", msg)
+        self._facet_fields = []
+        self._facet_shot_rows = []
+        self._facet_selection = {}
+        self._facet_allowed_ids = None
+        self._facet_cache_project_id = None
+        self._apply_facet_data_to_ui()
+
+    def _apply_facet_data_to_ui(self) -> None:
+        """새 필터 패널을 쓸 수 있으면 태그 버튼을 감추고, 아니면 기존 태그 버튼을 유지한다."""
+        usable = bool(self._facet_fields and self._facet_shot_rows)
+        panel = self._facet_panel
+        if panel is not None:
+            if panel.isVisible():
+                panel.hide()
+            panel.set_facets(self._facet_fields, self._facet_shot_rows)
+        self._update_facet_button_label()
+        if getattr(self, "_facet_filter_btn", None) is not None:
+            self._facet_filter_btn.setVisible(usable)
+        if getattr(self, "_tag_filter_btn", None) is not None:
+            self._tag_filter_btn.setVisible(not usable)
+
+    def _filter_tasks_by_facets(self, tasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """카테고리 필터 적용 — 담당자 모드(개인/팀/All Tasks)와 무관하게 동일하게 동작."""
+        if not self._facet_selection or not self._facet_fields or not self._facet_shot_rows:
+            return list(tasks)
+        allowed = self._facet_allowed_ids
+        if allowed is None:
+            allowed = matching_shot_ids(
+                self._facet_shot_rows, self._facet_fields, self._facet_selection
+            )
+            self._facet_allowed_ids = allowed
+        out: List[Dict[str, Any]] = []
+        for t in tasks:
+            sid = t.get("shot_id")
+            if sid is None:
+                continue
+            try:
+                if int(sid) in allowed:
+                    out.append(t)
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    def _invalidate_facet_data(self) -> None:
+        self._facet_req_seq += 1
+        self._facet_loading = False
+        self._facet_fields = []
+        self._facet_shot_rows = []
+        self._facet_selection = {}
+        self._facet_allowed_ids = None
+        self._facet_cache_project_id = None
+        self._apply_facet_data_to_ui()
 
     def _merged_tasks_for_display(self) -> List[Dict[str, Any]]:
         rows = list(self._all_tasks)
@@ -1531,6 +1708,7 @@ class MyTasksTab(QWidget):
         filtered = _filter_tasks_by_status(merged, self._active_status)
         filtered = _filter_tasks_by_tag(filtered, self._tag_filter_value)
         filtered = _filter_tasks_by_shot_substring(filtered, self._shot_substring_query)
+        filtered = self._filter_tasks_by_facets(filtered)
 
         self._apply_filter_and_sort()
 
@@ -1647,6 +1825,7 @@ class MyTasksTab(QWidget):
 
     def _on_project_combo_changed(self, _idx: int = 0) -> None:
         self._clear_shot_and_tag_filters()
+        self._invalidate_facet_data()
         self._project_users.clear()
         assignee_text = (self._user_edit.text() or "").strip()
         if assignee_text == "All Tasks":
@@ -2222,6 +2401,7 @@ class MyTasksTab(QWidget):
         filtered = _filter_tasks_by_status(merged, self._active_status)
         filtered = _filter_tasks_by_tag(filtered, self._tag_filter_value)
         filtered = _filter_tasks_by_shot_substring(filtered, self._shot_substring_query)
+        filtered = self._filter_tasks_by_facets(filtered)
         if self._shot_focus_shot_id is not None:
             try:
                 fid = int(self._shot_focus_shot_id)
@@ -2254,6 +2434,9 @@ class MyTasksTab(QWidget):
             self._apply_cached_version_to_card(card)
 
         tag_note = " · 태그 필터" if (self._tag_filter_value or "").strip() else ""
+        n_facet = selection_value_count(self._facet_selection)
+        if n_facet:
+            tag_note += f" · 카테고리 필터 {n_facet}개"
         shot_note = (
             " · 샷 검색"
             if self._shot_focus_shot_id is not None
@@ -2364,6 +2547,8 @@ class MyTasksTab(QWidget):
         self._loading_label.setText("조회 중...")
         self._clear_cards()
         self._start_spinner(self._shot_spinner_lbl)
+        # 태스크 조회와 독립적으로 진행 — 실패해도 목록 조회에는 영향 없음
+        self._ensure_facet_data(project_id)
 
         def _fetch() -> Any:
             sg = get_default_sg()
@@ -3136,8 +3321,12 @@ class MyTasksTab(QWidget):
 
         dlg = QDialog(self)
         dlg.setWindowTitle("Publish")
-        dlg.setMinimumSize(1050, 940)
-        dlg.resize(1100, 1000)
+        # LUT MOV 행이 추가로 보여도 아래 항목과 겹치지 않도록 세로 여유를 둔다.
+        scr = dlg.screen()
+        avail_h = scr.availableGeometry().height() if scr is not None else 1080
+        min_h = min(1000, max(720, avail_h - 80))
+        dlg.setMinimumSize(1050, min_h)
+        dlg.resize(1100, min(1060, max(min_h, avail_h - 40)))
 
         lay = QVBoxLayout(dlg)
         lay.setContentsMargins(0, 0, 0, 0)
