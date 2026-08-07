@@ -1,4 +1,4 @@
-# @cursor-change: 2026-08-06, 0.2.x, UploadWorker.done 시그널 + job 큐 중복 방어
+# @cursor-change: 2026-08-06, 0.2.x, LUT MOV 행 표시 시 겹침 방지 — 스크롤 영역 + 행 최소 높이
 """Publish tab — 완전 자동 채움 방식으로 MOV 업로드 + TimeLog 생성."""
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QTextEdit,
     QVBoxLayout,
@@ -38,6 +39,7 @@ from bpe.shotgrid.versions import create_version
 logger = logging.getLogger(__name__)
 
 _LABEL_W = 130
+_ROW_MIN_H = 30
 _CRS2_032_PROJECT_CODE = "CRS2_032"
 _MMK_PROJECT_CODE = "MMK_028"
 
@@ -49,6 +51,7 @@ def _info_row(label_text: str, widget: QWidget) -> QHBoxLayout:
     lbl = QLabel(label_text)
     lbl.setObjectName("form_label")
     lbl.setFixedWidth(_LABEL_W)
+    lbl.setMinimumHeight(_ROW_MIN_H)
     lbl.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
     row.addWidget(lbl)
     row.addWidget(widget, 1)
@@ -63,6 +66,7 @@ def _input_row(label_text: str, widget: QWidget) -> QHBoxLayout:
 def _read_only_line(text: str = "") -> QLineEdit:
     w = QLineEdit(text)
     w.setReadOnly(True)
+    w.setMinimumHeight(_ROW_MIN_H)
     return w
 
 
@@ -113,7 +117,20 @@ class PublishTab(QWidget):
         project_code = td.get("project_code") or td.get("project_name", "")
         task_content = td.get("task_content", "")
 
-        root = QVBoxLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        outer.addWidget(scroll)
+
+        container = QWidget()
+        scroll.setWidget(container)
+
+        root = QVBoxLayout(container)
         root.setContentsMargins(32, 24, 32, 24)
         root.setSpacing(0)
 
@@ -156,9 +173,13 @@ class PublishTab(QWidget):
         self._mov_label = _read_only_line("렌더 MOV 탐색 중...")
         info_block.addLayout(_info_row("MOV 파일", self._mov_label))
 
+        # 숨길 때 행 간격까지 함께 사라지도록 위젯으로 감싼다.
         self._lut_mov_label = _read_only_line("")
-        self._lut_mov_row = _info_row("LUT MOV", self._lut_mov_label)
-        info_block.addLayout(self._lut_mov_row)
+        lut_row_lay = _info_row("LUT MOV", self._lut_mov_label)
+        lut_row_lay.setContentsMargins(0, 0, 0, 0)
+        self._lut_mov_row = QWidget()
+        self._lut_mov_row.setLayout(lut_row_lay)
+        info_block.addWidget(self._lut_mov_row)
         self._set_lut_row_visible(False)
 
         root.addLayout(info_block)
@@ -267,11 +288,7 @@ class PublishTab(QWidget):
 
     def _set_lut_row_visible(self, visible: bool) -> None:
         """LUT MOV 행(라벨+필드) 표시/숨김."""
-        for i in range(self._lut_mov_row.count()):
-            item = self._lut_mov_row.itemAt(i)
-            w = item.widget() if item is not None else None
-            if w is not None:
-                w.setVisible(visible)
+        self._lut_mov_row.setVisible(visible)
 
     # ── Background init ─────────────────────────────────────────────
 
