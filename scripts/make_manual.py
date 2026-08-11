@@ -548,7 +548,7 @@ def draw_tools() -> Drawing:
         _txt(
             12,
             h - 115,
-            "Tools 탭 ON 후 Nuke: setup_pro → BPE Tools → Reload Tool Hooks",
+            "Tools 탭 ON 후 Nuke 재시작 (훅 자동 적용)",
             7,
             False,
             C_DIM,

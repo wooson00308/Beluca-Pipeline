@@ -89,8 +89,8 @@ class ToolsTab(QWidget):
 
         # Banner
         banner = QLabel(
-            "스위치를 켠 뒤, Nuke에서 setup_pro → BPE Tools → "
-            "Reload Tool Hooks를 한 번 실행해야 적용됩니다."
+            "스위치를 켠 뒤 Nuke를 한 번 재시작하면 적용됩니다. "
+            "(이미 Nuke가 열려 있으면 끄고 다시 켜 주세요.)"
         )
         banner.setObjectName("page_subtitle")
         banner.setWordWrap(True)
