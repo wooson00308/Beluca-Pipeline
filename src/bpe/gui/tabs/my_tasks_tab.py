@@ -972,6 +972,13 @@ class MyTasksTab(QWidget):
         self._timelog_btn.clicked.connect(self._open_time_log_dialog)
         filter_bar.addWidget(self._timelog_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
+        self._library_btn = QPushButton("Library")
+        self._library_btn.setFixedWidth(88)
+        self._library_btn.setToolTip("소스 라이브러리 (등록한 소스 폴더 훑어보기)")
+        self._library_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._library_btn.clicked.connect(self._open_source_library_dialog)
+        filter_bar.addWidget(self._library_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+
         root.addLayout(filter_bar)
         self._update_project_shotgrid_btn_state()
 
@@ -3348,4 +3355,16 @@ class MyTasksTab(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         sb = ShotBuilderTab(task_data=task_data)
         lay.addWidget(sb)
+        dlg.exec()
+
+    def _open_source_library_dialog(self) -> None:
+        """소스 라이브러리 팝업 — 현재 프로젝트 + 공용 소스를 보여 준다."""
+        from bpe.gui.widgets.source_library_dialog import SourceLibraryDialog
+
+        dlg = SourceLibraryDialog(
+            self,
+            project_id=self._project_combo.currentData(),
+            project_name=self._project_combo.currentText(),
+            projects=getattr(self, "_projects", None) or [],
+        )
         dlg.exec()

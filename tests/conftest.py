@@ -25,6 +25,8 @@ def tmp_app_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(cfg, "COLORSPACE_CACHE_FILE", cache_dir / "nuke_colorspaces.json")
     monkeypatch.setattr(cfg, "DATATYPE_CACHE_FILE", cache_dir / "nuke_write_datatypes.json")
     monkeypatch.setattr(cfg, "OCIO_CONFIG_CACHE_FILE", cache_dir / "ocio_configs.json")
+    monkeypatch.setattr(cfg, "SOURCE_LIBRARY_INDEX_FILE", cache_dir / "source_library.sqlite")
+    monkeypatch.setattr(cfg, "MEDIA_THUMBS_DIR", cache_dir / "media_thumbs")
 
     # Presets default dir must stay under isolated APP_DIR (not team W: drive).
     import bpe.core.settings as settings_mod

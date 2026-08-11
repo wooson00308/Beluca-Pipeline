@@ -124,6 +124,20 @@ hiddenimports = [
     "bpe.shotgrid",
     "bpe.core.ai_qc",
     "bpe.gui.widgets.ai_qc_dialog",
+    # 소스 라이브러리 — 지연 import 라서 명시하지 않으면 onefile 번들에서 빠진다
+    "sqlite3",
+    "bpe.core.source_library_scan",
+    "bpe.core.source_library_db",
+    "bpe.core.source_library_config",
+    "bpe.core.source_library_publish",
+    "bpe.core.library_handoff",
+    "bpe.core.nuke_setup_library",
+    "bpe.core.media_thumbs",
+    "bpe.gui.workers.library_scan_worker",
+    "bpe.gui.widgets.sequence_scrub_widget",
+    "bpe.gui.widgets.source_library_grid",
+    "bpe.gui.widgets.source_library_dialog",
+    "bpe.gui.widgets.source_library_settings_dialog",
 ]
 hiddenimports += list(_ps6_hidden)
 

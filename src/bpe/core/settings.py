@@ -189,3 +189,52 @@ def save_ai_qc_settings(data: Dict[str, Any], settings_file: Optional[Path] = No
     existing.update({k: v for k, v in data.items() if k in _DEFAULT_AI_QC})
     settings["ai_qc"] = existing
     save_settings(settings, settings_file)
+
+
+_DEFAULT_SOURCE_LIBRARY: Dict[str, Any] = {
+    # 소스를 정리해 둔 폴더 경로 목록(로컬 레거시). 공유 library.json 이 우선이다.
+    "roots": [],
+    # 그리드 셀(~168px)에 맞춰 디코드. 크면 ffmpeg 만 느려진다.
+    "thumb_px": 180,
+    "thumb_cache_max_mb": 2048,
+    "last_category": "",
+    # 공유 설정 폴더 (비어 있으면 플랫폼 기본: W:\\team\\_Pipeline\\BPE_SourceLibrary)
+    "config_dir": "",
+    # 마지막 트리 선택 (scope/group/folder) — UI 편의용 로컬 값
+    "last_selection": "",
+}
+
+
+def get_source_library_settings(settings_file: Optional[Path] = None) -> Dict[str, Any]:
+    """Return the 'source_library' section, filling missing keys with defaults.
+
+    기존 settings.json 키(presets_dir, tools, feedback, unc_mappings, ai_qc)에 영향 없음.
+    """
+    settings = load_settings(settings_file)
+    stored = settings.get("source_library")
+    if not isinstance(stored, dict):
+        stored = {}
+    merged: Dict[str, Any] = dict(_DEFAULT_SOURCE_LIBRARY)
+    for k, v in stored.items():
+        if k in merged:
+            merged[k] = v
+    roots = merged.get("roots")
+    if not isinstance(roots, list):
+        merged["roots"] = []
+    else:
+        merged["roots"] = [str(p).strip() for p in roots if isinstance(p, str) and str(p).strip()]
+    return merged
+
+
+def save_source_library_settings(
+    data: Dict[str, Any],
+    settings_file: Optional[Path] = None,
+) -> None:
+    """Update only the 'source_library' key in settings.json. Preserves other keys."""
+    settings = load_settings(settings_file)
+    existing = settings.get("source_library")
+    if not isinstance(existing, dict):
+        existing = {}
+    existing.update({k: v for k, v in data.items() if k in _DEFAULT_SOURCE_LIBRARY})
+    settings["source_library"] = existing
+    save_settings(settings, settings_file)

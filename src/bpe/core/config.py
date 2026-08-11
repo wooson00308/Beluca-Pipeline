@@ -15,3 +15,7 @@ FORMAT_CACHE_FILE = CACHE_DIR / "nuke_formats.json"
 COLORSPACE_CACHE_FILE = CACHE_DIR / "nuke_colorspaces.json"
 DATATYPE_CACHE_FILE = CACHE_DIR / "nuke_write_datatypes.json"
 OCIO_CONFIG_CACHE_FILE = CACHE_DIR / "ocio_configs.json"
+
+# 소스 라이브러리 — 파일 인덱스(SQLite)와 썸네일/필름스트립 캐시
+SOURCE_LIBRARY_INDEX_FILE = CACHE_DIR / "source_library.sqlite"
+MEDIA_THUMBS_DIR = CACHE_DIR / "media_thumbs"

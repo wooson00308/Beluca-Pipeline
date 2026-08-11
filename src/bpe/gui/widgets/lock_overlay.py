@@ -24,13 +24,21 @@ _SHAKE_OFFSETS = (0, 8, -8, 6, -6, 4, -4, 2, -2, 0)
 
 
 class LockOverlay(QWidget):
-    """Preset Manager 진입 전 비밀번호 잠금."""
+    """Preset Manager / Source Library 설정 진입 전 비밀번호 잠금."""
 
     unlocked = Signal()
 
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        *,
+        title: str = "Preset Manager",
+        hint: str = "관리자 전용 기능입니다.",
+    ) -> None:
         super().__init__(parent)
         self.setObjectName("lock_overlay")
+        self._title_text = title
+        self._hint_text = hint
         self._fail_count = 0
         self._cooldown_remaining = 0
         self._cooldown_timer: Optional[QTimer] = None
@@ -61,12 +69,12 @@ class LockOverlay(QWidget):
         icon.setStyleSheet(f"font-size: 32px; background: transparent; color: {theme.TEXT_DIM};")
         col.addWidget(icon)
 
-        title = QLabel("Preset Manager")
+        title = QLabel(self._title_text)
         title.setObjectName("lock_title")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         col.addWidget(title)
 
-        hint = QLabel("관리자 전용 기능입니다.")
+        hint = QLabel(self._hint_text)
         hint.setObjectName("lock_hint")
         hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         hint.setWordWrap(True)

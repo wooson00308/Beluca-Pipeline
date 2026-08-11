@@ -1,79 +1,65 @@
-"""Nuke 메뉴 등록 — setup_pro 메뉴 트리와 BPE Tools 상태 표시."""
+# @cursor-change: 2026-08-11, 0.13.x, Source Library handoff 메뉴·감시
+"""Nuke 메뉴 등록 — 상단 ``BPE``(세팅 라이브러리) + 훅 자동 등록.
+
+프리셋/QC 메뉴 항목은 더 이상 붙이지 않는다. QC 훅은 Nuke 기동 시 조용히 등록한다.
+기존 ``menu.py`` 훅 호환을 위해 ``add_setup_pro_menu`` 별칭을 유지한다.
+"""
 
 from __future__ import annotations
 
 import nuke
 
-import bpe.core.config as cfg
-from bpe.core.settings import get_tools_settings
+_LIBRARY_IMPORT_LABEL = "라이브러리에서 가져오기  (BPE Source Library)"
 
 
-def show_bpe_tools_status() -> None:
-    """BPE 앱 Tools 패널에서 저장한 설정과 현재 Nuke 훅 상태를 안내한다."""
+def _ensure_menu(parent, name: str):
     try:
-        tools_cfg = get_tools_settings()
-    except Exception as e:
-        nuke.message(f"[BPE] settings.json 을 읽지 못했습니다:\n{e}")
-        return
-
-    qc_file = tools_cfg.get("qc_checker", {}).get("enabled", False)
-    pr_file = tools_cfg.get("post_render_viewer", {}).get("enabled", False)
-    settings_path = cfg.SETTINGS_FILE
-
-    msg = (
-        "BPE Tools 상태\n"
-        "────────────────────────\n"
-        f"설정 파일:\n  {settings_path}\n\n"
-        f"파일에 저장된 옵션:\n"
-        f"  • QC Checker (렌더 전):     {'켜짐' if qc_file else '꺼짐'}\n"
-        f"  • Post-Render Viewer:       {'켜짐' if pr_file else '꺼짐'}\n\n"
-        "Nuke에는 'Tools'라는 메뉴가 없습니다.\n"
-        "BPE 데스크톱 앱에서 스위치를 바꾼 뒤,\n"
-        "아래 메뉴로 훅을 다시 읽어와야 적용됩니다.\n\n"
-        "  setup_pro → BPE Tools → Reload Tool Hooks\n\n"
-        "스크립트 에디터에서 확인:\n"
-        "  from bpe.nuke_plugin.tool_hooks import reload_tool_hooks; reload_tool_hooks()"
-    )
-    nuke.message(msg)
-
-
-def add_setup_pro_menu() -> None:
-    """Nuke 메인 메뉴에 setup_pro 를 한 번만 등록 (중복 호출·재로드 시에도 TD 메뉴와 충돌 없음)."""
-    menu = nuke.menu("Nuke")
-    try:
-        if menu.findItem("setup_pro") is not None:
-            return
+        existing = parent.findItem(name)
+        if existing is not None:
+            return existing
     except Exception:
         pass
+    return parent.addMenu(name)
 
-    setup_menu = menu.addMenu("setup_pro")
-    setup_menu.addCommand(
-        "프리셋 적용  (FPS · 해상도 · OCIO · Write 세팅)",
-        "from bpe.nuke_plugin.apply_preset import open_setup_pro_panel; open_setup_pro_panel()",
-    )
-    setup_menu.addCommand(
-        "캐시 새로 고침  (Write / 포맷 목록 갱신)",
-        "from bpe.nuke_plugin.cache_writer import refresh_setup_pro_caches;"
-        " refresh_setup_pro_caches()",
-    )
 
-    tools_menu = setup_menu.addMenu("BPE Tools")
-    tools_menu.addCommand(
-        "QC · Post-Render 상태 확인",
-        "from bpe.nuke_plugin.menu_setup import show_bpe_tools_status; show_bpe_tools_status()",
-    )
-    tools_menu.addCommand(
-        "Tool Hooks 다시 불러오기  (BPE 앱 설정 적용)",
-        "from bpe.nuke_plugin.tool_hooks import reload_tool_hooks; reload_tool_hooks()",
-    )
-    tools_menu.addCommand(
-        "지금 QC 체크  (선택 Write 또는 전체)",
-        "from bpe.nuke_plugin.tool_hooks import run_qc_now; run_qc_now()",
-    )
-    setup_menu.addCommand(
-        "Tool Hooks 다시 불러오기",
-        "from bpe.nuke_plugin.tool_hooks import reload_tool_hooks; reload_tool_hooks()",
-    )
+def add_bpe_menu() -> None:
+    """Nuke 상단에 ``BPE`` 메뉴를 등록하고 Nodes 툴바·handoff 감시를 맞춘다."""
+    menu = nuke.menu("Nuke")
+    bpe_menu = _ensure_menu(menu, "BPE")
+
+    try:
+        from bpe.nuke_plugin.setup_library import (
+            _detach_legacy_setup_library_from_setup_pro,
+            ensure_bpe_top_menu_commands,
+            register_nodes_toolbar,
+        )
+
+        _detach_legacy_setup_library_from_setup_pro()
+        ensure_bpe_top_menu_commands(bpe_menu)
+        register_nodes_toolbar()
+    except Exception as _e:
+        nuke.tprint("[BPE Setup Library] 메뉴 등록 실패: %s" % _e)
+
+    try:
+        try:
+            if bpe_menu.findItem(_LIBRARY_IMPORT_LABEL) is not None:
+                bpe_menu.removeItem(_LIBRARY_IMPORT_LABEL)
+        except Exception:
+            pass
+        bpe_menu.addCommand(
+            _LIBRARY_IMPORT_LABEL,
+            "from bpe.nuke_plugin.library_import import import_library_handoff;"
+            " import_library_handoff()",
+        )
+        from bpe.nuke_plugin.library_import import (
+            register_frame_range_fix,
+            start_handoff_watcher,
+        )
+
+        start_handoff_watcher()
+        register_frame_range_fix()
+    except Exception as _e:
+        nuke.tprint("[BPE Source Library] handoff 등록 실패: %s" % _e)
 
     try:
         from bpe.nuke_plugin.tool_hooks import reload_tool_hooks as _rth
@@ -81,3 +67,8 @@ def add_setup_pro_menu() -> None:
         _rth()
     except Exception as _e:
         nuke.tprint("[BPE Tools] 훅 자동 등록 실패: %s" % _e)
+
+
+def add_setup_pro_menu() -> None:
+    """호환 별칭 — ``~/.nuke/menu.py`` 훅이 이 이름을 호출한다."""
+    add_bpe_menu()

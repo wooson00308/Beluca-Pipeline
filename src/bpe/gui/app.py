@@ -77,6 +77,20 @@ def run_app(argv: List[str] | None = None) -> int:
     app.processEvents()
     logger.info("스플래시 표시 완료")
 
+    def _sync_nuke_plugin() -> None:
+        try:
+            from bpe.core.nuke_plugin_install import ensure_nuke_plugin
+
+            result = ensure_nuke_plugin()
+            if result.get("updated"):
+                logger.info("Nuke 플러그인 갱신됨 — Nuke 재시작 후 반영")
+            elif result.get("error"):
+                logger.warning("Nuke 플러그인 동기화 건너뜀: %s", result["error"])
+        except Exception:
+            logger.warning("Nuke 플러그인 동기화 실패", exc_info=True)
+
+    QTimer.singleShot(0, _sync_nuke_plugin)
+
     # 스플래시 애니메이션 중 메인 윈도우 생성 (백그라운드)
     window = None
 
