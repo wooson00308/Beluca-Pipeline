@@ -1,5 +1,5 @@
 # @cursor-change: 2026-08-11, 0.13.x, Source Library handoff 메뉴·감시
-"""Nuke 메뉴 등록 — 상단 ``BPE``(세팅 라이브러리) + 훅 자동 등록.
+"""Nuke 메뉴 등록 — 상단 ``BPE`` 메뉴 + 훅 자동 등록.
 
 프리셋/QC 메뉴 항목은 더 이상 붙이지 않는다. QC 훅은 Nuke 기동 시 조용히 등록한다.
 기존 ``menu.py`` 훅 호환을 위해 ``add_setup_pro_menu`` 별칭을 유지한다.
@@ -28,19 +28,6 @@ def add_bpe_menu() -> None:
     bpe_menu = _ensure_menu(menu, "BPE")
 
     try:
-        from bpe.nuke_plugin.setup_library import (
-            _detach_legacy_setup_library_from_setup_pro,
-            ensure_bpe_top_menu_commands,
-            register_nodes_toolbar,
-        )
-
-        _detach_legacy_setup_library_from_setup_pro()
-        ensure_bpe_top_menu_commands(bpe_menu)
-        register_nodes_toolbar()
-    except Exception as _e:
-        nuke.tprint("[BPE Setup Library] 메뉴 등록 실패: %s" % _e)
-
-    try:
         try:
             if bpe_menu.findItem(_LIBRARY_IMPORT_LABEL) is not None:
                 bpe_menu.removeItem(_LIBRARY_IMPORT_LABEL)
@@ -56,8 +43,15 @@ def add_bpe_menu() -> None:
             start_handoff_watcher,
         )
 
-        start_handoff_watcher()
-        register_frame_range_fix()
+        # 두 등록을 분리한다 — 한쪽이 실패해도 다른 쪽은 반드시 등록되게.
+        try:
+            start_handoff_watcher()
+        except Exception as _e:
+            nuke.tprint("[BPE Source Library] handoff 감시 등록 실패: %s" % _e)
+        try:
+            register_frame_range_fix()
+        except Exception as _e:
+            nuke.tprint("[BPE Source Library] 프레임 범위 교정 등록 실패: %s" % _e)
     except Exception as _e:
         nuke.tprint("[BPE Source Library] handoff 등록 실패: %s" % _e)
 

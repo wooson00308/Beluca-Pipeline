@@ -18,6 +18,7 @@ from bpe.core.library_handoff import (
     read_handoff_payload,
 )
 from bpe.core.nuke_render_paths import normalize_path_str
+from bpe.nuke_plugin.nuke_defer import execute_deferred
 
 _POLL_MS = 1000
 _timer = None
@@ -65,8 +66,39 @@ def _create_reads_from_items(items: list) -> int:
     return created
 
 
+def _confirm_and_import(items: list) -> bool:
+    """Yes/No 확인 팝업을 띄우고, 승인하면 Read 를 만든다. 승인 여부를 반환한다.
+
+    자동 감지(폴링)와 메뉴 수동 실행이 동일한 확인 절차를 거치도록 공유하는 헬퍼 —
+    한쪽은 확인창이 뜨고 한쪽은 바로 실행되던 동작 차이를 없앤다.
+    """
+    global _dialog_open
+    names = []
+    for it in items[:5]:
+        n = str(it.get("name") or "").strip()
+        if n:
+            names.append(n)
+    preview = "\n".join("  · " + n for n in names)
+    if len(items) > 5:
+        preview += "\n  · … 외 %d개" % (len(items) - 5)
+
+    msg = "[BPE] Source Library\n\n%d개 소스를 Read 노드로 가져올까요?\n" % len(items)
+    if preview:
+        msg += "\n" + preview + "\n"
+    msg += "\n예 = 가져오기 / 아니오 = 취소"
+
+    _dialog_open = True
+    try:
+        accepted = bool(nuke.ask(msg))
+    finally:
+        _dialog_open = False
+    if accepted:
+        _create_reads_from_items(items)
+    return accepted
+
+
 def import_library_handoff() -> None:
-    """메뉴 폴백 — handoff 항목으로 Read 노드를 만든다 (확인 없음)."""
+    """메뉴 폴백 — handoff 항목을 자동 팝업과 동일하게 확인 후 Read 로 만든다."""
     items = read_handoff()
     if not items:
         nuke.message(
@@ -76,7 +108,7 @@ def import_library_handoff() -> None:
             "(Nuke가 켜져 있으면 예/아니오 팝업이 뜹니다.)"
         )
         return
-    _create_reads_from_items(items)
+    _confirm_and_import(items)
     try:
         mark_handoff_consumed()
     except Exception as exc:
@@ -89,7 +121,13 @@ def _schedule_offer() -> bool:
     if _dialog_open or _offer_scheduled:
         return False
     _offer_scheduled = True
-    nuke.executeDeferred(_offer_import_popup)
+    try:
+        execute_deferred(_offer_import_popup)
+    except Exception as exc:
+        # 예약 실패를 그대로 올리면 menu_setup 의 등록 블록이 통째로 중단된다.
+        _offer_scheduled = False
+        nuke.tprint("[BPE] 라이브러리 팝업 예약 실패: %s" % exc)
+        return False
     return True
 
 
@@ -113,29 +151,8 @@ def _offer_import_popup() -> None:
             _last_seen_send_id = send_id
             return
 
-        names = []
-        for it in items[:5]:
-            n = str(it.get("name") or "").strip()
-            if n:
-                names.append(n)
-        preview = "\n".join("  · " + n for n in names)
-        if len(items) > 5:
-            preview += "\n  · … 외 %d개" % (len(items) - 5)
-
-        msg = "[BPE] Source Library\n\n%d개 소스를 Read 노드로 가져올까요?\n" % len(items)
-        if preview:
-            msg += "\n" + preview + "\n"
-        msg += "\n예 = 가져오기 / 아니오 = 취소"
-
-        _dialog_open = True
-        try:
-            accepted = bool(nuke.ask(msg))
-        finally:
-            _dialog_open = False
-
+        _confirm_and_import(items)
         _last_seen_send_id = send_id
-        if accepted:
-            _create_reads_from_items(items)
         try:
             mark_handoff_consumed()
         except Exception as exc:
@@ -238,10 +255,7 @@ def _start_handoff_watcher_impl() -> None:
     def _loop() -> None:
         global _timer
         try:
-            try:
-                nuke.executeInMainThread(_poll_handoff)
-            except Exception:
-                nuke.executeDeferred(_poll_handoff)
+            execute_deferred(_poll_handoff)
         except Exception as e:
             nuke.tprint("[BPE] handoff poll 실패: %s" % e)
         if _timer == "thread":
@@ -262,7 +276,7 @@ def start_handoff_watcher() -> None:
         return
     _start_scheduled = True
     try:
-        nuke.executeDeferred(_start_handoff_watcher_impl)
+        execute_deferred(_start_handoff_watcher_impl)
     except Exception as exc:
         _start_scheduled = False
         nuke.tprint("[BPE] handoff 감시 deferred 실패, 즉시 시작: %s" % exc)

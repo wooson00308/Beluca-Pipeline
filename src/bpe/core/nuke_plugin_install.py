@@ -19,6 +19,9 @@ logger = get_logger("nuke_plugin_install")
 STAMP_NAME = ".bpe_nuke_stamp"
 HOOK_MARKER = "# BPE_HOOK_START"
 HOOK_END = "# BPE_HOOK_END"
+# 구버전 인스톨러가 menu.py 에 남긴 레거시 블록 마커 (제거 대상)
+LEGACY_HOOK_MARKER = "# --- SETUP_PRO_BPE_MENU_HOOK_V1"
+LEGACY_HOOK_END = "# --- end SETUP_PRO_BPE_MENU_HOOK_V1 ---"
 
 _HOOK_BLOCK = """
 # BPE_HOOK_START
@@ -161,6 +164,94 @@ def _copy_slim(src: Path, dest: Path) -> None:
         )
 
 
+def strip_menu_hooks(text: str) -> str:
+    """menu.py 텍스트에서 BPE 훅 블록(현재 + 레거시)만 제거한다.
+
+    사용자 소유 줄(스튜디오 스크립트, W_hotbox 등)은 건드리지 않는다.
+    마커 줄부터 종료 마커 줄까지(포함)를 잘라낸다.
+    """
+    out: List[str] = []
+    skip_until: Optional[str] = None
+    for line in text.splitlines(keepends=True):
+        stripped = line.strip()
+        if skip_until is not None:
+            if stripped.startswith(skip_until):
+                skip_until = None
+            continue
+        if stripped.startswith(HOOK_MARKER):
+            skip_until = HOOK_END
+            continue
+        if stripped.startswith(LEGACY_HOOK_MARKER) and not stripped.startswith(LEGACY_HOOK_END):
+            skip_until = LEGACY_HOOK_END
+            continue
+        out.append(line)
+    return "".join(out)
+
+
+def remove_nuke_plugin(nuke_dir: Optional[Path] = None) -> Dict[str, Any]:
+    """Nuke 를 BPE 설치 이전 상태로 정상화한다.
+
+    ``~/.nuke/bpe`` 삭제 + ``menu.py`` 의 BPE 훅 블록 제거(원본은 ``.bpe_bak``
+    백업). 자동 재설치 차단은 호출부가 :func:`set_nuke_plugin_auto_sync` 로
+    별도 처리한다 (core ↔ settings 순환 의존 방지).
+
+    Returns:
+        removed_dir / menu_cleaned / menu_backup / error 키를 담은 dict.
+    """
+    result: Dict[str, Any] = {
+        "removed_dir": False,
+        "menu_cleaned": False,
+        "menu_backup": "",
+        "error": None,
+    }
+    nd = nuke_dir or nuke_home()
+    dest = nuke_bpe_dir(nd)
+    try:
+        if dest.exists():
+            shutil.rmtree(dest)
+            result["removed_dir"] = True
+    except Exception as exc:
+        result["error"] = f"~/.nuke/bpe 삭제 실패: {exc}"
+        logger.warning(result["error"])
+
+    menu_py = nd / "menu.py"
+    if menu_py.is_file():
+        try:
+            text = menu_py.read_text(encoding="utf-8")
+            cleaned = strip_menu_hooks(text)
+            if cleaned != text:
+                backup = menu_py.with_name("menu.py.bpe_bak")
+                n = 1
+                while backup.exists():
+                    n += 1
+                    backup = menu_py.with_name(f"menu.py.bpe_bak{n}")
+                backup.write_text(text, encoding="utf-8")
+                menu_py.write_text(cleaned, encoding="utf-8")
+                result["menu_cleaned"] = True
+                result["menu_backup"] = backup.name
+        except Exception as exc:
+            msg = f"menu.py 정리 실패: {exc}"
+            result["error"] = msg if result["error"] is None else f"{result['error']} / {msg}"
+            logger.warning(msg)
+
+    logger.info(
+        "Nuke 플러그인 정상화: dir=%s menu=%s error=%s",
+        result["removed_dir"],
+        result["menu_cleaned"],
+        result["error"],
+    )
+    return result
+
+
+_last_result: Optional[Dict[str, Any]] = None
+"""가장 최근 ``ensure_nuke_plugin()`` 결과 — GUI가 성공/실패를 안내할 때 조회용."""
+
+
+def last_sync_result() -> Optional[Dict[str, Any]]:
+    """이번 세션에서 마지막으로 동기화를 시도한 결과. 아직 안 돌았으면 None."""
+    return _last_result
+
+
 def ensure_nuke_plugin(
     *,
     src: Optional[Path] = None,
@@ -172,6 +263,18 @@ def ensure_nuke_plugin(
     Returns:
         updated / stamp / error / skipped 키를 담은 dict.
     """
+    global _last_result
+    result = _ensure_nuke_plugin_impl(src=src, nuke_dir=nuke_dir, force=force)
+    _last_result = result
+    return result
+
+
+def _ensure_nuke_plugin_impl(
+    *,
+    src: Optional[Path] = None,
+    nuke_dir: Optional[Path] = None,
+    force: bool = False,
+) -> Dict[str, Any]:
     result: Dict[str, Any] = {
         "updated": False,
         "stamp": "",

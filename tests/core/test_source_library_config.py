@@ -23,6 +23,32 @@ def test_save_and_load_roundtrip(tmp_path: Path, monkeypatch, tmp_app_dir: Path)
     assert loaded["common"]["groups"][0]["folders"] == ["W:/lib/comp"]
 
 
+def test_probe_library_read_missing_file_is_none(tmp_path: Path):
+    """파일이 아예 없음(최초 사용) — 실패로 취급하지 않는다."""
+    assert libcfg.probe_library_read(tmp_path / "no_such" / "library.json") is None
+
+
+def test_probe_library_read_valid_json_is_none(tmp_path: Path):
+    p = tmp_path / "library.json"
+    p.write_text('{"version": 5}', encoding="utf-8")
+    assert libcfg.probe_library_read(p) is None
+
+
+def test_probe_library_read_empty_file_is_none(tmp_path: Path):
+    """빈 파일도 최초사용과 동일 취급 (atomic_io.read_json_file 과 정책 일치)."""
+    p = tmp_path / "library.json"
+    p.write_text("", encoding="utf-8")
+    assert libcfg.probe_library_read(p) is None
+
+
+def test_probe_library_read_corrupted_json_returns_reason(tmp_path: Path):
+    p = tmp_path / "library.json"
+    p.write_text("{not valid json", encoding="utf-8")
+    reason = libcfg.probe_library_read(p)
+    assert reason is not None
+    assert "손상" in reason or "파싱" in reason
+
+
 def test_roots_for_view_common_only():
     lib = libcfg.empty_library()
     libcfg.set_scope(lib, libcfg.COMMON_SCOPE, ["W:/common"], [])

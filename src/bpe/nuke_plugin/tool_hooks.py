@@ -12,12 +12,17 @@ import nukescripts
 import bpe.core.config as cfg
 from bpe.core.logging import get_logger
 from bpe.core.nuke_render_paths import (
+    classify_recoverable_write_path,
+    eval_managed_write_tcl,
+    ext_from_write_script_text,
+    extract_frame_pattern_from_write_script,
     normalize_path_str,
     normalize_unc_to_drive,
     renders_dir_from_nk_path_robust,
 )
 from bpe.core.presets import load_presets
 from bpe.core.settings import get_tools_settings, get_unc_mappings
+from bpe.nuke_plugin.nuke_defer import execute_deferred
 
 logger = get_logger("nuke_plugin.tool_hooks")
 
@@ -870,7 +875,7 @@ def bpe_qc_before_render():
             if not want_qc:
                 _qc_log_info("QC 건너뛰기 — 바로 렌더 write=%s", write_name)
                 _bpe_qc_approved.add(write_name)
-                nuke.executeDeferred(lambda: _execute_write_safe(write_name, first, last))
+                execute_deferred(lambda: _execute_write_safe(write_name, first, last))
                 return
 
             try:
@@ -881,13 +886,20 @@ def bpe_qc_before_render():
 
             if proceed:
                 _bpe_qc_approved.add(write_name)
-                nuke.executeDeferred(lambda: _execute_write_safe(write_name, first, last))
+                execute_deferred(lambda: _execute_write_safe(write_name, first, last))
             else:
                 _qc_log_info("사용자가 렌더 취소 — 수정 후 재렌더 write=%s", write_name)
 
-        nuke.executeDeferred(_inner)
+        execute_deferred(_inner)
 
-    nuke.executeDeferred(_outer)
+    try:
+        execute_deferred(_outer)
+    except Exception as e:
+        # 예약 자체가 실패하면 _inner 가 안 돌아 in_progress 가 영구히 남는다.
+        # 그대로 두면 다음 렌더부터 QC 가 조용히 스킵되므로 여기서 되돌린다.
+        _bpe_qc_in_progress.discard(write_name)
+        _qc_log_error("QC 다이얼로그 예약 실패 — QC 건너뛰고 렌더 진행 write=%s", write_name, exc=e)
+        return
     raise RuntimeError("[BPE QC] 체크 다이얼로그를 표시합니다. 확인 후 렌더가 재시작됩니다.")
 
 
@@ -1157,10 +1169,7 @@ def _bpe_defer_connect_viewer(read_name: str) -> None:
         if n:
             _bpe_connect_read_to_viewer(n)
 
-    try:
-        nuke.executeDeferred(_go)
-    except Exception:
-        _go()
+    execute_deferred(_go)
 
 
 def bpe_post_render_load():
@@ -1243,7 +1252,7 @@ def bpe_post_render_load():
             except Exception as e:
                 nuke.tprint(f"[BPE Post-Render Viewer] deferred 오류: {e}")
 
-        nuke.executeDeferred(_deferred)
+        execute_deferred(_deferred)
 
     except Exception as e:
         nuke.tprint(f"[BPE Post-Render Viewer] 오류: {e}")
@@ -1307,21 +1316,13 @@ def _bpe_is_bpe_managed_write_path(script_text: str) -> bool:
     return False
 
 
-def _bpe_extract_frame_pattern_from_script(script_text: str) -> str:
-    """Write ``file`` Tcl/값에서 프레임 패턴(``%04d``, ``####`` 등)을 추출. 기본 ``%04d``."""
-    t = script_text.replace("\\", "")
-    m = re.search(r"\.(%\d*d|#+)\.(\w+)", t)
-    if m:
-        fp = m.group(1)
-        if fp.startswith("#"):
-            n = len(fp)
-            return f"%{max(n, 4)}d" if n >= 4 else "%d"
-        return fp
-    return "%04d"
+# 버전업된 스크립트의 구버전 평문 경로까지 복구하려면 True.
+# 오탐 시나리오는 core.nuke_render_paths.classify_recoverable_write_path 참고.
+_BPE_RECOVER_VERSION_MISMATCH = False
 
 
 def _bpe_write_ext_from_node(node, script_text: str) -> str:
-    """Write ``file_type`` 또는 기존 경로에서 확장자 추출."""
+    """Write ``file_type`` 또는 기존 경로에서 확장자 추출 (버그 산물 ``name`` 무시)."""
     ft = node.knob("file_type")
     if ft is not None:
         try:
@@ -1330,14 +1331,7 @@ def _bpe_write_ext_from_node(node, script_text: str) -> str:
                 return v
         except Exception:
             pass
-    t = script_text.replace("\\", "")
-    m = re.search(r"\.(%\d*d|#+)\.(\w+)", t)
-    if m:
-        return m.group(2).lower()
-    m2 = re.search(r"\.(\w+)(?:\s|$|\"|\])", t)
-    if m2:
-        return m2.group(1).lower()
-    return "exr"
+    return ext_from_write_script_text(script_text) or "exr"
 
 
 def _bpe_absolute_write_path_for_root(
@@ -1346,7 +1340,15 @@ def _bpe_absolute_write_path_for_root(
     node,
     unc_mappings: Dict[str, str],
 ) -> Optional[str]:
-    """``comp/devl/renders`` + UNC→드라이브 정규화 + 시퀀스/단일 파일 규칙."""
+    """``comp/devl/renders`` + UNC→드라이브 정규화 + 시퀀스/단일 파일 규칙.
+
+    Tcl 템플릿이면 **원문을 정확히 평가**해 커스텀 접미사(``_lut`` 등)·하위 폴더를
+    보존한다. Write 가 여러 개여도 각자의 템플릿이 평가되어 이름이 유지된다.
+    미지의 Tcl 이면 표준 형태로 재구성(기존 동작).
+    """
+    exact = eval_managed_write_tcl(script_text, root_name, unc_mappings)
+    if exact:
+        return exact
     renders_dir = renders_dir_from_nk_path_robust(root_name)
     if not renders_dir:
         return None
@@ -1357,8 +1359,30 @@ def _bpe_absolute_write_path_for_root(
     ext = _bpe_write_ext_from_node(node, script_text)
     if ext in _SINGLE_FILE_EXTS:
         return f"{renders_dir}/{shot_ver}.{ext}"
-    fp = _bpe_extract_frame_pattern_from_script(script_text)
+    fp = extract_frame_pattern_from_write_script(script_text)
     return f"{renders_dir}/{shot_ver}/{shot_ver}.{fp}.{ext}"
+
+
+def _bpe_plain_write_recovery_reason(
+    script_text: str,
+    root_name: str,
+    unc_mappings: Dict[str, str],
+) -> Optional[str]:
+    """2단계 — 평문 절대경로로 깨져 저장된 과거 버그 산물 Write 인지 판정.
+
+    Tcl/표현식이 남아 있으면(``[``/``$``) 아티스트 커스텀으로 보고 건드리지 않는다.
+    판정 로직은 core(:func:`classify_recoverable_write_path`) — pytest 대상.
+    """
+    t = script_text.strip()
+    if t.startswith("{") and t.endswith("}"):
+        t = t[1:-1].strip()
+    t = t.strip('"').strip()
+    return classify_recoverable_write_path(
+        t,
+        root_name,
+        unc_mappings,
+        allow_version_mismatch=_BPE_RECOVER_VERSION_MISMATCH,
+    )
 
 
 def _bpe_apply_write_string_trim_fix() -> int:
@@ -1390,8 +1414,12 @@ def _bpe_apply_write_string_trim_fix() -> int:
             script_text = file_knob.toScript()
         except Exception:
             continue
+        recovery_reason: Optional[str] = None
         if not _bpe_is_bpe_managed_write_path(script_text):
-            continue
+            # 2단계 — 평문으로 깨져 저장된 과거 버그 산물만 복구 대상에 편입.
+            recovery_reason = _bpe_plain_write_recovery_reason(script_text, root_name, unc_mappings)
+            if recovery_reason is None:
+                continue
         abs_path = _bpe_absolute_write_path_for_root(root_name, script_text, node, unc_mappings)
         if not abs_path:
             continue
@@ -1410,7 +1438,15 @@ def _bpe_apply_write_string_trim_fix() -> int:
         except Exception:
             continue
         patched += 1
-        nuke.tprint(f"[BPE] Write 경로 보정: {node.name()}")
+        # 이전 값은 raw(script_text)로 남긴다 — Tcl 원문이라 fromScript 로 복원 가능.
+        if recovery_reason is not None:
+            nuke.tprint(
+                f"[BPE] Write 경로 복구: {node.name()} - {recovery_reason}\n"
+                f"      이전 값: {script_text}\n"
+                f"      새 값:   {abs_path}"
+            )
+        else:
+            nuke.tprint(f"[BPE] Write 경로 보정: {node.name()} (이전 값: {script_text})")
     return patched
 
 
@@ -1427,7 +1463,7 @@ def bpe_fix_write_paths_on_save() -> None:
 def bpe_fix_write_paths_on_load() -> None:
     """onScriptLoad — 스크립트 열 직후 BPE 관리 Write 절대 경로 보정 (직접 연 NK 대응)."""
     try:
-        nuke.executeDeferred(_bpe_fix_write_paths_on_load_deferred)
+        execute_deferred(_bpe_fix_write_paths_on_load_deferred)
     except Exception as e:
         nuke.tprint(f"[BPE] Write 경로 보정(onLoad) 실패: {e}")
 
@@ -1436,11 +1472,18 @@ def _bpe_fix_write_paths_on_load_deferred() -> None:
     try:
         if not nuke.root()["name"].value():
             return
-        _bpe_apply_write_string_trim_fix()
-        try:
-            nuke.root().setModified(False)
-        except Exception:
-            pass
+        patched = _bpe_apply_write_string_trim_fix()
+        # 아무것도 안 고쳤을 때만 dirty 를 지운다. 고쳤는데 지우면 사용자가
+        # 저장 유도 없이 닫아 파일이 깨진 채 남는다 (다음에 열면 또 깨져 보임).
+        if patched <= 0:
+            try:
+                nuke.root().setModified(False)
+            except Exception:
+                pass
+        else:
+            nuke.tprint(
+                "[BPE] Write 경로 %d개 보정됨 - 저장(Ctrl+S)해야 파일에 반영됩니다." % patched
+            )
     except Exception as e:
         nuke.tprint(f"[BPE] Write 경로 보정(load deferred) 실패: {e}")
 

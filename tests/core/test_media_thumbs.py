@@ -83,6 +83,34 @@ def test_exr_retries_without_decoder_args_then_marks_failed(tmp_app_dir: Path):
             assert run2.call_count == 0
 
 
+def test_clear_failed_marker_allows_retry(tmp_app_dir: Path):
+    key = mt.make_key("W:/lib/a.exr", 1, 1.0)
+    with patch.object(mt, "resolve_ffmpeg", return_value="ffmpeg"):
+        with patch("subprocess.run", side_effect=_fake_fail):
+            assert mt.ensure_still_thumbnail("W:/lib/a.exr", key) is None
+    assert mt.is_failed(key) is True
+
+    mt.clear_failed_marker(key)
+    assert mt.is_failed(key) is False
+
+    with patch.object(mt, "resolve_ffmpeg", return_value="ffmpeg"):
+        with patch("subprocess.run", side_effect=_fake_ok()) as run:
+            out = mt.ensure_still_thumbnail("W:/lib/a.exr", key)
+            assert out is not None and out.is_file()
+            assert run.call_count == 1
+
+
+def test_clear_failed_marker_missing_key_is_noop(tmp_app_dir: Path):
+    mt.clear_failed_marker(mt.make_key("W:/lib/missing.exr", 1, 1.0))  # 예외 없이 통과
+
+
+def test_ffmpeg_available_reflects_resolve_ffmpeg(tmp_app_dir: Path):
+    with patch.object(mt, "resolve_ffmpeg", return_value="ffmpeg"):
+        assert mt.ffmpeg_available() is True
+    with patch.object(mt, "resolve_ffmpeg", return_value=""):
+        assert mt.ffmpeg_available() is False
+
+
 def test_non_exr_still_does_not_retry(tmp_app_dir: Path):
     key = mt.make_key("W:/lib/a.dpx", 1, 1.0)
     with patch.object(mt, "resolve_ffmpeg", return_value="ffmpeg"):

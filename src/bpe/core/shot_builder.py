@@ -57,10 +57,27 @@ def canonical_task_slug(task_content: str) -> str:
     return slug
 
 
+_PLATE_DIRECT_FILE_EXTS = frozenset({".exr", ".dpx", ".tif", ".tiff", ".mov", ".mp4", ".m4v"})
+
+
+def _version_dir_has_direct_plate_files(vdir: Path) -> bool:
+    """버전 폴더 직계 파일 중 플레이트로 보이는 확장자가 있으면 True. 서브폴더는 무시."""
+    try:
+        for entry in vdir.iterdir():
+            if entry.is_file() and entry.suffix.lower() in _PLATE_DIRECT_FILE_EXTS:
+                return True
+    except OSError:
+        pass
+    return False
+
+
 def _resolve_plate_hi(shot_root: Path) -> Path:
     """
     ``plate/org/v###`` 중 최신 버전 아래 ``hi`` 또는 ``h`` 폴더를 반환.
-    EXR 시퀀스와 MOV 클립 모두 hi/h 폴더에 위치한다.
+    둘 다 없으면, 그 버전 폴더 자체에 플레이트 파일(mov/exr 등)이 직접
+    있는지 확인해 있으면 그 버전 폴더를 반환한다(서랍 없이 바로 렌더하는
+    프로젝트 대응).
+    EXR 시퀀스와 MOV 클립은 hi/h 폴더 또는 버전 폴더 자체에 위치한다.
     버전 폴더가 없으면 ``v001/hi``(신규 샷 기본값).
     """
     plate_org = shot_root / "plate" / "org"
@@ -80,6 +97,8 @@ def _resolve_plate_hi(shot_root: Path) -> Path:
                     candidate = vdir / sub
                     if candidate.is_dir():
                         return candidate
+                if _version_dir_has_direct_plate_files(vdir):
+                    return vdir
         except OSError:
             pass
     return shot_root / "plate" / "org" / "v001" / "hi"

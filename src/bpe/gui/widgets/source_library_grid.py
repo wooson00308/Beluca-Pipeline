@@ -61,6 +61,8 @@ logger = get_logger("gui.widgets.source_library_grid")
 
 ROW_ROLE = int(Qt.ItemDataRole.UserRole)
 THUMB_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+THUMB_FAILED_ROLE = int(Qt.ItemDataRole.UserRole) + 2
+"""썸네일이 로딩 중이 아니라 영구 실패 상태인지 (True 면 클릭해서 재시도 가능)."""
 
 _PAGE_SIZE = 300
 _MAX_INFLIGHT = 16
@@ -268,6 +270,9 @@ class SourceLibraryModel(QAbstractListModel):
             return normalize_path_str(row_pattern_path(row))
         if role == THUMB_ROLE:
             return self._pixmap_for(row)
+        if role == THUMB_FAILED_ROLE:
+            key = str(row.get("thumb_key") or thumb_key(row))
+            return key in self._failed
         return None
 
     def flags(self, index: QModelIndex) -> Qt.ItemFlag:
@@ -345,6 +350,16 @@ class SourceLibraryModel(QAbstractListModel):
         self._store_pixmap(key, pm)
         self._emit_changed_for_key(key)
 
+    def retry_thumb(self, row: Dict[str, Any]) -> None:
+        """실패 표시된 썸네일을 사용자가 클릭해서 다시 시도한다."""
+        key = str(row.get("thumb_key") or thumb_key(row))
+        if key not in self._failed:
+            return
+        self._failed.discard(key)
+        media_thumbs.clear_failed_marker(key)
+        self._emit_changed_for_key(key)
+        self._request_thumb(row, key)
+
     def _emit_changed_for_key(self, key: str) -> None:
         """같은 캐시 키를 쓰는 셀만 다시 그리게 한다."""
         for i in self._rows_by_thumb_key.get(key, []):
@@ -402,9 +417,11 @@ class _ItemDelegate(QStyledItemDelegate):
             painter.drawPixmap(x, y, pm)
         else:
             painter.fillRect(img_rect, QColor("#101012"))
-            painter.setPen(QPen(QColor(theme.TEXT_DIM)))
+            failed = bool(index.data(THUMB_FAILED_ROLE))
+            painter.setPen(QPen(QColor(theme.ERROR if failed else theme.TEXT_DIM)))
             painter.setFont(self._sub_font)
-            painter.drawText(img_rect, int(Qt.AlignmentFlag.AlignCenter), "…")
+            placeholder = "✕ 클릭해서 재시도" if failed else "…"
+            painter.drawText(img_rect, int(Qt.AlignmentFlag.AlignCenter), placeholder)
 
         text_rect = QRect(
             rect.x() + 4,
@@ -510,6 +527,16 @@ class SourceLibraryGrid(QListView):
         row = index.data(ROW_ROLE)
         if row:
             self.item_activated.emit(row)
+
+    def mousePressEvent(self, event: Any) -> None:  # noqa: N802
+        super().mousePressEvent(event)
+        index = self.indexAt(event.position().toPoint())
+        if not index.isValid() or not bool(index.data(THUMB_FAILED_ROLE)):
+            return
+        model = self.model()
+        row = index.data(ROW_ROLE)
+        if isinstance(model, SourceLibraryModel) and isinstance(row, dict):
+            model.retry_thumb(row)
 
     def _prefetch_visible(self) -> None:
         """스크롤이 멈춘 뒤 화면에 보이는 셀의 썸네일을 요청한다."""

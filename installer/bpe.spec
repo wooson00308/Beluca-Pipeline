@@ -131,7 +131,6 @@ hiddenimports = [
     "bpe.core.source_library_config",
     "bpe.core.source_library_publish",
     "bpe.core.library_handoff",
-    "bpe.core.nuke_setup_library",
     "bpe.core.media_thumbs",
     "bpe.gui.workers.library_scan_worker",
     "bpe.gui.widgets.sequence_scrub_widget",

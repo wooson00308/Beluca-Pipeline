@@ -124,6 +124,23 @@ def save_tools_settings(tools_data: Dict[str, Any], settings_file: Optional[Path
     save_settings(settings, settings_file)
 
 
+def get_nuke_plugin_auto_sync(settings_file: Optional[Path] = None) -> bool:
+    """BPE 기동 시 ``~/.nuke/bpe`` 자동 동기화 여부 (기본 True).
+
+    Nuke 정상화(플러그인 제거) 후 재설치를 막기 위해 False 로 저장된다.
+    새 top-level 키라 기존 settings.json 포맷과 호환된다.
+    """
+    settings = load_settings(settings_file)
+    return bool(settings.get("nuke_plugin_auto_sync", True))
+
+
+def set_nuke_plugin_auto_sync(enabled: bool, settings_file: Optional[Path] = None) -> None:
+    """자동 동기화 스위치 저장. ``nuke_plugin_auto_sync`` 키만 갱신한다."""
+    settings = load_settings(settings_file)
+    settings["nuke_plugin_auto_sync"] = bool(enabled)
+    save_settings(settings, settings_file)
+
+
 def get_shot_builder_settings() -> Dict[str, Any]:
     return read_json_file(cfg.SHOT_BUILDER_FILE, default={})
 

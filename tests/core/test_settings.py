@@ -74,3 +74,15 @@ def test_set_get_unc_mappings(tmp_app_dir: Path) -> None:
     save_settings({**load_settings(), "other": 1})
     assert load_settings()["other"] == 1
     assert get_unc_mappings()["//zeus.lennon.co.kr/beluca"] == "W:"
+
+
+def test_nuke_plugin_auto_sync_flag(tmp_app_dir: Path) -> None:
+    # 기본값 True — 키가 없어도 자동 동기화가 켜져 있다
+    assert settings_mod.get_nuke_plugin_auto_sync() is True
+    settings_mod.set_nuke_plugin_auto_sync(False)
+    assert settings_mod.get_nuke_plugin_auto_sync() is False
+    # 다른 설정 저장에도 플래그가 유지된다
+    save_settings({**load_settings(), "other": 1})
+    assert settings_mod.get_nuke_plugin_auto_sync() is False
+    settings_mod.set_nuke_plugin_auto_sync(True)
+    assert settings_mod.get_nuke_plugin_auto_sync() is True

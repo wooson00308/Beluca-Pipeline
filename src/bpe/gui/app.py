@@ -77,19 +77,29 @@ def run_app(argv: List[str] | None = None) -> int:
     app.processEvents()
     logger.info("스플래시 표시 완료")
 
-    def _sync_nuke_plugin() -> None:
+    def _normalize_nuke_plugin() -> None:
+        """기동 시 Nuke 를 순정 상태로 되돌린다 (BPE 설치물만 제거).
+
+        Nuke 쪽 훅(onSave/onLoad Write 경로 재계산)이 렌더 절대경로를 깨뜨려 온
+        이력이 있어, BPE 는 더 이상 Nuke 에 아무것도 설치하지 않는다. 이미 설치된
+        PC 도 BPE 를 한 번 실행하면 자동으로 정리된다. 멱등 — 없으면 no-op.
+        """
         try:
-            from bpe.core.nuke_plugin_install import ensure_nuke_plugin
+            from bpe.core.nuke_plugin_install import remove_nuke_plugin
 
-            result = ensure_nuke_plugin()
-            if result.get("updated"):
-                logger.info("Nuke 플러그인 갱신됨 — Nuke 재시작 후 반영")
-            elif result.get("error"):
-                logger.warning("Nuke 플러그인 동기화 건너뜀: %s", result["error"])
+            result = remove_nuke_plugin()
+            if result.get("removed_dir") or result.get("menu_cleaned"):
+                logger.info(
+                    "Nuke 플러그인 정상화 완료 (dir=%s, menu=%s) — Nuke 재시작 후 반영",
+                    result.get("removed_dir"),
+                    result.get("menu_cleaned"),
+                )
+            if result.get("error"):
+                logger.warning("Nuke 플러그인 정상화 일부 실패: %s", result["error"])
         except Exception:
-            logger.warning("Nuke 플러그인 동기화 실패", exc_info=True)
+            logger.warning("Nuke 플러그인 정상화 실패", exc_info=True)
 
-    QTimer.singleShot(0, _sync_nuke_plugin)
+    QTimer.singleShot(0, _normalize_nuke_plugin)
 
     # 스플래시 애니메이션 중 메인 윈도우 생성 (백그라운드)
     window = None

@@ -228,6 +228,56 @@ class TestBuildShotPaths:
         (shot_root / "plate" / "org" / "v010" / "hi").mkdir(parents=True)
         assert _resolve_plate_hi(shot_root) == shot_root / "plate" / "org" / "v010" / "hi"
 
+    def test_plate_hi_direct_mov_file_in_latest_version(self, tmp_path: Path) -> None:
+        shot_root = tmp_path / "shot"
+        v001 = shot_root / "plate" / "org" / "v001"
+        v001.mkdir(parents=True)
+        (v001 / "ep04_s26_c0180_org_v001.mov").write_bytes(b"")
+        assert _resolve_plate_hi(shot_root) == v001
+
+    def test_plate_hi_direct_exr_sequence_in_latest_version(self, tmp_path: Path) -> None:
+        shot_root = tmp_path / "shot"
+        v001 = shot_root / "plate" / "org" / "v001"
+        v001.mkdir(parents=True)
+        (v001 / "shot_v001.1001.exr").write_bytes(b"")
+        (v001 / "shot_v001.1002.exr").write_bytes(b"")
+        assert _resolve_plate_hi(shot_root) == v001
+
+    def test_plate_hi_newer_direct_file_beats_older_hi_folder(self, tmp_path: Path) -> None:
+        shot_root = tmp_path / "shot"
+        (shot_root / "plate" / "org" / "v001" / "hi").mkdir(parents=True)
+        v002 = shot_root / "plate" / "org" / "v002"
+        v002.mkdir(parents=True)
+        (v002 / "plate_v002.mov").write_bytes(b"")
+        assert _resolve_plate_hi(shot_root) == v002
+
+    def test_plate_hi_prefers_hi_over_direct_files_same_version(self, tmp_path: Path) -> None:
+        shot_root = tmp_path / "shot"
+        v001 = shot_root / "plate" / "org" / "v001"
+        (v001 / "hi").mkdir(parents=True)
+        (v001 / "leftover.mov").write_bytes(b"")
+        assert _resolve_plate_hi(shot_root) == v001 / "hi"
+
+    def test_plate_hi_empty_subfolder_at_newer_version_falls_through(self, tmp_path: Path) -> None:
+        shot_root = tmp_path / "shot"
+        (shot_root / "plate" / "org" / "v002" / "other").mkdir(parents=True)
+        (shot_root / "plate" / "org" / "v001" / "hi").mkdir(parents=True)
+        assert _resolve_plate_hi(shot_root) == shot_root / "plate" / "org" / "v001" / "hi"
+
+    def test_plate_hi_direct_files_returns_version_dir_name(self, tmp_path: Path) -> None:
+        shot_root = tmp_path / "shot"
+        v001 = shot_root / "plate" / "org" / "v001"
+        v001.mkdir(parents=True)
+        (v001 / "ep04_s26_c0180_org_v001.mov").write_bytes(b"")
+        assert _resolve_plate_hi(shot_root).name == "v001"
+
+    def test_plate_hi_direct_file_wrong_extension_ignored(self, tmp_path: Path) -> None:
+        shot_root = tmp_path / "shot"
+        v001 = shot_root / "plate" / "org" / "v001"
+        v001.mkdir(parents=True)
+        (v001 / "notes.txt").write_bytes(b"")
+        assert _resolve_plate_hi(shot_root) == shot_root / "plate" / "org" / "v001" / "hi"
+
 
 # ── comp_devl_structure_exists / ensure_comp_folder_structure ──
 

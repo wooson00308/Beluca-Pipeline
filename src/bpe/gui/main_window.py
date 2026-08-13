@@ -34,7 +34,6 @@ logger = get_logger("main_window")
 TAB_DEFS: List[Dict[str, str]] = [
     {"key": "my_tasks", "label": "My Tasks"},
     {"key": "presets", "label": "Manager"},
-    {"key": "tools", "label": "Tools"},
 ]
 
 
@@ -405,7 +404,6 @@ Remove-Item -LiteralPath $Ps1Path -Force -ErrorAction SilentlyContinue
     def _build_tabs(self) -> None:
         from bpe.gui.tabs.manager_tab import ManagerTab
         from bpe.gui.tabs.my_tasks_tab import MyTasksTab
-        from bpe.gui.tabs.tools_tab import ToolsTab
         from bpe.gui.widgets.lock_overlay import LockOverlay
 
         manager_tab = ManagerTab()
@@ -420,7 +418,6 @@ Remove-Item -LiteralPath $Ps1Path -Force -ErrorAction SilentlyContinue
         self._my_tasks_tab = MyTasksTab()
         self._tab_pages["my_tasks"] = self._my_tasks_tab
         self._tab_pages["presets"] = preset_stack
-        self._tab_pages["tools"] = ToolsTab()
 
         for tab_def in TAB_DEFS:
             key = tab_def["key"]

@@ -32,6 +32,9 @@ from bpe.core.source_library_scan import (
 logger = get_logger("gui.workers.library_scan_worker")
 
 _COMMIT_EVERY_DIRS = 25
+_PROGRESS_EVERY_DIRS = 25
+"""이미 최신이라 재인덱싱이 없는 폴더도 이 개수마다 진행 신호를 낸다 —
+재스캔처럼 변경분이 적을 때 진행 표시가 오래 멈춘 것처럼 보이지 않게."""
 _YIELD_MS = 4
 
 
@@ -115,6 +118,7 @@ class LibraryScanWorker(QThread):
         alive_dirs: List[str] = []
         indexed_items = 0
         since_commit = 0
+        since_progress = 0
 
         while pending_dirs:
             if self._stop:
@@ -124,6 +128,7 @@ class LibraryScanWorker(QThread):
                 continue
             dir_rel = relative_dir(root_n, current)
             alive_dirs.append(dir_rel)
+            since_progress += 1
 
             subdirs, files = read_dir(current)
             consumed_subs: Set[str] = set()
@@ -159,8 +164,12 @@ class LibraryScanWorker(QThread):
                 if since_commit >= _COMMIT_EVERY_DIRS:
                     conn.commit()
                     since_commit = 0
-                    self.progress.emit(dir_rel or root_n, indexed_items)
-                    self.msleep(_YIELD_MS)
+
+            if since_progress >= _PROGRESS_EVERY_DIRS:
+                since_progress = 0
+                # 재인덱싱이 없어도(이미 최신) 훑고 있다는 신호는 계속 보낸다.
+                self.progress.emit(dir_rel or root_n, indexed_items)
+                self.msleep(_YIELD_MS)
 
         conn.commit()
         if not self._stop:

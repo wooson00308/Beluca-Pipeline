@@ -1,5 +1,5 @@
 # @cursor-change: 2026-08-10, 0.13.x, DnD 커서·빼기 가드·빈클릭 해제
-"""소스 라이브러리 관리자 설정 — 폴더 등록·자유 폴더 트리·Nuke 세팅·스캔·게시.
+"""소스 라이브러리 관리자 설정 — 폴더 등록·자유 폴더 트리·스캔·게시.
 
 왼쪽: 등록 루트를 펼쳐 소분류(소스)를 보고 드래그.
 오른쪽: CS/MMK/커스텀 폴더에 서버 구조를 보존해 정리.
@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from PySide6.QtCore import QByteArray, QMimeData, Qt
 from PySide6.QtGui import QAction, QDrag, QDragEnterEvent, QDropEvent, QMouseEvent
@@ -20,8 +20,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
-    QListWidget,
-    QListWidgetItem,
     QMenu,
     QMessageBox,
     QPushButton,
@@ -31,7 +29,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from bpe.core import nuke_setup_library as nsl
 from bpe.core import source_library_config as libcfg
 from bpe.core import source_library_db as db
 from bpe.core.logging import get_logger
@@ -58,7 +55,6 @@ _MIME_VIRTUAL = "application/x-bpe-library-virtual"
 _MIME_VASSIGN = "application/x-bpe-library-vassign"
 _MIME_GROUP = "application/x-bpe-library-group"
 _MIME_NESTED = "application/x-bpe-library-nested"
-_MIME_SETUP = "application/x-bpe-nuke-setup"
 
 
 class _GroupTree(QTreeWidget):
@@ -162,6 +158,7 @@ class _GroupTree(QTreeWidget):
             )
             mime.setText(nname)
         else:
+            self._owner.set_status("같은 종류끼리만 함께 드래그할 수 있습니다.")
             return
         drag = QDrag(self)
         drag.setMimeData(mime)
@@ -306,17 +303,28 @@ class SourceLibrarySettingsDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Source Library 설정")
-        self.setMinimumSize(1400, 1000)
-        self._clamp_resize(1680, 1280)
+        self.setMinimumSize(1400, 720)
+        self._clamp_resize(1680, 900)
         _ = projects
         _ = initial_project_id
 
         self._library = libcfg.load_library()
+        load_warning = libcfg.probe_library_read()
         self._shutdown_done = False
+        try:
+            self._loaded_at_mtime: Optional[float] = libcfg.config_path().stat().st_mtime
+        except OSError:
+            self._loaded_at_mtime = None
+        self._external_change_detected = False
 
         self._build_ui()
         self._reload_roots_list()
         self._reload_group_tree()
+        if load_warning:
+            logger.warning("library.json 읽기 실패: %s", load_warning)
+            self._status.setText(
+                "설정 파일을 못 읽어 이전 상태로 표시 중일 수 있습니다 ({})".format(load_warning)
+            )
 
     def _clamp_resize(self, w: int, h: int) -> None:
         from PySide6.QtGui import QGuiApplication
@@ -395,72 +403,14 @@ class SourceLibrarySettingsDialog(QDialog):
         body.addLayout(right, 2)
         root.addLayout(body, 2)
 
-        # Nuke 세팅 — 왼쪽 등록 목록 / 오른쪽 그룹 (브라우즈 창에 탭으로 나누지 않음)
-        nuke_title = self._section_title(
-            "Nuke 세팅 (Nuke에서 저장하면 왼쪽에 등록 · 오른쪽 폴더로 드래그)"
-        )
-        root.addWidget(nuke_title)
-        nuke_body = QHBoxLayout()
-        nuke_body.setSpacing(12)
-        nuke_left = QVBoxLayout()
-        nuke_left.addWidget(self._section_title("등록된 세팅"))
-        self._nuke_list = QListWidget()
-        self._nuke_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self._nuke_list.setStyleSheet(
-            "QListWidget {{ background-color: {bg}; border: 1px solid {bd};"
-            " border-radius: 4px; color: {tx}; }}"
-            "QListWidget::item {{ padding: 8px 10px; }}"
-            "QListWidget::item:selected {{ background-color: {acc}; color: #ffffff; }}".format(
-                bg=theme.PANEL_BG, bd=theme.BORDER, tx=theme.TEXT, acc=theme.ACCENT
-            )
-        )
-        self._nuke_list.setDragEnabled(True)
-        self._nuke_list.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
-        nuke_left.addWidget(self._nuke_list, 1)
-        nuke_lbtns = QHBoxLayout()
-        nuke_refresh = QPushButton("목록 새로고침")
-        nuke_refresh.setFixedWidth(110)
-        nuke_refresh.clicked.connect(self._reload_nuke_section)
-        nuke_lbtns.addWidget(nuke_refresh)
-        nuke_lbtns.addStretch()
-        nuke_left.addLayout(nuke_lbtns)
-        nuke_body.addLayout(nuke_left, 1)
-
-        nuke_right = QVBoxLayout()
-        nuke_right.addWidget(self._section_title("세팅 폴더"))
-        self._nuke_group_tree = QTreeWidget()
-        self._nuke_group_tree.setHeaderHidden(True)
-        self._nuke_group_tree.setAcceptDrops(True)
-        self._nuke_group_tree.setDragEnabled(True)
-        self._nuke_group_tree.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
-        self._nuke_group_tree.setDefaultDropAction(Qt.DropAction.MoveAction)
-        self._nuke_group_tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self._nuke_group_tree.setStyleSheet(self._tree_style())
-        self._nuke_group_tree.viewport().setAcceptDrops(True)
-        nuke_right.addWidget(self._nuke_group_tree, 1)
-        nuke_gbtns = QHBoxLayout()
-        for text, slot, w in (
-            ("새 폴더", self._on_nuke_new_group, 88),
-            ("이름 변경", self._on_nuke_rename_group, 92),
-            ("폴더 삭제", self._on_nuke_delete_group, 92),
-        ):
-            b = QPushButton(text)
-            b.setFixedWidth(w)
-            b.clicked.connect(slot)
-            nuke_gbtns.addWidget(b)
-        nuke_gbtns.addStretch()
-        nuke_right.addLayout(nuke_gbtns)
-        nuke_body.addLayout(nuke_right, 1)
-        root.addLayout(nuke_body, 1)
-
         self._status = QLabel("")
         self._status.setObjectName("status_msg")
         root.addWidget(self._status)
 
         bottom = QHBoxLayout()
-        scan_btn = QPushButton("전체 다시 스캔·게시")
+        scan_btn = QPushButton("전체 스캔")
         scan_btn.setProperty("primary", True)
-        scan_btn.setFixedWidth(150)
+        scan_btn.setFixedWidth(100)
         scan_btn.setToolTip(
             "등록된 모든 폴더를 강제로 다시 훑어 공유 인덱스를 갱신합니다. "
             "일상 등록은 자동 스캔·게시되므로 폴더 내용이 바뀌었을 때만 쓰면 됩니다. "
@@ -477,12 +427,6 @@ class SourceLibrarySettingsDialog(QDialog):
 
         self._roots_tree.startDrag = self._start_roots_drag  # type: ignore[method-assign]
         self._roots_tree.itemExpanded.connect(self._on_roots_tree_expanded)
-        self._nuke_list.startDrag = self._start_nuke_drag  # type: ignore[method-assign]
-        self._nuke_group_tree.startDrag = self._start_nuke_tree_drag  # type: ignore[method-assign]
-        self._nuke_group_tree.dragEnterEvent = self._nuke_group_drag_enter  # type: ignore[method-assign]
-        self._nuke_group_tree.dragMoveEvent = self._nuke_group_drag_move  # type: ignore[method-assign]
-        self._nuke_group_tree.dropEvent = self._nuke_group_drop  # type: ignore[method-assign]
-        self._reload_nuke_section()
 
     def _start_roots_drag(self, supported_actions: Qt.DropAction) -> None:  # noqa: N802
         """왼쪽에서는 소분류만 오른쪽으로 드래그 (루트 통째 배정 UI 제거)."""
@@ -585,15 +529,77 @@ class SourceLibrarySettingsDialog(QDialog):
             item = item.parent()
         return ""
 
+    def set_status(self, text: str) -> None:
+        """자식 위젯(_GroupTree 등)이 상태줄을 갱신할 때 쓰는 공개 진입점."""
+        self._status.setText(text)
+
+    def _check_external_change(self) -> None:
+        """이 창을 연 뒤 다른 사람(또는 다른 창)이 library.json 을 먼저 저장했는지 확인.
+
+        완전한 동시편집 잠금은 아니다(버전 체크·락 도입은 이번 범위 밖) — 저장은
+        그대로 진행하되, 겹쳤을 수 있다는 걸 알려주는 가벼운 완화책.
+        """
+        try:
+            current_mtime = libcfg.config_path().stat().st_mtime
+        except OSError:
+            return
+        if self._loaded_at_mtime is not None and current_mtime > self._loaded_at_mtime + 1e-6:
+            self._external_change_detected = True
+
     def _persist(self) -> bool:
+        self._check_external_change()
         try:
             libcfg.save_library(self._library)
-            self._status.setText("저장됨")
+            self._loaded_at_mtime = libcfg.config_path().stat().st_mtime
+            if self._external_change_detected:
+                self._external_change_detected = False
+                self._status.setText("저장됨 (다른 곳에서 그 사이 수정했을 수 있습니다)")
+            else:
+                self._status.setText("저장됨")
             return True
         except Exception as exc:
             logger.warning("library.json 저장 실패: %s", exc)
             self._status.setText("저장 실패: {}".format(exc))
             return False
+
+    def _persist_silent(self) -> bool:
+        """`_persist()`와 동일하지만 상태줄은 안 건드린다 — 호출부가 이미 더 구체적인
+        메시지(성공·실패)를 세팅해 둔 경우, 그걸 제네릭 "저장됨"으로 덮어쓰지 않기 위해."""
+        self._check_external_change()
+        try:
+            libcfg.save_library(self._library)
+            try:
+                self._loaded_at_mtime = libcfg.config_path().stat().st_mtime
+            except OSError:
+                pass
+            return True
+        except Exception as exc:
+            logger.warning("library.json 저장 실패: %s", exc)
+            return False
+
+    def _persist_and_status(
+        self, success_text: str, *, reload: Optional[Callable[[], None]] = None
+    ) -> bool:
+        """저장 → (있으면) 리로드 → 저장이 실제로 성공했을 때만 성공 메시지 표시.
+
+        기존 UX(저장 실패해도 화면은 항상 최신 메모리 상태로 리로드)는 그대로 유지한다
+        — `self._library`는 저장 여부와 무관하게 이미 메모리에서 갱신돼 있으므로.
+        """
+        ok = self._persist_silent()
+        externally_changed = self._external_change_detected
+        self._external_change_detected = False
+        if reload is not None:
+            reload()
+        if ok:
+            if externally_changed:
+                self._status.setText(
+                    "{} (다른 곳에서 그 사이 수정했을 수 있습니다)".format(success_text)
+                )
+            else:
+                self._status.setText(success_text)
+        else:
+            self._status.setText("저장 실패 — {} 반영 안 됨".format(success_text))
+        return ok
 
     def _index_count_for_roots(self, roots: List[str]) -> int:
         if not roots:
@@ -914,14 +920,15 @@ class SourceLibrarySettingsDialog(QDialog):
                     )
                     return
                 new_path = libcfg.join_org_path([folder_path, group_name])
-            self._persist()
             parent_of_new = libcfg.join_org_path(libcfg.parse_org_path(new_path)[:-1])
-            self._reload_group_tree(
-                select_kind=_KIND_VIRTUAL,
-                select_path=new_path,
-                select_parent=parent_of_new,
+            self._persist_and_status(
+                "「{}」 → 「{}」 안".format(group_name, folder_path),
+                reload=lambda: self._reload_group_tree(
+                    select_kind=_KIND_VIRTUAL,
+                    select_path=new_path,
+                    select_parent=parent_of_new,
+                ),
             )
-            self._status.setText("「{}」 → 「{}」 안".format(group_name, folder_path))
             return
         if kind in (_KIND_GROUP, _KIND_UNFILED) and parent:
             if parent == group_name:
@@ -933,13 +940,14 @@ class SourceLibrarySettingsDialog(QDialog):
                 )
                 return
             new_path = libcfg.join_org_path([parent, group_name])
-            self._persist()
-            self._reload_group_tree(
-                select_kind=_KIND_VIRTUAL,
-                select_path=new_path,
-                select_parent=parent,
+            self._persist_and_status(
+                "「{}」 → 「{}」 하위 폴더".format(group_name, parent),
+                reload=lambda: self._reload_group_tree(
+                    select_kind=_KIND_VIRTUAL,
+                    select_path=new_path,
+                    select_parent=parent,
+                ),
             )
-            self._status.setText("「{}」 → 「{}」 하위 폴더".format(group_name, parent))
             return
         self._status.setText("보관함 또는 폴더 위에 놓으세요.")
 
@@ -969,14 +977,15 @@ class SourceLibrarySettingsDialog(QDialog):
         if not libcfg.reorder_folder_sibling(self._library, from_path, tpath, after=after):
             self._status.setText("같은 안의 폴더끼리만 순서를 바꿀 수 있습니다.")
             return
-        self._persist()
         parent_of = libcfg.join_org_path(libcfg.parse_org_path(from_path)[:-1])
-        self._reload_group_tree(
-            select_kind=_KIND_VIRTUAL,
-            select_path=from_path,
-            select_parent=parent_of,
+        self._persist_and_status(
+            "폴더 순서 변경",
+            reload=lambda: self._reload_group_tree(
+                select_kind=_KIND_VIRTUAL,
+                select_path=from_path,
+                select_parent=parent_of,
+            ),
         )
-        self._status.setText("폴더 순서 변경")
 
     def reorder_virtual_groups_drop(
         self, from_paths: List[str], target: QTreeWidgetItem, *, after: bool
@@ -1006,14 +1015,15 @@ class SourceLibrarySettingsDialog(QDialog):
         if n <= 0:
             self._status.setText("같은 안의 폴더끼리만 순서를 바꿀 수 있습니다.")
             return
-        self._persist()
         parent_of = libcfg.join_org_path(libcfg.parse_org_path(tpath)[:-1])
-        self._reload_group_tree(
-            select_kind=_KIND_VIRTUAL,
-            select_path=paths[-1],
-            select_parent=parent_of,
+        self._persist_and_status(
+            "{}개 폴더 순서 변경".format(n),
+            reload=lambda: self._reload_group_tree(
+                select_kind=_KIND_VIRTUAL,
+                select_path=paths[-1],
+                select_parent=parent_of,
+            ),
         )
-        self._status.setText("{}개 폴더 순서 변경".format(n))
 
     def reorder_top_level_drop(
         self, group_name: str, target: QTreeWidgetItem, *, after: bool
@@ -1026,9 +1036,10 @@ class SourceLibrarySettingsDialog(QDialog):
         if not libcfg.reorder_top_level_group(self._library, group_name, tpath, after=after):
             self._status.setText("최상위 폴더 순서를 바꾸지 못했습니다 (CS는 고정).")
             return
-        self._persist()
-        self._reload_group_tree(select_kind=_KIND_GROUP, select_path=group_name)
-        self._status.setText("폴더 순서 변경: 「{}」".format(group_name))
+        self._persist_and_status(
+            "폴더 순서 변경: 「{}」".format(group_name),
+            reload=lambda: self._reload_group_tree(select_kind=_KIND_GROUP, select_path=group_name),
+        )
 
     def drop_virtual_group(self, from_path: str, target: Optional[QTreeWidgetItem]) -> None:
         from_path = (from_path or "").strip()
@@ -1051,26 +1062,28 @@ class SourceLibrarySettingsDialog(QDialog):
                 self._status.setText("폴더를 옮기지 못했습니다.")
                 return
             new_path = libcfg.join_org_path([to_parent, leaf])
-            self._persist()
-            self._reload_group_tree(
-                select_kind=_KIND_VIRTUAL,
-                select_path=new_path,
-                select_parent=to_parent,
+            self._persist_and_status(
+                "「{}」 → 「{}」".format(leaf, to_parent),
+                reload=lambda: self._reload_group_tree(
+                    select_kind=_KIND_VIRTUAL,
+                    select_path=new_path,
+                    select_parent=to_parent,
+                ),
             )
-            self._status.setText("「{}」 → 「{}」".format(leaf, to_parent))
             return
         if kind in (_KIND_GROUP, _KIND_UNFILED) and parent:
             if not libcfg.move_folder(self._library, from_path, parent):
                 self._status.setText("폴더를 옮기지 못했습니다.")
                 return
             new_path = libcfg.join_org_path([parent, leaf])
-            self._persist()
-            self._reload_group_tree(
-                select_kind=_KIND_VIRTUAL,
-                select_path=new_path,
-                select_parent=parent,
+            self._persist_and_status(
+                "「{}」 → 「{}」".format(leaf, parent),
+                reload=lambda: self._reload_group_tree(
+                    select_kind=_KIND_VIRTUAL,
+                    select_path=new_path,
+                    select_parent=parent,
+                ),
             )
-            self._status.setText("「{}」 → 「{}」".format(leaf, parent))
             return
         self._status.setText("폴더는 다른 폴더·보관함 위에 놓으세요.")
 
@@ -1110,13 +1123,14 @@ class SourceLibrarySettingsDialog(QDialog):
         if n <= 0:
             self._status.setText("폴더를 옮기지 못했습니다.")
             return
-        self._persist()
-        self._reload_group_tree(
-            select_kind=_KIND_VIRTUAL,
-            select_path=libcfg.join_org_path([to_parent, last_leaf]) if last_leaf else "",
-            select_parent=to_parent,
+        self._persist_and_status(
+            "{}개 폴더 → 「{}」".format(n, to_parent),
+            reload=lambda: self._reload_group_tree(
+                select_kind=_KIND_VIRTUAL,
+                select_path=libcfg.join_org_path([to_parent, last_leaf]) if last_leaf else "",
+                select_parent=to_parent,
+            ),
         )
-        self._status.setText("{}개 폴더 → 「{}」".format(n, to_parent))
 
     def drop_vassigns(
         self, pairs: List[Tuple[str, str]], target: Optional[QTreeWidgetItem]
@@ -1141,9 +1155,10 @@ class SourceLibrarySettingsDialog(QDialog):
             if n <= 0:
                 self._status.setText("미정리로 빼지 못했습니다.")
                 return
-            self._persist()
-            self._reload_group_tree()
-            self._status.setText("{}개 → 미정리 (원본은 그대로)".format(n))
+            self._persist_and_status(
+                "{}개 → 미정리 (원본은 그대로)".format(n),
+                reload=lambda: self._reload_group_tree(),
+            )
             return
         if kind in (_KIND_VIRTUAL, _KIND_VASSIGN, _KIND_GROUP) and folder_path:
             for from_folder, cat in pairs:
@@ -1158,12 +1173,11 @@ class SourceLibrarySettingsDialog(QDialog):
             if n <= 0:
                 self._status.setText("소스를 옮기지 못했습니다.")
                 return
-            self._persist()
-            self._reload_group_tree()
             short = last_cat.rsplit("/", 1)[-1] if last_cat else ""
-            self._status.setText(
+            self._persist_and_status(
                 "{}개 → 「{}」".format(n, folder_path)
-                + (" (예: {})".format(short) if short else "")
+                + (" (예: {})".format(short) if short else ""),
+                reload=lambda: self._reload_group_tree(),
             )
             return
         self._status.setText("폴더(Compositing Source·MMK·직접 만든 폴더) 위에 놓으세요.")
@@ -1196,9 +1210,10 @@ class SourceLibrarySettingsDialog(QDialog):
             self._status.setText("이미 들어 있거나 넣을 수 없습니다.")
             return
         leaf = libcfg.parse_org_path(folder_path)[-1]
-        self._persist()
-        self._reload_group_tree()
-        self._status.setText("{}개 → 폴더 「{}」 (서버 구조 유지, 원본 그대로)".format(n, leaf))
+        self._persist_and_status(
+            "{}개 → 폴더 「{}」 (서버 구조 유지, 원본 그대로)".format(n, leaf),
+            reload=lambda: self._reload_group_tree(),
+        )
 
     def add_root_path(self, path: str) -> None:
         root = libcfg.normalize_path(normalize_path_str(path))
@@ -1216,10 +1231,14 @@ class SourceLibrarySettingsDialog(QDialog):
             libcfg.assign_roots_to_group(self._library, [root], libcfg.COMMON_LABEL)
         else:
             libcfg.set_scope(self._library, libcfg.COMMON_SCOPE, roots, groups)
-        self._persist()
-        self._reload_roots_list()
-        self._reload_group_tree()
-        self._status.setText("등록: {} (원본은 그대로입니다)".format(root))
+
+        def _reload_roots_and_groups() -> None:
+            self._reload_roots_list()
+            self._reload_group_tree()
+
+        self._persist_and_status(
+            "등록: {} (원본은 그대로입니다)".format(root), reload=_reload_roots_and_groups
+        )
         self._queue_auto_scan([root])
 
     def _on_add_root(self) -> None:
@@ -1265,18 +1284,20 @@ class SourceLibrarySettingsDialog(QDialog):
                 children.append(c)
             groups.append({"name": g.get("name"), "folders": folders, "children": children})
         libcfg.set_scope(self._library, libcfg.COMMON_SCOPE, roots, groups)
-        self._persist()
-        try:
-            conn = db.connect()
+
+        def _drop_index_and_reload() -> None:
             try:
-                db.drop_root(conn, target)
-            finally:
-                conn.close()
-        except Exception as exc:
-            logger.debug("인덱스 루트 제거 실패(무시): %s", exc)
-        self._reload_roots_list()
-        self._reload_group_tree()
-        self._status.setText("등록 해제: {}".format(target))
+                conn = db.connect()
+                try:
+                    db.drop_root(conn, target)
+                finally:
+                    conn.close()
+            except Exception as exc:
+                logger.debug("인덱스 루트 제거 실패(무시): %s", exc)
+            self._reload_roots_list()
+            self._reload_group_tree()
+
+        self._persist_and_status("등록 해제: {}".format(target), reload=_drop_index_and_reload)
 
     def assign_roots_to_group(self, paths: List[str], group_name: str) -> None:
         assigned = libcfg.assign_roots_to_group(self._library, paths, group_name)
@@ -1357,11 +1378,11 @@ class SourceLibrarySettingsDialog(QDialog):
 
     def _remove_vassign(self, folder_org_path: str, category_abs: str) -> None:
         if libcfg.remove_source_from_folder(self._library, folder_org_path, category_abs):
-            self._persist()
-            self._reload_group_tree()
             short = libcfg.parse_org_path(folder_org_path)
             label = short[-1] if short else folder_org_path
-            self._status.setText("「{}」에서 뺌".format(label))
+            self._persist_and_status(
+                "「{}」에서 뺌".format(label), reload=lambda: self._reload_group_tree()
+            )
 
     def _toggle_hidden_folder(self, path: str, hide: bool) -> None:
         if not libcfg.set_folder_hidden(self._library, path, hide):
@@ -1419,7 +1440,7 @@ class SourceLibrarySettingsDialog(QDialog):
             self._status.setText("등록된 폴더가 없습니다.")
             return
         owner.enqueue_library_scan(roots, force=True, publish=True, missing_only=False)
-        self._status.setText("전체 다시 스캔·게시 요청됨 (창을 닫아도 계속됩니다)")
+        self._status.setText("전체 스캔 요청됨 (창을 닫아도 계속됩니다)")
 
     def _shutdown(self) -> None:
         """설정만 닫음 — 스캔 워커는 메인 라이브러리가 소유하므로 stop 하지 않음."""
@@ -1496,26 +1517,28 @@ class SourceLibrarySettingsDialog(QDialog):
         if not parent_path:
             if not libcfg.add_top_level_folder(self._library, name):
                 logger.warning("최상위 폴더 생성 실패: name=%s", name)
-                self._status.setText("폴더를 만들지 못했습니다 (같은 이름).")
+                self._status.setText("폴더를 만들지 못했습니다 (이미 같은 이름이 있습니다).")
                 return
-            self._persist()
-            self._reload_group_tree(select_kind=_KIND_GROUP, select_path=name)
-            self._status.setText("폴더 「{}」 — 왼쪽 소분류를 드래그해 넣으세요".format(name))
+            self._persist_and_status(
+                "폴더 「{}」 — 왼쪽 소분류를 드래그해 넣으세요".format(name),
+                reload=lambda: self._reload_group_tree(select_kind=_KIND_GROUP, select_path=name),
+            )
             return
 
         if not libcfg.add_folder_under(self._library, parent_path, name):
             logger.warning("폴더 생성 실패: parent=%s name=%s", parent_path, name)
-            self._status.setText("폴더를 만들지 못했습니다 (같은 이름·부모 없음).")
+            self._status.setText(
+                "폴더를 만들지 못했습니다 (이미 같은 이름이 있거나, 최대 깊이(8단계)를 넘었습니다)."
+            )
             return
         new_path = libcfg.join_org_path([parent_path, name])
-        self._persist()
-        self._reload_group_tree(
-            select_kind=_KIND_VIRTUAL,
-            select_path=new_path,
-            select_parent=parent_path,
-        )
-        self._status.setText(
-            "폴더 「{}」 → 「{}」 — 왼쪽 소분류를 드래그해 넣으세요".format(name, parent_path)
+        self._persist_and_status(
+            "폴더 「{}」 → 「{}」 — 왼쪽 소분류를 드래그해 넣으세요".format(name, parent_path),
+            reload=lambda: self._reload_group_tree(
+                select_kind=_KIND_VIRTUAL,
+                select_path=new_path,
+                select_parent=parent_path,
+            ),
         )
 
     def _on_rename_group(self) -> None:
@@ -1537,15 +1560,17 @@ class SourceLibrarySettingsDialog(QDialog):
             if not name or libcfg.is_builtin_group(name) or name == libcfg.OTHER_GROUP:
                 return
             if not libcfg.rename_folder_at(self._library, full_path, name):
-                self._status.setText("이름 변경 실패")
+                self._status.setText("이름 변경 실패 (이미 같은 이름이 있을 수 있습니다).")
                 return
             new_path = libcfg.join_org_path(segs[:-1] + [name])
             parent_path = libcfg.join_org_path(segs[:-1])
-            self._persist()
-            self._reload_group_tree(
-                select_kind=_KIND_VIRTUAL,
-                select_path=new_path,
-                select_parent=parent_path,
+            self._persist_and_status(
+                "이름 변경: {} → {}".format(old, name),
+                reload=lambda: self._reload_group_tree(
+                    select_kind=_KIND_VIRTUAL,
+                    select_path=new_path,
+                    select_parent=parent_path,
+                ),
             )
             return
 
@@ -1578,9 +1603,10 @@ class SourceLibrarySettingsDialog(QDialog):
         libcfg.set_scope(
             self._library, libcfg.COMMON_SCOPE, list(common.get("roots") or []), groups
         )
-        self._persist()
-        self._reload_group_tree(select_kind=_KIND_GROUP, select_path=name)
-        self._status.setText("이름 변경: {} → {}".format(old, name))
+        self._persist_and_status(
+            "이름 변경: {} → {}".format(old, name),
+            reload=lambda: self._reload_group_tree(select_kind=_KIND_GROUP, select_path=name),
+        )
 
     def _on_delete_group(self) -> None:
         ctx = self._selection_context()
@@ -1590,17 +1616,34 @@ class SourceLibrarySettingsDialog(QDialog):
             segs = libcfg.parse_org_path(full_path)
             if len(segs) < 2:
                 return
+            confirm = QMessageBox.question(
+                self,
+                "폴더 삭제",
+                "「{}」 폴더를 삭제할까요?\n\n"
+                "하위 폴더와 배정된 소스가 모두 함께 삭제됩니다 (되돌릴 수 없음).\n"
+                "원본 파일은 삭제·이동되지 않습니다.".format(segs[-1]),
+            )
+            if confirm != QMessageBox.StandardButton.Yes:
+                return
             if not libcfg.delete_folder_at(self._library, full_path):
                 self._status.setText("폴더를 삭제하지 못했습니다.")
                 return
-            self._persist()
-            self._reload_group_tree()
-            self._status.setText("폴더 삭제: {}".format(segs[-1]))
+            self._persist_and_status(
+                "폴더 삭제: {}".format(segs[-1]), reload=lambda: self._reload_group_tree()
+            )
             return
         if kind == _KIND_NESTED:
             parent = ctx.get("parent") or ""
             name = ctx.get("path") or ""
             if not parent or not name:
+                return
+            confirm = QMessageBox.question(
+                self,
+                "폴더 삭제",
+                "「{}」 폴더를 삭제할까요? (되돌릴 수 없음)\n"
+                "원본 파일은 삭제·이동되지 않습니다.".format(name),
+            )
+            if confirm != QMessageBox.StandardButton.Yes:
                 return
             common = self._library.get("common") or {}
             groups_out: List[Dict[str, Any]] = []
@@ -1620,9 +1663,9 @@ class SourceLibrarySettingsDialog(QDialog):
             libcfg.set_scope(
                 self._library, libcfg.COMMON_SCOPE, list(common.get("roots") or []), groups_out
             )
-            self._persist()
-            self._reload_group_tree()
-            self._status.setText("폴더 삭제: {}".format(name))
+            self._persist_and_status(
+                "폴더 삭제: {}".format(name), reload=lambda: self._reload_group_tree()
+            )
             return
 
         name = ctx.get("path") if kind == _KIND_GROUP else ""
@@ -1631,6 +1674,15 @@ class SourceLibrarySettingsDialog(QDialog):
             return
         if libcfg.is_builtin_group(name):
             self._status.setText("「{}」는 삭제할 수 없습니다.".format(libcfg.COMMON_LABEL))
+            return
+        confirm = QMessageBox.question(
+            self,
+            "보관함 삭제",
+            "「{}」 보관함을 삭제할까요?\n\n"
+            "안의 폴더·배정된 소스가 모두 함께 삭제됩니다 (되돌릴 수 없음).\n"
+            "등록 경로 자체는 왼쪽에 그대로 남습니다.".format(name),
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
             return
         common = self._library.get("common") or {}
         groups = [
@@ -1641,238 +1693,7 @@ class SourceLibrarySettingsDialog(QDialog):
         libcfg.set_scope(
             self._library, libcfg.COMMON_SCOPE, list(common.get("roots") or []), groups
         )
-        self._persist()
-        self._reload_group_tree()
-        self._status.setText("삭제 (등록 경로는 왼쪽에 남음): {}".format(name))
-
-    # ── Nuke 세팅 (설정 창 전용) ─────────────────────────────────
-
-    def _paint_nuke_folder(
-        self, parent_item: QTreeWidgetItem, node: Dict[str, Any], path: str
-    ) -> None:
-        name = str(node.get("name") or "")
-        if not name:
-            return
-        full = nsl.join_folder_path([path, name]) if path else name
-        item = QTreeWidgetItem(["[폴더] {}".format(name)])
-        item.setData(0, _ROLE_KIND, _KIND_GROUP)
-        item.setData(0, _ROLE_PATH, full)
-        item.setFlags(
-            Qt.ItemFlag.ItemIsEnabled
-            | Qt.ItemFlag.ItemIsSelectable
-            | Qt.ItemFlag.ItemIsDropEnabled
-            | Qt.ItemFlag.ItemIsDragEnabled
+        self._persist_and_status(
+            "삭제 (등록 경로는 왼쪽에 남음): {}".format(name),
+            reload=lambda: self._reload_group_tree(),
         )
-        parent_item.addChild(item)
-        for it in nsl.list_setups(folder_path=full):
-            leaf = QTreeWidgetItem([str(it.get("name") or it.get("id") or "")])
-            leaf.setData(0, _ROLE_KIND, "setup")
-            leaf.setData(0, _ROLE_PATH, str(it.get("id") or ""))
-            leaf.setData(0, _ROLE_PARENT, full)
-            leaf.setFlags(
-                Qt.ItemFlag.ItemIsEnabled
-                | Qt.ItemFlag.ItemIsSelectable
-                | Qt.ItemFlag.ItemIsDragEnabled
-            )
-            item.addChild(leaf)
-        for child in node.get("children") or []:
-            if isinstance(child, dict):
-                self._paint_nuke_folder(item, child, full)
-        item.setExpanded(True)
-
-    def _reload_nuke_section(self) -> None:
-        if not hasattr(self, "_nuke_list"):
-            return
-        self._nuke_list.clear()
-        for it in nsl.list_setups():
-            card = nsl.setup_card_info(it)
-            title = card.get("name") or card.get("id") or ""
-            group = str(it.get("folder_path") or it.get("group") or "") or nsl.UNGROUPED
-            nodes = card.get("nodes") or ""
-            line = "{}  [{}]".format(title, group)
-            if nodes:
-                line = "{}\n{}".format(line, nodes)
-            lw = QListWidgetItem(line)
-            lw.setData(Qt.ItemDataRole.UserRole, str(it.get("id") or ""))
-            lw.setToolTip(str(card.get("path") or ""))
-            self._nuke_list.addItem(lw)
-
-        self._nuke_group_tree.clear()
-        for node in nsl.list_folders_tree():
-            name = str(node.get("name") or "")
-            if not name:
-                continue
-            item = QTreeWidgetItem(["[폴더] {}".format(name)])
-            item.setData(0, _ROLE_KIND, _KIND_GROUP)
-            item.setData(0, _ROLE_PATH, name)
-            item.setFlags(
-                Qt.ItemFlag.ItemIsEnabled
-                | Qt.ItemFlag.ItemIsSelectable
-                | Qt.ItemFlag.ItemIsDropEnabled
-                | Qt.ItemFlag.ItemIsDragEnabled
-            )
-            self._nuke_group_tree.addTopLevelItem(item)
-            for it in nsl.list_setups(folder_path=name):
-                leaf = QTreeWidgetItem([str(it.get("name") or it.get("id") or "")])
-                leaf.setData(0, _ROLE_KIND, "setup")
-                leaf.setData(0, _ROLE_PATH, str(it.get("id") or ""))
-                leaf.setData(0, _ROLE_PARENT, name)
-                leaf.setFlags(
-                    Qt.ItemFlag.ItemIsEnabled
-                    | Qt.ItemFlag.ItemIsSelectable
-                    | Qt.ItemFlag.ItemIsDragEnabled
-                )
-                item.addChild(leaf)
-            for child in node.get("children") or []:
-                if isinstance(child, dict):
-                    self._paint_nuke_folder(item, child, name)
-            item.setExpanded(True)
-        un = QTreeWidgetItem(["[미배정]"])
-        un.setData(0, _ROLE_KIND, _KIND_GROUP)
-        un.setData(0, _ROLE_PATH, "")
-        un.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsDropEnabled)
-        self._nuke_group_tree.addTopLevelItem(un)
-        for it in nsl.list_setups(folder_path=""):
-            leaf = QTreeWidgetItem([str(it.get("name") or it.get("id") or "")])
-            leaf.setData(0, _ROLE_KIND, "setup")
-            leaf.setData(0, _ROLE_PATH, str(it.get("id") or ""))
-            leaf.setFlags(
-                Qt.ItemFlag.ItemIsEnabled
-                | Qt.ItemFlag.ItemIsSelectable
-                | Qt.ItemFlag.ItemIsDragEnabled
-            )
-            un.addChild(leaf)
-
-    def _start_nuke_drag(self, supported_actions: Qt.DropAction) -> None:  # noqa: N802
-        items = self._nuke_list.selectedItems()
-        ids = [str(i.data(Qt.ItemDataRole.UserRole) or "") for i in items]
-        ids = [i for i in ids if i]
-        if not ids:
-            return
-        mime = QMimeData()
-        mime.setData(_MIME_SETUP, QByteArray("\n".join(ids).encode("utf-8")))
-        drag = QDrag(self._nuke_list)
-        drag.setMimeData(mime)
-        drag.exec(Qt.DropAction.MoveAction)
-
-    def _start_nuke_tree_drag(self, supported_actions: Qt.DropAction) -> None:  # noqa: N802
-        setups = [
-            i
-            for i in self._nuke_group_tree.selectedItems()
-            if str(i.data(0, _ROLE_KIND) or "") == "setup"
-        ]
-        ids = [str(i.data(0, _ROLE_PATH) or "") for i in setups]
-        ids = [i for i in ids if i]
-        if not ids:
-            return
-        mime = QMimeData()
-        mime.setData(_MIME_SETUP, QByteArray("\n".join(ids).encode("utf-8")))
-        drag = QDrag(self._nuke_group_tree)
-        drag.setMimeData(mime)
-        drag.exec(Qt.DropAction.MoveAction)
-
-    def _nuke_group_drag_enter(self, event: QDragEnterEvent) -> None:  # noqa: N802
-        md = event.mimeData()
-        if md is not None and md.hasFormat(_MIME_SETUP):
-            event.acceptProposedAction()
-        else:
-            event.ignore()
-
-    def _nuke_group_drag_move(self, event: Any) -> None:  # noqa: N802
-        md = event.mimeData()
-        if md is not None and md.hasFormat(_MIME_SETUP):
-            event.acceptProposedAction()
-        else:
-            event.ignore()
-
-    def _nuke_group_drop(self, event: QDropEvent) -> None:  # noqa: N802
-        md = event.mimeData()
-        if md is None or not md.hasFormat(_MIME_SETUP):
-            return
-        raw = bytes(md.data(_MIME_SETUP)).decode("utf-8", "replace")
-        ids = [p for p in raw.split("\n") if p.strip()]
-        target = self._nuke_group_tree.itemAt(event.position().toPoint())
-        group = ""
-        item = target
-        while item is not None:
-            if str(item.data(0, _ROLE_KIND) or "") == _KIND_GROUP:
-                group = str(item.data(0, _ROLE_PATH) or "")
-                break
-            item = item.parent()
-        n = 0
-        for sid in ids:
-            if nsl.set_setup_folder_path(sid, group):
-                n += 1
-        self._reload_nuke_section()
-        label = group or nsl.UNGROUPED
-        self._status.setText("Nuke 세팅 {}개 → 「{}」".format(n, label))
-        event.acceptProposedAction()
-
-    def _on_nuke_new_group(self) -> None:
-        name, ok = QInputDialog.getText(self, "Nuke 세팅 새 폴더", "폴더 이름")
-        if not ok:
-            return
-        name = (name or "").strip()
-        if not name:
-            return
-        cur = self._nuke_group_tree.currentItem()
-        parent_path = ""
-        item = cur
-        while item is not None:
-            if str(item.data(0, _ROLE_KIND) or "") == _KIND_GROUP:
-                parent_path = str(item.data(0, _ROLE_PATH) or "")
-                break
-            item = item.parent()
-        if parent_path:
-            ok_add = nsl.add_folder_under(parent_path, name)
-        else:
-            ok_add = nsl.add_folder(name)
-        if ok_add:
-            self._reload_nuke_section()
-            self._status.setText(
-                "Nuke 폴더 「{}」 추가{}".format(
-                    name, " → 「{}」 안".format(parent_path) if parent_path else ""
-                )
-            )
-        else:
-            QMessageBox.information(self, "새 폴더", "추가할 수 없는 이름입니다.")
-
-    def _on_nuke_rename_group(self) -> None:
-        item = self._nuke_group_tree.currentItem()
-        if item is None:
-            return
-        while item is not None and str(item.data(0, _ROLE_KIND) or "") != _KIND_GROUP:
-            item = item.parent()
-        if item is None:
-            return
-        key = str(item.data(0, _ROLE_PATH) or "")
-        if not key:
-            self._status.setText("사용자 폴더만 이름을 바꿀 수 있습니다.")
-            return
-        leaf = nsl.parse_folder_path(key)[-1]
-        name, ok = QInputDialog.getText(self, "이름 변경", "새 이름", text=leaf)
-        if not ok:
-            return
-        name = (name or "").strip()
-        if nsl.rename_folder_at(key, name):
-            self._reload_nuke_section()
-        else:
-            self._status.setText("이름 변경 실패")
-
-    def _on_nuke_delete_group(self) -> None:
-        item = self._nuke_group_tree.currentItem()
-        if item is None:
-            return
-        while item is not None and str(item.data(0, _ROLE_KIND) or "") != _KIND_GROUP:
-            item = item.parent()
-        if item is None:
-            return
-        key = str(item.data(0, _ROLE_PATH) or "")
-        if not key:
-            self._status.setText("사용자 폴더만 삭제할 수 있습니다.")
-            return
-        if nsl.delete_folder_at(key):
-            self._reload_nuke_section()
-            self._status.setText("Nuke 폴더 삭제 (세팅은 미배정으로)")
-        else:
-            self._status.setText("삭제 실패")

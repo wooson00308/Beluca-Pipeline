@@ -624,28 +624,6 @@ def build_stylesheet() -> str:
         padding: 4px 8px;
     }}
 
-    /* ── Tools tab only (switch slider + cards; no extra #card padding on inner labels) ── */
-    #tools_card {{
-        background-color: {PANEL_BG};
-        border: 1px solid {BORDER};
-        border-radius: 8px;
-    }}
-    #tools_card:hover {{
-        border-color: {TEXT_DIM};
-    }}
-    #tools_tab QLabel#tools_title {{
-        background: transparent;
-        color: {TEXT};
-        font-size: {FONT_SIZE}px;
-        font-weight: 600;
-    }}
-    /* 본문 폰트 크기·패밀리는 tools_tab.py에서 QFont로 지정 (QSS+word wrap 시 줄 겹침 방지) */
-    #tools_tab QLabel#tools_body_text {{
-        background: transparent;
-        color: {TEXT_DIM};
-        padding: 2px 0;
-    }}
-
     /* ── Preset lock overlay ── */
     #lock_overlay {{
         background-color: {BG};

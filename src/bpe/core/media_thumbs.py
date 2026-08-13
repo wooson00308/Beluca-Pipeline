@@ -82,6 +82,19 @@ def _mark_failed(key: str) -> None:
         pass
 
 
+def clear_failed_marker(key: str) -> None:
+    """사용자가 재시도를 요청했을 때 이전 실패 표시를 지운다."""
+    try:
+        _fail_marker(key).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def ffmpeg_available() -> bool:
+    """번들 ffmpeg 를 찾을 수 있는지 (원인 안내용 — resolve_ffmpeg 자체는 안 건드림)."""
+    return bool(resolve_ffmpeg())
+
+
 def _scale_filter(thumb_px: int) -> str:
     """원본보다 크게 늘리지 않으면서 긴 변을 ``thumb_px`` 로 맞춘다.
 

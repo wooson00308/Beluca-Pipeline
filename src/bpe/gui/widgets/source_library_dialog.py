@@ -1,9 +1,7 @@
-# @cursor-change: 2026-08-11, 0.13.x, Nuke로 보내기 handoff 복구
 """소스 라이브러리 팝업 — My Tasks 에서 연다.
 
 구성: 왼쪽에 16:9 프리뷰 + 폴더 트리, 오른쪽에 썸네일 그리드.
 하위 폴더가 있으면 리프를 고를 때만 그리드가 채워진다.
-한글 경로 Nuke 는 「Nuke로 보내기」핸드오프를 쓴다.
 """
 
 from __future__ import annotations
@@ -32,7 +30,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from bpe.core import library_handoff, media_thumbs
+from bpe.core import media_thumbs
 from bpe.core import source_library_config as libcfg
 from bpe.core import source_library_db as db
 from bpe.core import source_library_publish as publish
@@ -46,6 +44,7 @@ from bpe.gui.widgets.lock_overlay import LockOverlay
 from bpe.gui.widgets.sequence_scrub_widget import MediaPreviewWidget
 from bpe.gui.widgets.source_library_grid import SourceLibraryGrid, SourceLibraryModel
 from bpe.gui.widgets.source_library_settings_dialog import SourceLibrarySettingsDialog
+from bpe.gui.workers.index_sync_worker import IndexSyncWorker
 from bpe.gui.workers.library_scan_worker import LibraryScanWorker
 
 logger = get_logger("gui.widgets.source_library_dialog")
@@ -58,6 +57,12 @@ _KIND_GROUP = "group"
 _KIND_FOLDER = "folder"
 _KIND_NESTED = "nested"
 _EMPTY_FOLDERS: List[db.FolderKey] = [("__none__", "__none__")]
+
+_admin_unlocked_this_session = False
+"""Source Library 설정 관리자 잠금 — 앱을 켜둔 동안(프로세스 수명) 한 번만 물어본다."""
+
+_nuke_plugin_warning_shown_this_session = False
+"""Nuke 플러그인 자동 동기화 결과 안내 — 라이브러리 창 열 때마다 반복하지 않고 한 번만."""
 
 
 class SourceLibraryDialog(QDialog):
@@ -85,10 +90,12 @@ class SourceLibraryDialog(QDialog):
         self._projects: List[Dict[str, Any]] = list(projects or [])
 
         self._library = libcfg.load_library()
+        self._pending_load_warning: Optional[str] = libcfg.probe_library_read()
         self._roots: List[str] = libcfg.roots_for_view(self._library)
         self._conn: Optional[sqlite3.Connection] = None
         self._model: Optional[SourceLibraryModel] = None
         self._scan_worker: Optional[LibraryScanWorker] = None
+        self._index_sync_worker: Optional[IndexSyncWorker] = None
         self._scan_queue: List[Dict[str, Any]] = []
         self._scan_publish = True
         self._current_row: Dict[str, Any] = {}
@@ -211,6 +218,16 @@ class SourceLibraryDialog(QDialog):
 
         bottom = QHBoxLayout()
         bottom.setSpacing(8)
+
+        # 스캔 취소는 경로 라벨(stretch) **앞**에 둔다 — 보였다 숨었다 할 때 늘고 주는 폭을
+        # 라벨이 흡수하므로 오른쪽 버튼들이 좌우로 밀리지 않는다.
+        self._scan_cancel_btn = QPushButton("스캔 취소")
+        self._scan_cancel_btn.setMinimumHeight(theme.BUTTON_HEIGHT)
+        self._scan_cancel_btn.setFixedWidth(90)
+        self._scan_cancel_btn.setVisible(False)
+        self._scan_cancel_btn.clicked.connect(self._on_cancel_scan)
+        bottom.addWidget(self._scan_cancel_btn)
+
         self._path_label = QLabel("")
         self._path_label.setObjectName("status_msg")
         self._path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -231,14 +248,6 @@ class SourceLibraryDialog(QDialog):
         self._open_btn.clicked.connect(self._on_open_folder)
         bottom.addWidget(self._open_btn)
 
-        self._nuke_btn = QPushButton("Nuke로 보내기")
-        self._nuke_btn.setMinimumWidth(110)
-        self._nuke_btn.setMinimumHeight(theme.BUTTON_HEIGHT)
-        self._nuke_btn.setEnabled(False)
-        self._nuke_btn.setProperty("primary", True)
-        self._nuke_btn.clicked.connect(self._on_send_to_nuke)
-        bottom.addWidget(self._nuke_btn)
-
         close_btn = QPushButton("닫기")
         close_btn.setMinimumWidth(80)
         close_btn.setMinimumHeight(theme.BUTTON_HEIGHT)
@@ -251,8 +260,7 @@ class SourceLibraryDialog(QDialog):
         root.addWidget(self._status_label)
 
         hint = QLabel(
-            "다중 선택: Ctrl/Shift+클릭. 영어 경로는 그리드에서 Nuke로 드래그, "
-            "한글 경로는 「Nuke로 보내기」를 쓰세요 (Nuke가 켜져 있으면 확인 팝업). "
+            "다중 선택: Ctrl/Shift+클릭. 그리드에서 Nuke로 드래그하면 Read 노드가 만들어집니다. "
             "소분류를 선택해야 목록이 표시됩니다. "
             "원본은 읽기만 하며 서버 파일을 복사·수정하지 않습니다."
         )
@@ -263,19 +271,94 @@ class SourceLibraryDialog(QDialog):
 
     # ── 인덱스 / 모델 ───────────────────────────────────────────────
 
+    def _warn_library_load_failed(self) -> None:
+        """library.json 이 있는데 읽기·파싱 실패했으면 "최초 사용(비어있음)"과 구분해 알린다."""
+        warn = self._pending_load_warning
+        if not warn:
+            return
+        msg = "설정 파일을 못 읽어 이전 상태로 표시 중일 수 있습니다 ({})".format(warn)
+        logger.warning("library.json 읽기 실패: %s", warn)
+        cur = self._status_label.text() or ""
+        if cur:
+            self._status_label.setText("{} · {}".format(cur, msg))
+        else:
+            self._status_label.setText(msg)
+
+    def _warn_ffmpeg_missing(self) -> None:
+        """ffmpeg 를 못 찾으면 썸네일이 전부 안 뜨는 이유를 상태줄에 알린다."""
+        if media_thumbs.ffmpeg_available():
+            return
+        msg = "ffmpeg를 찾을 수 없어 썸네일이 안 뜹니다 (배포판을 확인하세요)"
+        logger.warning("ffmpeg 사용 불가 — 썸네일 생성 안 됨")
+        cur = self._status_label.text() or ""
+        if cur:
+            self._status_label.setText("{} · {}".format(cur, msg))
+        else:
+            self._status_label.setText(msg)
+
+    def _warn_nuke_plugin_sync(self) -> None:
+        """앱 시작 시 자동 동기화한 Nuke 플러그인 결과(갱신/실패)를 세션당 한 번만 알린다."""
+        global _nuke_plugin_warning_shown_this_session
+        if _nuke_plugin_warning_shown_this_session:
+            return
+        try:
+            from bpe.core.nuke_plugin_install import last_sync_result
+        except Exception:
+            return
+        result = last_sync_result()
+        if not result:
+            return
+        _nuke_plugin_warning_shown_this_session = True
+        msg = ""
+        if result.get("error"):
+            msg = "Nuke 플러그인 동기화 실패: {}".format(result["error"])
+        elif result.get("updated"):
+            msg = "Nuke 플러그인이 갱신됐습니다 — Nuke를 이미 켜뒀다면 재시작해야 반영됩니다."
+        if not msg:
+            return
+        cur = self._status_label.text() or ""
+        if cur:
+            self._status_label.setText("{} · {}".format(cur, msg))
+        else:
+            self._status_label.setText(msg)
+
     def _sync_index(self) -> None:
-        meta, err = publish.try_pull_index_with_status()
-        if err:
-            self._status_label.setText("공유 인덱스 동기 실패: {}".format(err))
+        """빠른 검사(설정 파일·ffmpeg)만 즉시, 실제 네트워크 동기는 백그라운드로.
+
+        예전엔 ``try_pull_index_with_status()``(네트워크 sqlite 복사)를 여기서
+        그대로 불러서, 서버가 느리거나 끊기면 창을 여는 순간 전체가 멈춘
+        것처럼 보였다. 지금은 현재 로컬 인덱스로 즉시 열어 보여준 뒤,
+        동기가 끝나면(새로 받은 게 있을 때만) 조용히 다시 로드한다.
+        """
+        self._warn_library_load_failed()
+        self._warn_ffmpeg_missing()
+        self._warn_nuke_plugin_sync()
+        self._start_index_sync()
+
+    def _start_index_sync(self) -> None:
+        if self._index_sync_worker is not None and self._index_sync_worker.isRunning():
+            return
+        worker = IndexSyncWorker(self)
+        worker.sync_done.connect(self._on_index_sync_done)
+        worker.sync_error.connect(self._on_index_sync_error)
+        self._index_sync_worker = worker
+        worker.start()
+
+    def _on_index_sync_done(self, meta: object) -> None:
+        if self._shutdown_done:
             return
         if meta:
+            meta_d = meta if isinstance(meta, dict) else {}
             self._status_label.setText(
                 "공유 인덱스 동기 ({:,}개, {})".format(
-                    int(meta.get("items") or 0),
-                    meta.get("published_at") or "",
+                    int(meta_d.get("items") or 0),
+                    meta_d.get("published_at") or "",
                 )
             )
             self._warn_empty_group_index()
+            # 새로 받은 인덱스를 반영해 조용히 다시 연다 (스캔 중이면 충돌 방지로 건너뜀).
+            if not self.is_library_scanning():
+                self._reload_after_scan()
             return
         shared = publish.read_shared_meta()
         if shared.get("published_at"):
@@ -283,6 +366,11 @@ class SourceLibraryDialog(QDialog):
                 "공유 인덱스 최신 ({:,}개)".format(int(shared.get("items") or 0))
             )
         self._warn_empty_group_index()
+
+    def _on_index_sync_error(self, err: str) -> None:
+        if self._shutdown_done:
+            return
+        self._status_label.setText("공유 인덱스 동기 실패: {}".format(err))
 
     def _warn_empty_group_index(self) -> None:
         """배정은 됐는데 로컬 인덱스가 비어 있는 그룹을 상태줄에 알린다."""
@@ -294,9 +382,7 @@ class SourceLibraryDialog(QDialog):
         if not gaps:
             return
         names = [g for g, _roots in gaps[:3]]
-        msg = "「{}」인덱스 0개 — 설정에서 전체 다시 스캔·게시 또는 동기 필요".format(
-            "」, 「".join(names)
-        )
+        msg = "「{}」인덱스 0개 — 설정에서 전체 스캔 또는 동기 필요".format("」, 「".join(names))
         logger.warning("소스 라이브러리 커버리지: %s", gaps)
         cur = self._status_label.text() or ""
         if cur:
@@ -773,34 +859,46 @@ class SourceLibraryDialog(QDialog):
             self._count_label.setText("소분류를 선택하세요")
             return
         total = self._model.total_count()
-        self._count_label.setText("{:,}개".format(total))
+        if self._model.is_truncated():
+            self._count_label.setText(
+                "{:,}개 중 {:,}개만 표시 — 검색으로 좁혀보세요".format(
+                    total, self._model.load_limit()
+                )
+            )
+        else:
+            self._count_label.setText("{:,}개".format(total))
 
     # ── 설정 (비밀번호) ─────────────────────────────────────────────
 
     def _on_settings_clicked(self) -> None:
-        lock_dlg = QDialog(self)
-        lock_dlg.setWindowTitle("Source Library 설정")
-        lock_dlg.setMinimumSize(420, 320)
-        lay = QVBoxLayout(lock_dlg)
-        lay.setContentsMargins(0, 0, 0, 0)
-        overlay = LockOverlay(
-            lock_dlg,
-            title="Source Library 설정",
-            hint="관리자만 폴더·그룹을 수정할 수 있습니다.",
-        )
+        global _admin_unlocked_this_session
+        if not _admin_unlocked_this_session:
+            lock_dlg = QDialog(self)
+            lock_dlg.setWindowTitle("Source Library 설정")
+            lock_dlg.setMinimumSize(420, 320)
+            lay = QVBoxLayout(lock_dlg)
+            lay.setContentsMargins(0, 0, 0, 0)
+            overlay = LockOverlay(
+                lock_dlg,
+                title="Source Library 설정",
+                hint="관리자만 폴더·그룹을 수정할 수 있습니다.",
+            )
 
-        def _unlocked() -> None:
-            lock_dlg.accept()
+            def _unlocked() -> None:
+                lock_dlg.accept()
 
-        overlay.unlocked.connect(_unlocked)
-        lay.addWidget(overlay)
-        if lock_dlg.exec() != QDialog.DialogCode.Accepted:
-            return
+            overlay.unlocked.connect(_unlocked)
+            lay.addWidget(overlay)
+            if lock_dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+            # 앱을 켜둔 동안은 다시 안 물어봄 (창을 여러 번 열어도 유지)
+            _admin_unlocked_this_session = True
 
         dlg = SourceLibrarySettingsDialog(self)
         dlg.exec()
         # 설정 반영 (스캔 중이면 pull 생략 — 로컬 writer 와 충돌 방지)
         self._library = libcfg.load_library()
+        self._pending_load_warning = libcfg.probe_library_read()
         self._roots = libcfg.roots_for_view(self._library)
         self._filter_roots = []
         self._filter_folders = list(_EMPTY_FOLDERS)
@@ -899,12 +997,19 @@ class SourceLibraryDialog(QDialog):
         worker.scan_error.connect(self._on_scan_error)
         self._scan_worker = worker
         self._status_label.setText("스캔·게시 중… (원본은 읽기만)")
+        self._scan_cancel_btn.setVisible(True)
         worker.start()
+
+    def _on_cancel_scan(self) -> None:
+        if self._scan_worker is not None:
+            self._scan_worker.stop()
+        self._scan_queue = []
+        self._status_label.setText("스캔 취소 중…")
 
     def _on_scan_progress(self, where: str, indexed: int) -> None:
         if self._shutdown_done:
             return
-        self._status_label.setText("인덱싱 중… {} ({:,}개)".format(where, indexed))
+        self._status_label.setText("훑는 중… {} (갱신 {:,}개)".format(where, indexed))
 
     def _publish_after_scan(self, indexed: int) -> None:
         if not self._scan_publish:
@@ -957,18 +1062,21 @@ class SourceLibraryDialog(QDialog):
     def _on_owner_scan_done(self, indexed: int) -> None:
         if self._shutdown_done:
             return
+        self._scan_cancel_btn.setVisible(False)
         self._publish_after_scan(indexed)
         self._drain_scan_queue()
 
     def _on_owner_scan_aborted(self, indexed: int) -> None:
         if self._shutdown_done:
             return
+        self._scan_cancel_btn.setVisible(False)
         self._status_label.setText("스캔 중단 ({:,}개까지)".format(indexed))
         self._scan_queue = []
 
     def _on_scan_error(self, message: str) -> None:
         if self._shutdown_done:
             return
+        self._scan_cancel_btn.setVisible(False)
         self._status_label.setText("인덱싱 오류: {}".format(message))
         self._drain_scan_queue()
 
@@ -997,7 +1105,6 @@ class SourceLibraryDialog(QDialog):
     def _set_action_enabled(self, enabled: bool) -> None:
         self._copy_btn.setEnabled(enabled)
         self._open_btn.setEnabled(enabled)
-        self._nuke_btn.setEnabled(enabled)
 
     def _on_selection_rows(self, rows: object) -> None:
         if isinstance(rows, list):
@@ -1036,66 +1143,58 @@ class SourceLibraryDialog(QDialog):
         self._status_label.setText("경로 복사: {}개".format(len(paths)))
         self.path_copied.emit(paths[0])
 
-    def _reveal_path_in_os(self, target: str) -> None:
-        """OS 탐색기에서 파일/폴더를 연다. Windows는 가능하면 해당 항목 선택."""
+    def _reveal_path_in_os(self, target: str) -> bool:
+        """OS 탐색기에서 파일/폴더를 연다. Windows는 가능하면 해당 항목 선택.
+
+        반환값: 실제로 열렸다고 판단되면 True, 경로가 사라졌거나 실행 실패면 False.
+        """
         path = normalize_path_str(target)
         if not path:
-            return
+            return False
         if sys.platform == "win32":
             # /select, 와 경로를 분리 — 공백 경로에서 list2cmdline 따옴표 깨짐 방지
             if os.path.exists(path):
                 try:
                     subprocess.Popen(windows_explorer_select_args(path))
-                    return
+                    return True
                 except OSError as exc:
                     logger.debug("explorer /select 실패: %s", exc)
             folder = path if os.path.isdir(path) else os.path.dirname(path)
             folder = normalize_path_str(folder)
-            if folder:
-                QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
-            return
+            if folder and os.path.isdir(folder):
+                return bool(QDesktopServices.openUrl(QUrl.fromLocalFile(folder)))
+            return False
         if sys.platform == "darwin":
             if os.path.exists(path):
                 try:
                     subprocess.Popen(["open", "-R", path])
-                    return
+                    return True
                 except OSError as exc:
                     logger.debug("open -R 실패: %s", exc)
         folder = path if os.path.isdir(path) else os.path.dirname(path)
         folder = normalize_path_str(folder)
-        if folder:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+        if folder and os.path.isdir(folder):
+            return bool(QDesktopServices.openUrl(QUrl.fromLocalFile(folder)))
+        return False
 
     def _on_open_folder(self) -> None:
         rows = self._active_rows()
         if not rows:
             return
         target = row_reveal_path(rows[0])
-        self._reveal_path_in_os(target)
+        opened = self._reveal_path_in_os(target)
         shown = normalize_path_str(target)
+        if not opened:
+            self._status_label.setText(
+                "탐색기를 열지 못했습니다 (경로가 사라졌을 수 있음): {}".format(shown)
+            )
+            return
         if len(rows) > 1:
             self._status_label.setText(
                 "탐색기에서 선택: {}개 중 첫 항목 ({})".format(len(rows), shown)
             )
         else:
             self._status_label.setText("탐색기에서 선택: {}".format(shown))
-
-    def _on_send_to_nuke(self) -> None:
-        """한글 경로 안전 — UTF-8 handoff JSON. Nuke 쪽이 감지해 Read 를 만든다."""
-        rows = self._active_rows()
-        if not rows:
-            return
-        try:
-            library_handoff.write_handoff(rows)
-        except Exception as exc:
-            logger.warning("Nuke 핸드오프 기록 실패: %s", exc)
-            self._status_label.setText("Nuke로 보내기 실패: {}".format(exc))
-            return
-        self._status_label.setText(
-            "Nuke로 보냄: {}개 — Nuke에서 확인 팝업(또는 메뉴 「라이브러리에서 가져오기」)".format(
-                len(rows)
-            )
-        )
 
     # ── 정리 ────────────────────────────────────────────────────────
 
@@ -1125,6 +1224,16 @@ class SourceLibraryDialog(QDialog):
                 worker.wait(5000)
             self._scan_worker = None
         self._scan_queue = []
+        sync_worker = self._index_sync_worker
+        if sync_worker is not None:
+            for signal in (sync_worker.sync_done, sync_worker.sync_error):
+                try:
+                    signal.disconnect()
+                except (RuntimeError, TypeError):
+                    pass
+            if sync_worker.isRunning():
+                sync_worker.wait(1500)
+            self._index_sync_worker = None
         if self._model is not None:
             try:
                 self._model.shutdown()

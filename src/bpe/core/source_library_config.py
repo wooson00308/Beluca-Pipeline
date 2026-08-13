@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import copy
 import getpass
+import json
 import os
 import socket
 import sys
@@ -83,6 +84,32 @@ def config_dir() -> Path:
 
 def config_path() -> Path:
     return config_dir() / "library.json"
+
+
+def probe_library_read(path: Optional[Path] = None) -> Optional[str]:
+    """``library.json`` 읽기/파싱이 실패했는지 직접 확인한다 (진단 전용, GUI 경고용).
+
+    ``atomic_io.read_json_file``은 실패 시 조용히 기본값을 반환하는 게 정책이라
+    (다른 모든 설정 파일도 공유하는 유틸이라 그 동작을 안 바꿈) ``load_library()``
+    만 봐서는 "읽기 실패"와 "최초 사용(파일 없음)"을 구분할 수 없다. 이 함수는
+    ``load_library()`` 와 별도로 파일을 한 번 더 직접 열어보고, 존재하는데
+    읽기·파싱이 실패한 경우에만 사유 문자열을 반환한다 (정상·최초사용이면 None).
+    """
+    p = path or config_path()
+    try:
+        if not p.exists():
+            return None
+        raw = p.read_text(encoding="utf-8").strip()
+        if not raw:
+            return None
+        json.loads(raw)
+        return None
+    except OSError as exc:
+        return "파일 접근 실패: {}".format(exc)
+    except json.JSONDecodeError as exc:
+        return "파일이 손상됨(JSON 파싱 실패): {}".format(exc)
+    except Exception as exc:
+        return "알 수 없는 오류: {}".format(exc)
 
 
 def empty_library() -> Dict[str, Any]:

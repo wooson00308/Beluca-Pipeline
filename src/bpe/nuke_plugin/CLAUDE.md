@@ -19,17 +19,26 @@ from bpe.core.cache import save_nuke_formats_cache
 ## Nuke 콜백 안전 패턴
 
 beforeRender/afterRender 콜백 안에서 노드 생성/UI 조작은 금지.
-반드시 `nuke.executeDeferred()` 사용:
+반드시 `nuke_defer.execute_deferred()` 사용:
 
 ```python
+from bpe.nuke_plugin.nuke_defer import execute_deferred
+
 def bpe_after_render():
     # 여기서 노드 생성하면 안 됨
-    nuke.executeDeferred(_deferred_work)
+    execute_deferred(_deferred_work)
 
 def _deferred_work():
     # 여기서는 OK
     nuke.createNode("Read")
 ```
+
+**`nuke.executeDeferred()` 를 쓰지 말 것 — 존재하지 않는 API다.**
+Nuke 12/14/17 전부 `executeDeferred` 는 `plugins/nukescripts/utils.py` 에만 있고
+`nuke` 네임스페이스에는 `executeInMainThread` 만 있다. `nuke.executeDeferred` 를 쓰면
+`AttributeError` 가 나고, beforeRender 콜백에서 터지면 **렌더가 통째로 막힌다**.
+`nuke_defer.execute_deferred()` 가 `executeInMainThread` → `nukescripts.executeDeferred`
+→ 즉시 실행 순으로 폴백을 처리한다.
 
 ## QC Checker 재렌더 방지
 
