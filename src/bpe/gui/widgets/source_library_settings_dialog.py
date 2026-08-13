@@ -959,34 +959,6 @@ class SourceLibrarySettingsDialog(QDialog):
         _ = target
         self._status.setText("예전 중첩 폴더는 옮길 수 없습니다 (삭제만 가능).")
 
-    def reorder_virtual_drop(self, from_path: str, target: QTreeWidgetItem, *, after: bool) -> None:
-        """위·아래 인디케이터 — 같은 부모 형제 순서만 변경."""
-        from_path = (from_path or "").strip()
-        tkind = str(target.data(0, _ROLE_KIND) or "")
-        tpath = str(target.data(0, _ROLE_PATH) or "")
-        if tkind == _KIND_VASSIGN:
-            parent = target.parent()
-            if parent is None:
-                return
-            tkind = str(parent.data(0, _ROLE_KIND) or "")
-            tpath = str(parent.data(0, _ROLE_PATH) or "")
-        if tkind != _KIND_VIRTUAL or not tpath:
-            # 그룹 줄 가장자리 → 안으로 넣기와 동일
-            self.drop_virtual_group(from_path, target)
-            return
-        if not libcfg.reorder_folder_sibling(self._library, from_path, tpath, after=after):
-            self._status.setText("같은 안의 폴더끼리만 순서를 바꿀 수 있습니다.")
-            return
-        parent_of = libcfg.join_org_path(libcfg.parse_org_path(from_path)[:-1])
-        self._persist_and_status(
-            "폴더 순서 변경",
-            reload=lambda: self._reload_group_tree(
-                select_kind=_KIND_VIRTUAL,
-                select_path=from_path,
-                select_parent=parent_of,
-            ),
-        )
-
     def reorder_virtual_groups_drop(
         self, from_paths: List[str], target: QTreeWidgetItem, *, after: bool
     ) -> None:
@@ -1365,6 +1337,32 @@ class SourceLibrarySettingsDialog(QDialog):
             menu.addAction(act)
             menu.exec(self._group_tree.viewport().mapToGlobal(pos))
             return
+        if kind in (_KIND_GROUP, _KIND_VIRTUAL):
+            if not path:
+                return
+            if kind == _KIND_GROUP and libcfg.is_builtin_group(path):
+                return  # CS는 항상 맨 위 고정 — 이동 메뉴 없음
+            prev_path = self._reorder_neighbor_path(item, kind, up=True)
+            next_path = self._reorder_neighbor_path(item, kind, up=False)
+            menu = QMenu(self)
+            up_act = QAction("위로 이동", menu)
+            down_act = QAction("아래로 이동", menu)
+            up_act.setEnabled(bool(prev_path))
+            down_act.setEnabled(bool(next_path))
+            up_act.triggered.connect(
+                lambda checked=False, b=prev_path: self._reorder_sibling_by_menu(
+                    kind, path, b, after=False
+                )
+            )
+            down_act.triggered.connect(
+                lambda checked=False, b=next_path: self._reorder_sibling_by_menu(
+                    kind, path, b, after=True
+                )
+            )
+            menu.addAction(up_act)
+            menu.addAction(down_act)
+            menu.exec(self._group_tree.viewport().mapToGlobal(pos))
+            return
         if kind != _KIND_CATEGORY:
             return
         if not path:
@@ -1375,6 +1373,67 @@ class SourceLibrarySettingsDialog(QDialog):
         act.triggered.connect(lambda: self._toggle_hidden_folder(path, not hidden))
         menu.addAction(act)
         menu.exec(self._group_tree.viewport().mapToGlobal(pos))
+
+    def _reorder_neighbor_path(self, item: QTreeWidgetItem, kind: str, *, up: bool) -> str:
+        """같은 종류(kind) 형제 중 바로 위/아래 항목의 경로. 없으면 빈 문자열.
+
+        트리에는 VASSIGN(절대경로)·NESTED(짧은 이름)·UNFILED(그룹명)가 섞여 있어
+        인덱스 ±1을 그대로 쓰면 안 되고, 같은 kind 만 스킵-스캔으로 찾는다.
+        최상위에서 CS(builtin)는 항상 index 0 고정이라 그 위로는 못 올라간다.
+        """
+        step = -1 if up else 1
+        parent = item.parent()
+        if parent is None:
+            idx = self._group_tree.indexOfTopLevelItem(item)
+            j = idx + step
+            while 0 <= j < self._group_tree.topLevelItemCount():
+                cand = self._group_tree.topLevelItem(j)
+                ckind = str(cand.data(0, _ROLE_KIND) or "")
+                cpath = str(cand.data(0, _ROLE_PATH) or "")
+                if ckind == kind and cpath:
+                    if libcfg.is_builtin_group(cpath):
+                        return ""  # CS 위로는 이동 불가
+                    return cpath
+                j += step
+            return ""
+        idx = parent.indexOfChild(item)
+        j = idx + step
+        while 0 <= j < parent.childCount():
+            cand = parent.child(j)
+            ckind = str(cand.data(0, _ROLE_KIND) or "")
+            cpath = str(cand.data(0, _ROLE_PATH) or "")
+            if ckind == kind and cpath:
+                return cpath
+            j += step
+        return ""
+
+    def _reorder_sibling_by_menu(
+        self, kind: str, path: str, neighbor_path: str, *, after: bool
+    ) -> None:
+        """컨텍스트 메뉴 「위로/아래로 이동」 — 드래그 재정렬과 같은 core 함수 사용."""
+        if not neighbor_path:
+            return
+        if kind == _KIND_GROUP:
+            if not libcfg.reorder_top_level_group(self._library, path, neighbor_path, after=after):
+                self._status.setText("최상위 폴더 순서를 바꾸지 못했습니다 (CS는 고정).")
+                return
+            self._persist_and_status(
+                "폴더 순서 변경: 「{}」".format(path),
+                reload=lambda: self._reload_group_tree(select_kind=_KIND_GROUP, select_path=path),
+            )
+            return
+        if not libcfg.reorder_folder_sibling(self._library, path, neighbor_path, after=after):
+            self._status.setText("같은 안의 폴더끼리만 순서를 바꿀 수 있습니다.")
+            return
+        parent_of = libcfg.join_org_path(libcfg.parse_org_path(path)[:-1])
+        self._persist_and_status(
+            "폴더 순서 변경",
+            reload=lambda: self._reload_group_tree(
+                select_kind=_KIND_VIRTUAL,
+                select_path=path,
+                select_parent=parent_of,
+            ),
+        )
 
     def _remove_vassign(self, folder_org_path: str, category_abs: str) -> None:
         if libcfg.remove_source_from_folder(self._library, folder_org_path, category_abs):

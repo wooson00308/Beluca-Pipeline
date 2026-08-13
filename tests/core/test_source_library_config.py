@@ -567,6 +567,34 @@ def test_reorder_folder_sibling():
     assert "A" in names and "B" in names
 
 
+def test_reorder_top_level_group():
+    lib = libcfg.empty_library()
+    libcfg.set_scope(
+        lib,
+        libcfg.COMMON_SCOPE,
+        ["W:/lib"],
+        [
+            {"name": libcfg.COMMON_LABEL, "folders": ["W:/lib"], "children": []},
+            {"name": "A", "folders": [], "children": []},
+            {"name": "B", "folders": [], "children": []},
+            {"name": "C", "folders": [], "children": []},
+        ],
+    )
+    assert libcfg.reorder_top_level_group(lib, "C", "A", after=False)
+    names = [g["name"] for g in libcfg.view_groups(lib)]
+    assert names == [libcfg.COMMON_LABEL, "C", "A", "B"]
+
+    assert libcfg.reorder_top_level_group(lib, "C", "A", after=True)
+    names = [g["name"] for g in libcfg.view_groups(lib)]
+    assert names == [libcfg.COMMON_LABEL, "A", "C", "B"]
+
+    # CS(builtin)는 이동 대상/기준 어느 쪽으로도 거부되고 항상 맨 앞 고정
+    assert not libcfg.reorder_top_level_group(lib, libcfg.COMMON_LABEL, "A", after=False)
+    assert not libcfg.reorder_top_level_group(lib, "B", libcfg.COMMON_LABEL, after=False)
+    names = [g["name"] for g in libcfg.view_groups(lib)]
+    assert names[0] == libcfg.COMMON_LABEL
+
+
 def test_promote_preserves_bag_and_children():
     lib = libcfg.empty_library()
     libcfg.set_scope(
