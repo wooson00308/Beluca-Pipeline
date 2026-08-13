@@ -1,4 +1,4 @@
-# @cursor-change: 2026-08-10, 0.13.x, JPG 등 스틸은 시퀀스 묶지 않음
+# @cursor-change: 2026-08-13, 0.12.x, 3D·ball_pass 카테고리 한정 PNG/TGA 시퀀스 묶기(opt-in)
 """소스 라이브러리 스캔 — 폴더 한 단계 나열 + 플레이트 시퀀스 묶기.
 
 가벼움이 최우선이라 이 모듈은 재귀 탐색을 하지 않는다. 호출자가 필요한 폴더를
@@ -8,8 +8,11 @@
 플레이트 폴더 구조에 묶여 있고 4자리 패딩만 가정한다. 라이브러리는 외부 소스가 섞여
 패딩 폭이 제각각이라 여기서 독립적으로 다시 구현한다.
 
-번호가 붙은 JPG/PNG 등 스틸은 파일마다 카드로 둔다. EXR/DPX/CIN 플레이트만
-시퀀스 한 벌로 합친다. ``try_build_pack`` 은 CS ``pack_roots`` 스캔 워커가 호출한다.
+번호가 붙은 JPG/PNG 등 스틸은 기본적으로 파일마다 카드로 둔다. EXR/DPX/CIN
+플레이트만 시퀀스 한 벌로 합친다. 단, ``STILL_SEQUENCE_CATEGORIES`` 카테고리
+(3D·ball_pass — 패스별 PNG/TGA 렌더 폴더)에서만 워커가 ``allow_still_sequences=True``
+를 넘겨 3장 이상 연속 번호 PNG/TGA/TIF 를 시퀀스로 묶는다.
+``try_build_pack`` 은 CS ``pack_roots`` 스캔 워커가 호출한다.
 """
 
 from __future__ import annotations
@@ -38,6 +41,14 @@ _TRAILING_DIGITS_RE = re.compile(r"^(?P<prefix>.*?)(?P<num>\d+)$")
 
 # 시퀀스로 인정할 최소 프레임 수. 1장뿐이면 스틸로 본다.
 _MIN_SEQUENCE_FRAMES = 2
+
+# ── 스틸 확장자 시퀀스 묶기 (opt-in — STILL_SEQUENCE_CATEGORIES 한정) ──
+# 이 카테고리(등록 루트 바로 아래 폴더명, 대소문자 무시)에서만 PNG/TGA/TIF 연번을
+# 시퀀스로 묶는다. 패스별 렌더 폴더가 낱장 카드 수백 장으로 퍼지는 것을 막는 용도.
+STILL_SEQUENCE_CATEGORIES = frozenset({"3d", "ball_pass"})
+_STILL_SEQUENCE_CANDIDATE_EXTS = frozenset({".png", ".tga", ".tif", ".tiff"})
+# 스틸 확장자는 오탐(레퍼런스 이미지 세트)을 피하려고 플레이트(2장)보다 높은 기준.
+_MIN_STILL_SEQUENCE_FRAMES = 3
 
 # 팩 내부 실제 소스 폴더명 (대소문자 무시)
 _IMAGE_SUBDIR_NAMES = frozenset({"image", "images"})
@@ -110,11 +121,18 @@ def expand_frame_pattern(pattern: str, frame: int) -> str:
         return pattern
 
 
-def group_entries(entries: Sequence[FileEntry]) -> List[LibraryItem]:
+def group_entries(
+    entries: Sequence[FileEntry],
+    allow_still_sequences: bool = False,
+) -> List[LibraryItem]:
     """한 폴더의 파일 목록을 라이브러리 항목으로 묶는다 (파일시스템 접근 없음).
 
     EXR/DPX/CIN 은 같은 접두사 + 확장자의 숫자 파일을 시퀀스 한 벌로 합친다.
     JPG/PNG 등 그 외 스틸은 번호가 있어도 파일마다 still 카드다.
+
+    ``allow_still_sequences=True`` (STILL_SEQUENCE_CATEGORIES 카테고리 전용)면
+    PNG/TGA/TIF 도 3장 이상 + 연속 번호 + 패딩 균일일 때 시퀀스로 묶는다.
+    기본값 False 에서는 기존 동작과 완전히 동일하다.
     """
     # (prefix, ext) -> [(frame, FileEntry, pad_width)]
     seq_groups: Dict[Tuple[str, str], List[Tuple[int, FileEntry, int]]] = {}
@@ -127,7 +145,10 @@ def group_entries(entries: Sequence[FileEntry]) -> List[LibraryItem]:
         if ext in MOVIE_EXTS:
             singles.append((entry, ext))
             continue
-        if ext not in PLATE_SEQUENCE_EXTS:
+        seq_candidate = ext in PLATE_SEQUENCE_EXTS or (
+            allow_still_sequences and ext in _STILL_SEQUENCE_CANDIDATE_EXTS
+        )
+        if not seq_candidate:
             singles.append((entry, ext))
             continue
         parts = split_trailing_number(stem)
@@ -140,12 +161,25 @@ def group_entries(entries: Sequence[FileEntry]) -> List[LibraryItem]:
     items: List[LibraryItem] = []
 
     for (prefix, ext), members in seq_groups.items():
-        if len(members) < _MIN_SEQUENCE_FRAMES:
-            # 프레임 1장뿐이면 시퀀스가 아니라 스틸로 취급한다.
+        min_frames = (
+            _MIN_SEQUENCE_FRAMES if ext in PLATE_SEQUENCE_EXTS else _MIN_STILL_SEQUENCE_FRAMES
+        )
+        if len(members) < min_frames:
+            # 기준 미달이면 시퀀스가 아니라 스틸로 취급한다.
             singles.extend((entry, ext) for _f, entry, _w in members)
             continue
         members.sort(key=lambda it: it[0])
         frames = [f for f, _e, _w in members]
+        if ext not in PLATE_SEQUENCE_EXTS:
+            # 스틸 확장자 전용 가드 (플레이트 동작은 불변):
+            # 1) 번호가 실제 연속에 가까울 때만 — 날짜/타임스탬프 파일명 오인 방지.
+            #    (구간 길이가 장수의 2배를 넘으면 시퀀스가 아니라고 본다)
+            # 2) 패딩 폭 균일 — 혼재 시 %d 폴백이 존재하지 않는 경로를 만들 수 있음.
+            span = frames[-1] - frames[0] + 1
+            widths = {w for _f, _e, w in members}
+            if span > len(members) * 2 or len(widths) != 1:
+                singles.extend((entry, ext) for _f, entry, _w in members)
+                continue
         pattern = frame_pattern(prefix, ext, [w for _f, _e, w in members])
         # 썸네일은 중간 프레임이 내용을 가장 잘 보여준다 (앞뒤는 페이드인/아웃이 흔함).
         mid_frame, mid_entry, _mid_w = members[len(members) // 2]

@@ -119,9 +119,13 @@ class SourceLibraryDialog(QDialog):
         self._sync_index()
         self._open_index()
         self._reload_tree(initial=True)
-        # 공유 인덱스가 없을 때만 로컬 스캔 폴백 (원본은 읽기만)
+        # 공유 인덱스가 없거나 구버전 그룹핑 게시본이면 로컬 스캔 폴백 (원본은 읽기만).
+        # 구버전 게시본은 pull 이 거부되므로, 폴백까지 막으면 신규 설치자가 영구 빈 화면이 된다.
         if self._roots and (self._model is None or self._model.total_count() == 0):
-            if not publish.read_shared_meta().get("published_at"):
+            outdated = publish.shared_grouping_outdated()
+            if outdated:
+                self._status_label.setText("공유 인덱스가 구버전 형식 — 다시 스캔·게시합니다.")
+            if not publish.read_shared_meta().get("published_at") or outdated:
                 self.enqueue_library_scan(self._roots, force=False, publish=True)
 
     def _clamp_and_resize(self, w: int, h: int) -> None:

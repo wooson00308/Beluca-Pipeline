@@ -27,6 +27,11 @@ _META_NAME = "index.json"
 _DB_NAME = "library.sqlite"
 _LOCAL_MARKER = "source_library_pulled.json"
 
+# 스캔(그룹핑) 로직 세대. PNG/TGA 시퀀스 묶기(3D·ball_pass 한정)가 v2.
+# 구버전 BPE 가 게시한 공유 인덱스(값 없음=0 또는 더 낮음)는 pull 하지 않는다 —
+# 낱장 인덱스가 신버전 사용자의 묶인 인덱스를 되돌리는 왕복(flip-flop) 방지.
+GROUPING_VERSION = 2
+
 
 def shared_index_dir() -> Path:
     return libcfg.config_dir() / "index"
@@ -54,6 +59,14 @@ def read_shared_meta() -> Dict[str, Any]:
 
 def read_local_marker() -> Dict[str, Any]:
     return read_json_file(local_marker_path(), {})
+
+
+def shared_grouping_outdated() -> bool:
+    """공유 인덱스가 존재하는데 구버전 그룹핑 로직으로 게시된 상태인지."""
+    shared = read_shared_meta()
+    if not str(shared.get("published_at") or ""):
+        return False
+    return int(shared.get("grouping_version") or 0) < GROUPING_VERSION
 
 
 def publish_index(conn: sqlite3.Connection) -> Dict[str, Any]:
@@ -89,6 +102,7 @@ def publish_index(conn: sqlite3.Connection) -> Dict[str, Any]:
         "published_at": _utc_now(),
         "items": int(items),
         "db": _DB_NAME,
+        "grouping_version": GROUPING_VERSION,
     }
     write_json_file(shared_meta_path(), meta)
     write_json_file(
@@ -221,6 +235,14 @@ def needs_pull_reason() -> Optional[str]:
     if not published_at:
         return None
     if not shared_db_path().is_file():
+        return None
+    # published_at 비교보다 먼저 — 구버전(낱장) 게시본은 어떤 사유로도 pull 하지 않는다.
+    if int(shared.get("grouping_version") or 0) < GROUPING_VERSION:
+        logger.warning(
+            "공유 인덱스가 구버전 그룹핑(v%s < v%s) — pull 건너뜀. 전체 재스캔·게시 필요",
+            int(shared.get("grouping_version") or 0),
+            GROUPING_VERSION,
+        )
         return None
     local = read_local_marker()
     local_at = str(local.get("published_at") or "")

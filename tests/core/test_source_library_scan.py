@@ -139,6 +139,85 @@ def test_group_entries_handles_gaps_in_frame_numbers():
     assert (it.frame_first, it.frame_last, it.frame_count) == (1001, 1009, 3)
 
 
+# ── allow_still_sequences (3D·ball_pass 카테고리 한정 opt-in) ──────────
+
+
+def test_group_entries_flag_off_png_stays_individual():
+    """플래그 OFF(기본값)에서는 PNG 121장이 예전 그대로 낱장 — 무영향 보증의 핵심."""
+    names = ["JIKGOO_persp_BW.{:04d}.png".format(n) for n in range(1, 122)]
+    items = group_entries(_entries(names))
+    assert len(items) == 121
+    assert all(it.kind == KIND_STILL for it in items)
+
+
+def test_group_entries_flag_on_png_ball_pass_becomes_one_sequence():
+    """ball_pass 실제 구조 재현: 4자리 패딩 연번 121장 → 시퀀스 1개."""
+    names = ["JIKGOO_persp_BW.{:04d}.png".format(n) for n in range(1, 122)]
+    items = group_entries(_entries(names), allow_still_sequences=True)
+    assert len(items) == 1
+    it = items[0]
+    assert it.kind == KIND_SEQUENCE
+    assert it.seq_pattern == "JIKGOO_persp_BW.%04d.png"
+    assert (it.frame_first, it.frame_last, it.frame_count) == (1, 121, 121)
+
+
+def test_group_entries_flag_on_tga_grouped_too():
+    names = ["JIKGOO_persp_vector.{:04d}.tga".format(n) for n in range(1, 121)]
+    items = group_entries(_entries(names), allow_still_sequences=True)
+    assert len(items) == 1
+    assert items[0].kind == KIND_SEQUENCE
+
+
+def test_group_entries_flag_on_two_pngs_stay_individual():
+    """3장 미만이면 플래그가 켜져 있어도 낱장 유지 (레퍼런스 세트 보호)."""
+    items = group_entries(_entries(["ref.0001.png", "ref.0002.png"]), allow_still_sequences=True)
+    assert len(items) == 2
+    assert all(it.kind == KIND_STILL for it in items)
+
+
+def test_group_entries_flag_on_three_pngs_is_boundary():
+    items = group_entries(
+        _entries(["seq.0001.png", "seq.0002.png", "seq.0003.png"]),
+        allow_still_sequences=True,
+    )
+    assert len(items) == 1
+    assert items[0].kind == KIND_SEQUENCE
+
+
+def test_group_entries_flag_on_jpg_never_grouped():
+    """JPG는 플래그와 무관하게 항상 낱장 (셋 사진 관례)."""
+    names = ["DSC.{:05d}.jpg".format(n) for n in range(5641, 5646)]
+    items = group_entries(_entries(names), allow_still_sequences=True)
+    assert len(items) == 5
+    assert all(it.kind == KIND_STILL for it in items)
+
+
+def test_group_entries_flag_on_sparse_numbers_stay_individual():
+    """날짜/타임스탬프식 번호 — 구간이 장수의 2배를 넘으면 낱장 유지 (range 폭발 방지)."""
+    names = ["shot_20240115.png", "shot_20240220.png", "shot_20240815.png"]
+    items = group_entries(_entries(names), allow_still_sequences=True)
+    assert len(items) == 3
+    assert all(it.kind == KIND_STILL for it in items)
+
+
+def test_group_entries_flag_on_mixed_padding_stays_individual():
+    """0패딩 폭 혼재 — %d 폴백이 없는 경로를 만들 수 있어 낱장 유지."""
+    items = group_entries(
+        _entries(["img_01.png", "img_02.png", "img_100.png"]),
+        allow_still_sequences=True,
+    )
+    assert len(items) == 3
+    assert all(it.kind == KIND_STILL for it in items)
+
+
+def test_group_entries_flag_on_exr_behavior_unchanged():
+    """플레이트(EXR)는 플래그와 무관 — 2장이어도 시퀀스, 가드 미적용."""
+    for flag in (False, True):
+        items = group_entries(_entries(["p.1001.exr", "p.1002.exr"]), allow_still_sequences=flag)
+        assert len(items) == 1
+        assert items[0].kind == KIND_SEQUENCE
+
+
 @pytest.mark.parametrize(
     "dir_rel,expected",
     [("", ""), ("Fire", "Fire"), ("Fire/sub/deep", "Fire")],

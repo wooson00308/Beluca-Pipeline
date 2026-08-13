@@ -127,6 +127,53 @@ def test_needs_pull_when_items_mismatch(tmp_path: Path, monkeypatch, tmp_app_dir
         conn3.close()
 
 
+def test_publish_writes_grouping_version(tmp_path: Path, monkeypatch, tmp_app_dir: Path):
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    monkeypatch.setattr(libcfg, "config_dir", lambda: shared)
+    conn = db.connect()
+    try:
+        meta = publish.publish_index(conn)
+    finally:
+        conn.close()
+    assert meta["grouping_version"] == publish.GROUPING_VERSION
+    assert publish.read_shared_meta()["grouping_version"] == publish.GROUPING_VERSION
+    assert publish.shared_grouping_outdated() is False
+
+
+def test_pull_refused_for_outdated_grouping(tmp_path: Path, monkeypatch, tmp_app_dir: Path):
+    """구버전(그룹핑 버전 없음=0) 게시본은 published_at 이 더 새로워도 pull 하지 않는다."""
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    monkeypatch.setattr(libcfg, "config_dir", lambda: shared)
+
+    conn = db.connect()
+    try:
+        items = group_entries([FileEntry("a.mov", 3, 1.0)])
+        db.replace_dir_items(conn, str(tmp_path / "m").replace("\\", "/"), "", items)
+        conn.commit()
+        publish.publish_index(conn)
+    finally:
+        conn.close()
+
+    # 구버전이 재게시한 상황 재현: meta 에서 grouping_version 을 제거하고 시각을 미래로
+    from bpe.core.atomic_io import read_json_file, write_json_file
+
+    meta_path = publish.shared_meta_path()
+    meta = read_json_file(meta_path, {})
+    meta.pop("grouping_version", None)
+    meta["published_at"] = "2999-01-01T00:00:00Z"
+    meta["items"] = 999
+    write_json_file(meta_path, meta)
+
+    assert publish.shared_grouping_outdated() is True
+    assert publish.needs_pull_reason() is None
+    assert publish.needs_pull() is False
+    meta2, err = publish.try_pull_index_with_status()
+    assert meta2 is None
+    assert err is None
+
+
 def test_needs_pull_when_root_missing_locally(tmp_path: Path, monkeypatch, tmp_app_dir: Path):
     shared = tmp_path / "shared"
     shared.mkdir()

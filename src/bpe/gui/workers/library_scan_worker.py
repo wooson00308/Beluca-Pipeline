@@ -20,6 +20,8 @@ from bpe.core import media_thumbs
 from bpe.core import source_library_db as db
 from bpe.core.logging import get_logger
 from bpe.core.source_library_scan import (
+    STILL_SEQUENCE_CATEGORIES,
+    category_of,
     dir_mtime,
     group_entries,
     join_path,
@@ -158,7 +160,9 @@ class LibraryScanWorker(QThread):
                 if pack_item is not None:
                     items = [pack_item]
                 else:
-                    items = group_entries(files)
+                    # 3D·ball_pass 카테고리에서만 PNG/TGA 연번을 시퀀스로 묶는다 (opt-in).
+                    allow_still = category_of(dir_rel).casefold() in STILL_SEQUENCE_CATEGORIES
+                    items = group_entries(files, allow_still_sequences=allow_still)
                 indexed_items += db.replace_dir_items(conn, root_n, dir_rel, items, mtime)
                 since_commit += 1
                 if since_commit >= _COMMIT_EVERY_DIRS:
