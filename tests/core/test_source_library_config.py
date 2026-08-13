@@ -1,4 +1,4 @@
-"""소스 라이브러리 공유 설정 — 루트↔그룹·CS 고정."""
+"""소스 라이브러리 공유 설정 — 루트↔그룹·CS 자동 생성(순서 이동 가능, 삭제 불가)."""
 
 from __future__ import annotations
 
@@ -588,11 +588,30 @@ def test_reorder_top_level_group():
     names = [g["name"] for g in libcfg.view_groups(lib)]
     assert names == [libcfg.COMMON_LABEL, "A", "C", "B"]
 
-    # CS(builtin)는 이동 대상/기준 어느 쪽으로도 거부되고 항상 맨 앞 고정
-    assert not libcfg.reorder_top_level_group(lib, libcfg.COMMON_LABEL, "A", after=False)
-    assert not libcfg.reorder_top_level_group(lib, "B", libcfg.COMMON_LABEL, after=False)
+    # CS(builtin)도 순서 이동 가능 (삭제·이름변경만 불가) — 이동 후 위치가 유지된다
+    assert libcfg.reorder_top_level_group(lib, libcfg.COMMON_LABEL, "C", after=True)
     names = [g["name"] for g in libcfg.view_groups(lib)]
-    assert names[0] == libcfg.COMMON_LABEL
+    assert names == ["A", "C", libcfg.COMMON_LABEL, "B"]
+
+    # 저장·로드 왕복 후에도 CS 위치가 되돌아가지 않는다
+    libcfg.save_library(lib)
+    lib2 = libcfg.load_library()
+    names2 = [g["name"] for g in libcfg.view_groups(lib2)]
+    assert names2 == ["A", "C", libcfg.COMMON_LABEL, "B"]
+
+    # 그룹이 2개뿐이어도(CS+1) 상호 교환 가능
+    lib3 = libcfg.empty_library()
+    libcfg.set_scope(
+        lib3,
+        libcfg.COMMON_SCOPE,
+        ["W:/lib"],
+        [
+            {"name": libcfg.COMMON_LABEL, "folders": ["W:/lib"], "children": []},
+            {"name": "MMK", "folders": [], "children": []},
+        ],
+    )
+    assert libcfg.reorder_top_level_group(lib3, "MMK", libcfg.COMMON_LABEL, after=False)
+    assert [g["name"] for g in libcfg.view_groups(lib3)] == ["MMK", libcfg.COMMON_LABEL]
 
 
 def test_promote_preserves_bag_and_children():

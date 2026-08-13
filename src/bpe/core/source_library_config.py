@@ -315,17 +315,20 @@ def migrate_groups_to_roots(
 ) -> Dict[str, Any]:
     """그룹 정규화. v2 children 은 보존. 최상위 folders 는 루트만."""
     roots = [normalize_path(r) for r in (scope.get("roots") or [])]
-    raw_groups = list(scope.get("groups") or [])
+    raw_groups = [g for g in (scope.get("groups") or []) if isinstance(g, dict)]
+    # 처리 순서만 CS-우선 — v1 레거시 흡수(아래)가 "CS 루트가 assigned_roots 에
+    # 먼저 들어와 있음"에 의존하기 때문. 출력 순서는 파일에 저장된 배열 순서를
+    # 그대로 보존한다 (CS 도 사용자가 순서를 바꿀 수 있다 — 삭제·이름변경만 불가).
     ordered = sorted(
-        [g for g in raw_groups if isinstance(g, dict)],
-        key=lambda g: 0 if str(g.get("name") or "").strip() == COMMON_LABEL else 1,
+        enumerate(raw_groups),
+        key=lambda p: 0 if str(p[1].get("name") or "").strip() == COMMON_LABEL else 1,
     )
-    migrated: List[Dict[str, Any]] = []
+    migrated: List[Tuple[int, Dict[str, Any]]] = []  # (원래 배열 인덱스, 정규화 그룹)
     seen_names: set = set()
     assigned_roots: set = set()
     legacy_into_cs: List[str] = []
 
-    for g in ordered:
+    for orig_idx, g in ordered:
         name = str(g.get("name") or "").strip()
         if not name or name == OTHER_GROUP or name in seen_names:
             continue
@@ -350,49 +353,60 @@ def migrate_groups_to_roots(
         # org=folder 는 루트를 갖지 않도록 강제 (인덱싱 훔치기 방지)
         if is_org_folder(g):
             migrated.append(
-                _emit_group(
-                    name,
-                    [],
-                    children,
-                    org_folder=True,
-                    bag=_normalize_bag(g.get("bag")),
+                (
+                    orig_idx,
+                    _emit_group(
+                        name,
+                        [],
+                        children,
+                        org_folder=True,
+                        bag=_normalize_bag(g.get("bag")),
+                    ),
                 )
             )
         else:
             migrated.append(
-                _emit_group(
-                    name,
-                    folders_out,
-                    children,
-                    org_folder=False,
-                    bag=_normalize_bag(g.get("bag")),
+                (
+                    orig_idx,
+                    _emit_group(
+                        name,
+                        folders_out,
+                        children,
+                        org_folder=False,
+                        bag=_normalize_bag(g.get("bag")),
+                    ),
                 )
             )
         seen_names.add(name)
 
-    if COMMON_LABEL not in seen_names:
-        migrated.insert(0, _emit_group(COMMON_LABEL, [], [], org_folder=False))
-    else:
-        cs_idx = next(i for i, g in enumerate(migrated) if g["name"] == COMMON_LABEL)
-        if cs_idx != 0:
-            migrated.insert(0, migrated.pop(cs_idx))
+    # 출력은 원래 배열 순서로 복원 — CS 를 맨 앞으로 되돌리지 않는다.
+    migrated.sort(key=lambda p: p[0])
+    groups_out: List[Dict[str, Any]] = [g for _i, g in migrated]
 
-    cs_folders = list(migrated[0].get("folders") or [])
+    # CS 는 항상 존재해야 하므로(삭제 불가) 없으면 자동 생성. 위치는 강제하지 않되
+    # 신규 생성 시에만 관례상 맨 앞에 넣는다.
+    cs_group = next((g for g in groups_out if g["name"] == COMMON_LABEL), None)
+    if cs_group is None:
+        cs_group = _emit_group(COMMON_LABEL, [], [], org_folder=False)
+        groups_out.insert(0, cs_group)
+
+    # CS 후처리는 인덱스가 아니라 dict 참조로 — CS 가 중간에 있어도 안전.
+    cs_folders = list(cs_group.get("folders") or [])
     for r in legacy_into_cs:
         if r not in cs_folders:
             cs_folders.append(r)
             assigned_roots.add(r)
-    migrated[0]["folders"] = cs_folders
-    if "children" not in migrated[0]:
-        migrated[0]["children"] = []
-    migrated[0].pop("org", None)
+    cs_group["folders"] = cs_folders
+    if "children" not in cs_group:
+        cs_group["children"] = []
+    cs_group.pop("org", None)
 
     if fill_empty_cs and roots and not assigned_roots:
-        migrated[0]["folders"] = list(roots)
+        cs_group["folders"] = list(roots)
 
     return {
         "roots": roots,
-        "groups": migrated,
+        "groups": groups_out,
         "hidden_folders": _normalize_hidden_folders(scope.get("hidden_folders")),
     }
 
@@ -1055,12 +1069,10 @@ def reorder_folder_sibling(
 def reorder_top_level_group(
     library: Dict[str, Any], group_name: str, before_name: str, *, after: bool = False
 ) -> bool:
-    """최상위 그룹(폴더) 형제 순서. Compositing Source 는 항상 맨 앞 유지."""
+    """최상위 그룹(폴더) 형제 순서 변경. Compositing Source 도 이동 가능 (삭제만 불가)."""
     gname = (group_name or "").strip()
     bname = (before_name or "").strip()
     if not gname or not bname or gname == bname:
-        return False
-    if is_builtin_group(gname) or is_builtin_group(bname):
         return False
     common = migrate_groups_to_roots(_normalize_scope(library.get("common")), fill_empty_cs=False)
     groups = [copy.deepcopy(g) for g in (common.get("groups") or []) if isinstance(g, dict)]
@@ -1081,13 +1093,10 @@ def reorder_top_level_group(
     if insert_at is None:
         return False
     rest.insert(insert_at, moving)
-    # CS 는 맨 앞
-    cs = [g for g in rest if str(g.get("name") or "") == COMMON_LABEL]
-    others = [g for g in rest if str(g.get("name") or "") != COMMON_LABEL]
     library["common"] = migrate_groups_to_roots(
         {
             "roots": list(common.get("roots") or []),
-            "groups": cs + others,
+            "groups": rest,
             "hidden_folders": common.get("hidden_folders"),
         },
         fill_empty_cs=False,

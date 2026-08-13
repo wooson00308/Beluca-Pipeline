@@ -129,7 +129,7 @@ class _GroupTree(QTreeWidget):
         elif len(groups) == 1 and not virtuals and not nesteds and not vassigns:
             it = groups[0]
             gname = str(it.data(0, _ROLE_PATH) or "")
-            if not gname or libcfg.is_builtin_group(gname):
+            if not gname:
                 return
             mime.setData(_MIME_GROUP, QByteArray(gname.encode("utf-8")))
             mime.setText(gname)
@@ -1006,7 +1006,7 @@ class SourceLibrarySettingsDialog(QDialog):
             self.drop_top_level_group(group_name, target)
             return
         if not libcfg.reorder_top_level_group(self._library, group_name, tpath, after=after):
-            self._status.setText("최상위 폴더 순서를 바꾸지 못했습니다 (CS는 고정).")
+            self._status.setText("최상위 폴더 순서를 바꾸지 못했습니다.")
             return
         self._persist_and_status(
             "폴더 순서 변경: 「{}」".format(group_name),
@@ -1340,8 +1340,6 @@ class SourceLibrarySettingsDialog(QDialog):
         if kind in (_KIND_GROUP, _KIND_VIRTUAL):
             if not path:
                 return
-            if kind == _KIND_GROUP and libcfg.is_builtin_group(path):
-                return  # CS는 항상 맨 위 고정 — 이동 메뉴 없음
             prev_path = self._reorder_neighbor_path(item, kind, up=True)
             next_path = self._reorder_neighbor_path(item, kind, up=False)
             menu = QMenu(self)
@@ -1379,7 +1377,6 @@ class SourceLibrarySettingsDialog(QDialog):
 
         트리에는 VASSIGN(절대경로)·NESTED(짧은 이름)·UNFILED(그룹명)가 섞여 있어
         인덱스 ±1을 그대로 쓰면 안 되고, 같은 kind 만 스킵-스캔으로 찾는다.
-        최상위에서 CS(builtin)는 항상 index 0 고정이라 그 위로는 못 올라간다.
         """
         step = -1 if up else 1
         parent = item.parent()
@@ -1391,8 +1388,6 @@ class SourceLibrarySettingsDialog(QDialog):
                 ckind = str(cand.data(0, _ROLE_KIND) or "")
                 cpath = str(cand.data(0, _ROLE_PATH) or "")
                 if ckind == kind and cpath:
-                    if libcfg.is_builtin_group(cpath):
-                        return ""  # CS 위로는 이동 불가
                     return cpath
                 j += step
             return ""
@@ -1415,7 +1410,7 @@ class SourceLibrarySettingsDialog(QDialog):
             return
         if kind == _KIND_GROUP:
             if not libcfg.reorder_top_level_group(self._library, path, neighbor_path, after=after):
-                self._status.setText("최상위 폴더 순서를 바꾸지 못했습니다 (CS는 고정).")
+                self._status.setText("최상위 폴더 순서를 바꾸지 못했습니다.")
                 return
             self._persist_and_status(
                 "폴더 순서 변경: 「{}」".format(path),
