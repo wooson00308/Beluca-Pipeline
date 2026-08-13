@@ -119,14 +119,22 @@ class SourceLibraryDialog(QDialog):
         self._sync_index()
         self._open_index()
         self._reload_tree(initial=True)
-        # 공유 인덱스가 없거나 구버전 그룹핑 게시본이면 로컬 스캔 폴백 (원본은 읽기만).
-        # 구버전 게시본은 pull 이 거부되므로, 폴백까지 막으면 신규 설치자가 영구 빈 화면이 된다.
-        if self._roots and (self._model is None or self._model.total_count() == 0):
+        # 로컬 인덱스가 "정말 비어 있을 때만" 스캔 폴백 (원본은 읽기만).
+        # 판정은 필터 무관 전체 건수여야 한다 — model.total_count() 는 창 직후
+        # "소분류 미선택" 필터라 항상 0이라서, 껐다 켤 때마다 전체 스캔이 도는 버그가 있었다.
+        # 로컬에 데이터가 있으면 자동 스캔 금지: 구버전 공유본 전환은 설정의
+        # 「전체 다시 스캔·게시」(force) 1회로만 수행한다.
+        local_total = db.total_indexed(self._conn) if self._conn is not None else 0
+        if self._roots and local_total == 0:
             outdated = publish.shared_grouping_outdated()
             if outdated:
                 self._status_label.setText("공유 인덱스가 구버전 형식 — 다시 스캔·게시합니다.")
             if not publish.read_shared_meta().get("published_at") or outdated:
                 self.enqueue_library_scan(self._roots, force=False, publish=True)
+        elif self._roots and publish.shared_grouping_outdated():
+            self._status_label.setText(
+                "공유 인덱스가 구버전 형식 — 설정에서 「전체 다시 스캔·게시」 1회가 필요합니다."
+            )
 
     def _clamp_and_resize(self, w: int, h: int) -> None:
         screen = QGuiApplication.primaryScreen()
@@ -366,9 +374,15 @@ class SourceLibraryDialog(QDialog):
             return
         shared = publish.read_shared_meta()
         if shared.get("published_at"):
-            self._status_label.setText(
-                "공유 인덱스 최신 ({:,}개)".format(int(shared.get("items") or 0))
-            )
+            if publish.shared_grouping_outdated():
+                # pull 이 "구버전 게시본" 사유로 거부된 경우 — "최신"이라고 하면 정반대 오해.
+                self._status_label.setText(
+                    "공유 인덱스가 구버전 형식이라 받지 않음 — 전체 다시 스캔·게시 필요"
+                )
+            else:
+                self._status_label.setText(
+                    "공유 인덱스 최신 ({:,}개)".format(int(shared.get("items") or 0))
+                )
         self._warn_empty_group_index()
 
     def _on_index_sync_error(self, err: str) -> None:
