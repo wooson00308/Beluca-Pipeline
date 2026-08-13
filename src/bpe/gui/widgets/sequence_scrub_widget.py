@@ -1,4 +1,4 @@
-# @cursor-change: 2026-08-07, 0.11.x, 팩 preview_file 있으면 MOV 재생
+# @cursor-change: 2026-08-13, 0.12.x, 프리뷰 2배속(1x/2x) 토글 — 항목 전환 시 1x 리셋
 """소스 라이브러리 프리뷰 패널.
 
 동영상은 ``QVideoWidget`` 으로 GPU 직통 재생한다 (프레임을 파이썬으로 복사하지 않음).
@@ -173,6 +173,7 @@ class MediaPreviewWidget(QWidget):
         self._current_frame = 0
         self._playing = False
         self._muted = True
+        self._playback_rate = 1.0
         self._player: Optional[QMediaPlayer] = None
         self._audio: Optional[QAudioOutput] = None
         self._pending_thumb: Optional[QPixmap] = None
@@ -254,6 +255,15 @@ class MediaPreviewWidget(QWidget):
         self._mute_btn.clicked.connect(self._toggle_mute)
         ctl.addWidget(self._mute_btn, 0)
 
+        self._rate_btn = QToolButton()
+        self._rate_btn.setText("1x")
+        self._rate_btn.setToolTip("재생 속도 (1배속 / 2배속)")
+        self._rate_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._rate_btn.setFixedSize(QSize(28, 24))
+        self._rate_btn.setStyleSheet(btn_style)
+        self._rate_btn.clicked.connect(self._toggle_playback_rate)
+        ctl.addWidget(self._rate_btn, 0)
+
         self._info = QLabel("")
         self._info.setFixedHeight(20)
         self._info.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
@@ -322,6 +332,14 @@ class MediaPreviewWidget(QWidget):
         self._slider.setEnabled(False)
         self._play_btn.setText("\u25b6")
         self._play_btn.setEnabled(False)
+        # 항목이 바뀌면 배속은 항상 1x 로 되돌린다. 변수만 바꾸면 안 되고
+        # 타이머 간격·살아있는 플레이어의 rate 까지 전부 복원해야 한다
+        # (플레이어는 한 번 만들면 재사용되고 setSource 가 rate 를 리셋해 주지 않음).
+        self._playback_rate = 1.0
+        self._rate_btn.setText("1x")
+        self._play_timer.setInterval(_SEQ_PLAY_INTERVAL_MS)
+        if self._player is not None:
+            self._player.setPlaybackRate(1.0)
         self._info.setText("")
         self._stack.setCurrentIndex(0)
         self._canvas.set_placeholder("항목을 선택하세요")
@@ -355,6 +373,22 @@ class MediaPreviewWidget(QWidget):
         if self._audio is not None:
             self._audio.setMuted(self._muted)
         self._mute_btn.setText("\U0001f507" if self._muted else "\U0001f50a")
+
+    def _toggle_playback_rate(self) -> None:
+        """1x ↔ 2x 토글. 분기 없이 타이머·플레이어 양쪽에 항상 적용한다.
+
+        플레이어는 MOV 를 한 번이라도 재생하면 영구 재사용되므로 존재 여부로
+        모드를 가르면 안 된다 (시퀀스 배속이 죽는다). 타이머 간격 조정은
+        movie 모드에서 무해하고(틱 콜백이 frames 모드 아니면 즉시 반환),
+        쉬고 있는 플레이어의 rate 설정도 무해하다.
+        """
+        rates = [1.0, 2.0]
+        idx = rates.index(self._playback_rate) if self._playback_rate in rates else 0
+        self._playback_rate = rates[(idx + 1) % len(rates)]
+        self._rate_btn.setText("2x" if self._playback_rate == 2.0 else "1x")
+        self._play_timer.setInterval(int(_SEQ_PLAY_INTERVAL_MS / self._playback_rate))
+        if self._player is not None:
+            self._player.setPlaybackRate(self._playback_rate)
 
     # ── 동영상 ──────────────────────────────────────────────────────
 
