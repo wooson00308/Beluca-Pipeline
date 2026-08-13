@@ -71,14 +71,8 @@ class _GroupTree(QTreeWidget):
         self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.setViewportMargins(0, 10, 0, 0)
-        self.setStyleSheet(
-            "QTreeWidget {{ background-color: {bg}; border: 1px solid {bd};"
-            " border-radius: 4px; color: {tx}; }}"
-            "QTreeWidget::item {{ padding: 5px 8px; }}"
-            "QTreeWidget::item:selected {{ background-color: {acc}; color: #ffffff; }}".format(
-                bg=theme.PANEL_BG, bd=theme.BORDER, tx=theme.TEXT, acc=theme.ACCENT
-            )
-        )
+        self.setIndentation(theme.TREE_INDENT)
+        self.setStyleSheet(theme.tree_stylesheet())
 
     def startDrag(self, supported_actions: Qt.DropAction) -> None:  # noqa: N802
         roots = [i for i in self.selectedItems() if str(i.data(0, _ROLE_KIND) or "") == _KIND_ROOT]
@@ -362,7 +356,8 @@ class SourceLibrarySettingsDialog(QDialog):
         self._roots_tree = QTreeWidget()
         self._roots_tree.setHeaderHidden(True)
         self._roots_tree.setViewportMargins(0, 10, 0, 0)
-        self._roots_tree.setStyleSheet(self._tree_style())
+        self._roots_tree.setIndentation(theme.TREE_INDENT)
+        self._roots_tree.setStyleSheet(theme.tree_stylesheet())
         self._roots_tree.setDragEnabled(True)
         self._roots_tree.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
         self._roots_tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -500,16 +495,6 @@ class SourceLibrarySettingsDialog(QDialog):
             "color: {}; font-size: {}px;".format(theme.TEXT_LABEL, theme.FONT_SIZE_SMALL)
         )
         return lbl
-
-    def _tree_style(self) -> str:
-        return (
-            "QTreeWidget {{ background-color: {bg}; border: 1px solid {bd};"
-            " border-radius: 4px; color: {tx}; }}"
-            "QTreeWidget::item {{ padding: 5px 8px; }}"
-            "QTreeWidget::item:selected {{ background-color: {acc}; color: #ffffff; }}".format(
-                bg=theme.PANEL_BG, bd=theme.BORDER, tx=theme.TEXT, acc=theme.ACCENT
-            )
-        )
 
     def resolve_drop_group(self, target: Optional[QTreeWidgetItem]) -> str:
         """드롭 대상에서 최상위 그룹 이름을 찾는다. 없으면 배정 해제."""

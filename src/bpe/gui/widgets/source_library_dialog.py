@@ -192,6 +192,7 @@ class SourceLibraryDialog(QDialog):
         self._preview.setMinimumHeight(230)
         self._preview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         left_lay.addWidget(self._preview, 0)
+        left_lay.addSpacing(10)  # 프리뷰와 분류 박스 사이 여백 (라벨↔트리 간격은 유지)
 
         cat_title = QLabel("분류")
         cat_title.setStyleSheet(
@@ -203,14 +204,8 @@ class SourceLibraryDialog(QDialog):
         self._tree.setHeaderHidden(True)
         self._tree.setMinimumHeight(280)
         self._tree.setViewportMargins(0, 10, 0, 0)
-        self._tree.setStyleSheet(
-            "QTreeWidget {{ background-color: {bg}; border: 1px solid {bd};"
-            " border-radius: 4px; color: {tx}; }}"
-            "QTreeWidget::item {{ padding: 5px 8px; }}"
-            "QTreeWidget::item:selected {{ background-color: {acc}; color: #ffffff; }}".format(
-                bg=theme.PANEL_BG, bd=theme.BORDER, tx=theme.TEXT, acc=theme.ACCENT
-            )
-        )
+        self._tree.setIndentation(theme.TREE_INDENT)
+        self._tree.setStyleSheet(theme.tree_stylesheet())
         self._tree.currentItemChanged.connect(lambda *_: self._on_tree_selection())
         left_lay.addWidget(self._tree, 1)
         splitter.addWidget(left)

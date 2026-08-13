@@ -36,6 +36,11 @@ FONT_SIZE_TITLE = 20
 FONT_SIZE_SUBTITLE = 13
 FONT_SIZE_BRAND = 26
 FONT_SIZE_BRAND_SUB = 11
+FONT_SIZE_TREE = 14  # 소스 라이브러리 분류/폴더 트리 전용 (전역 13보다 한 단계 큼)
+
+# 라이브러리 트리 펼침 화살표 — 기본(~9px) 대비 20% 확대
+TREE_ARROW_SIZE = 6  # 삼각형 밑변 절반 px (border 두께)
+TREE_INDENT = 24  # QTreeWidget.setIndentation 값 (기본 20)
 
 SIDEBAR_WIDTH = 180
 FORM_LABEL_WIDTH = 120
@@ -82,6 +87,29 @@ def task_status_badge_colors(status_code: str) -> Tuple[str, str]:
     """Return (background, foreground) hex for a ShotGrid task status code."""
     key = (status_code or "").strip().lower()
     return TASK_STATUS_COLORS.get(key, (PANEL_BG, TEXT))
+
+
+def tree_stylesheet() -> str:
+    """소스 라이브러리 트리(분류·설정 좌/우) 공용 QSS.
+
+    펼침 화살표는 이미지 자산 없이 CSS border 삼각형으로 그린다
+    (``QComboBox::down-arrow`` 와 같은 기법). 전역 스타일이 아니라
+    이 함수를 명시 적용한 트리에만 먹으므로 다른 탭(My Tasks 등)에는
+    영향을 주지 않는다.
+    """
+    a = TREE_ARROW_SIZE
+    return (
+        "QTreeWidget {{ background-color: {bg}; border: 1px solid {bd};"
+        " border-radius: 4px; color: {tx}; font-size: {fs}px; }}"
+        "QTreeWidget::item {{ padding: 5px 8px; }}"
+        "QTreeWidget::item:selected {{ background-color: {acc}; color: #ffffff; }}"
+        "QTreeWidget::branch:closed:has-children {{ image: none;"
+        " border-top: {a}px solid transparent; border-bottom: {a}px solid transparent;"
+        " border-left: {b}px solid {acc}; margin: 7px 7px; }}"
+        "QTreeWidget::branch:open:has-children {{ image: none;"
+        " border-left: {a}px solid transparent; border-right: {a}px solid transparent;"
+        " border-top: {b}px solid {acc}; margin: 9px 5px; }}"
+    ).format(bg=PANEL_BG, bd=BORDER, tx=TEXT, acc=ACCENT, fs=FONT_SIZE_TREE, a=a, b=a + 1)
 
 
 def build_stylesheet() -> str:
