@@ -567,7 +567,8 @@ def test_reorder_folder_sibling():
     assert "A" in names and "B" in names
 
 
-def test_reorder_top_level_group():
+def test_reorder_top_level_group(tmp_path: Path, monkeypatch, tmp_app_dir: Path):
+    monkeypatch.setattr(libcfg, "config_dir", lambda: tmp_path / "shared")
     lib = libcfg.empty_library()
     libcfg.set_scope(
         lib,
