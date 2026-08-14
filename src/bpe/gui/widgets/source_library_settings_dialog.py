@@ -875,6 +875,17 @@ class SourceLibrarySettingsDialog(QDialog):
         return {}
 
     def drop_top_level_group(self, group_name: str, target: Optional[QTreeWidgetItem]) -> None:
+        if libcfg.is_builtin_group(group_name):
+            # CS는 순서 이동만 허용 — 다른 그룹/폴더 "안으로" 넣는 건 항상 거부된다.
+            # 예전엔 여기서 promote_top_level_to_virtual()이 실패하며 "루트를 먼저
+            # 빼세요"라는 오해 유발 메시지가 떴는데, 그 안내를 따라가면 실제로 CS의
+            # 등록 루트가 삭제되는 사고로 이어질 수 있었다.
+            self._status.setText(
+                "「{}」는 다른 그룹 안으로 넣을 수 없습니다 (순서 이동만 가능합니다).".format(
+                    libcfg.COMMON_LABEL
+                )
+            )
+            return
         info = self._drop_target_info(target)
         kind = info.get("kind") or ""
         parent = info.get("parent_group") or ""
