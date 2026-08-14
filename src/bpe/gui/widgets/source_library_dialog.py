@@ -200,7 +200,6 @@ class SourceLibraryDialog(QDialog):
         self._tree.setHeaderHidden(True)
         self._tree.setMinimumHeight(280)
         self._tree.setViewportMargins(0, 10, 0, 0)
-        self._tree.setIndentation(theme.TREE_INDENT)
         self._tree.setStyleSheet(theme.tree_stylesheet())
         self._tree.currentItemChanged.connect(lambda *_: self._on_tree_selection())
         left_lay.addWidget(self._tree, 1)

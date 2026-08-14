@@ -71,7 +71,6 @@ class _GroupTree(QTreeWidget):
         self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.setViewportMargins(0, 10, 0, 0)
-        self.setIndentation(theme.TREE_INDENT)
         self.setStyleSheet(theme.tree_stylesheet())
 
     def startDrag(self, supported_actions: Qt.DropAction) -> None:  # noqa: N802
@@ -356,7 +355,6 @@ class SourceLibrarySettingsDialog(QDialog):
         self._roots_tree = QTreeWidget()
         self._roots_tree.setHeaderHidden(True)
         self._roots_tree.setViewportMargins(0, 10, 0, 0)
-        self._roots_tree.setIndentation(theme.TREE_INDENT)
         self._roots_tree.setStyleSheet(theme.tree_stylesheet())
         self._roots_tree.setDragEnabled(True)
         self._roots_tree.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)

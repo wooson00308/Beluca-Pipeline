@@ -39,8 +39,7 @@ FONT_SIZE_BRAND_SUB = 11
 FONT_SIZE_TREE = 14  # 소스 라이브러리 분류/폴더 트리 전용 (전역 13보다 한 단계 큼)
 
 # 라이브러리 트리 펼침 화살표 — 기본(~9px) 대비 20% 확대
-TREE_ARROW_SIZE = 6  # 삼각형 밑변 절반 px (border 두께)
-TREE_INDENT = 24  # QTreeWidget.setIndentation 값 (기본 20)
+TREE_ARROW_SIZE = 6  # 뾰족한 끝 방향 길이 px (border 두께)
 
 SIDEBAR_WIDTH = 180
 FORM_LABEL_WIDTH = 120
@@ -93,23 +92,31 @@ def tree_stylesheet() -> str:
     """소스 라이브러리 트리(분류·설정 좌/우) 공용 QSS.
 
     펼침 화살표는 이미지 자산 없이 CSS border 삼각형으로 그린다
-    (``QComboBox::down-arrow`` 와 같은 기법). 전역 스타일이 아니라
-    이 함수를 명시 적용한 트리에만 먹으므로 다른 탭(My Tasks 등)에는
-    영향을 주지 않는다.
+    (``QComboBox::down-arrow`` 와 같은 기법, 아래 106행 부근 참고). 콤보박스의
+    ``::down-arrow`` 는 서브컨트롤 기본 박스가 원래 작아서 별 지정 없이도
+    되지만, ``::branch`` 는 기본 박스가 (들여쓰기 폭 × 행높이) 만큼 커서
+    ``width: 0; height: 0;`` 을 명시해야 막대가 아니라 삼각형으로 접힌다
+    (2026-08-13 사고 원인 — 이 두 줄이 빠져서 민트색 사각형으로 렌더링됐음).
+    전역 스타일이 아니라 이 함수를 명시 적용한 트리에만 먹으므로 다른 탭
+    (My Tasks 등)에는 영향을 주지 않는다.
     """
-    a = TREE_ARROW_SIZE
+    point = TREE_ARROW_SIZE  # 뾰족한 끝 방향 길이(border 두께)
+    span = TREE_ARROW_SIZE - 1  # 밑변 절반(반대쪽 두 border 두께)
     return (
         "QTreeWidget {{ background-color: {bg}; border: 1px solid {bd};"
         " border-radius: 4px; color: {tx}; font-size: {fs}px; }}"
         "QTreeWidget::item {{ padding: 5px 8px; }}"
         "QTreeWidget::item:selected {{ background-color: {acc}; color: #ffffff; }}"
+        "QTreeWidget::branch {{ background: {bg}; }}"
         "QTreeWidget::branch:closed:has-children {{ image: none;"
-        " border-top: {a}px solid transparent; border-bottom: {a}px solid transparent;"
-        " border-left: {b}px solid {acc}; margin: 7px 7px; }}"
+        " width: 0px; height: 0px;"
+        " border-top: {span}px solid transparent; border-bottom: {span}px solid transparent;"
+        " border-left: {point}px solid {acc}; margin: 9px 7px; }}"
         "QTreeWidget::branch:open:has-children {{ image: none;"
-        " border-left: {a}px solid transparent; border-right: {a}px solid transparent;"
-        " border-top: {b}px solid {acc}; margin: 9px 5px; }}"
-    ).format(bg=PANEL_BG, bd=BORDER, tx=TEXT, acc=ACCENT, fs=FONT_SIZE_TREE, a=a, b=a + 1)
+        " width: 0px; height: 0px;"
+        " border-left: {span}px solid transparent; border-right: {span}px solid transparent;"
+        " border-top: {point}px solid {acc}; margin: 11px 5px; }}"
+    ).format(bg=PANEL_BG, bd=BORDER, tx=TEXT, acc=ACCENT, fs=FONT_SIZE_TREE, point=point, span=span)
 
 
 def build_stylesheet() -> str:
