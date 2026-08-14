@@ -119,22 +119,18 @@ class SourceLibraryDialog(QDialog):
         self._sync_index()
         self._open_index()
         self._reload_tree(initial=True)
-        # 로컬 인덱스가 "정말 비어 있을 때만" 스캔 폴백 (원본은 읽기만).
-        # 판정은 필터 무관 전체 건수여야 한다 — model.total_count() 는 창 직후
-        # "소분류 미선택" 필터라 항상 0이라서, 껐다 켤 때마다 전체 스캔이 도는 버그가 있었다.
-        # 로컬에 데이터가 있으면 자동 스캔 금지: 구버전 공유본 전환은 설정의
-        # 「전체 다시 스캔·게시」(force) 1회로만 수행한다.
-        local_total = db.total_indexed(self._conn) if self._conn is not None else 0
-        if self._roots and local_total == 0:
+        # 등록 루트 중 로컬 인덱스에 없는 게 있을 때만 스캔 폴백 (원본은 읽기만).
+        # 전역 건수(model.total_count()/db.total_indexed())로 판정하면 안 된다 —
+        # 루트를 새로 추가하거나 빼면 유령 데이터 때문에 오작동한다("서버에 등록하면
+        # 다른 PC도 자동 공유"라는 요구를 못 지킴). roots_missing_from_local()은
+        # 등록 루트 기준으로 보고 내부적으로 예외도 안전 처리한다.
+        missing_roots = publish.roots_missing_from_local(self._roots) if self._roots else []
+        if missing_roots:
             outdated = publish.shared_grouping_outdated()
             if outdated:
                 self._status_label.setText("공유 인덱스가 구버전 형식 — 다시 스캔·게시합니다.")
             if not publish.read_shared_meta().get("published_at") or outdated:
                 self.enqueue_library_scan(self._roots, force=False, publish=True)
-        elif self._roots and publish.shared_grouping_outdated():
-            self._status_label.setText(
-                "공유 인덱스가 구버전 형식 — 설정에서 「전체 다시 스캔·게시」 1회가 필요합니다."
-            )
 
     def _clamp_and_resize(self, w: int, h: int) -> None:
         screen = QGuiApplication.primaryScreen()
