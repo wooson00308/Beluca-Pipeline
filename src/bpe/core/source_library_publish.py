@@ -113,7 +113,13 @@ def publish_index(conn: sqlite3.Connection) -> Dict[str, Any]:
     return meta
 
 
-def _local_total_safe() -> int:
+def _local_total_safe() -> Optional[int]:
+    """로컬 인덱스 건수. 파일 없음=0, 열기/조회 실패는 "모름"(None).
+
+    실패를 0으로 돌려주면 "로컬이 비었다"로 오판해 건수 비교 pull 이 로컬
+    인덱스를 공유본으로 되돌리는 사고가 난다(예: 다른 인스턴스가 잡은 DB 락).
+    모르면 모른다고 반환하고, 호출부는 건수 비교를 건너뛴다.
+    """
     path = db.index_path()
     if not path.is_file():
         return 0
@@ -122,8 +128,8 @@ def _local_total_safe() -> int:
         conn = db.connect(path)
         return db.total_indexed(conn)
     except (OSError, sqlite3.DatabaseError) as exc:
-        logger.debug("로컬 인덱스 건수 조회 실패: %s", exc)
-        return 0
+        logger.debug("로컬 인덱스 건수 조회 실패(모름 처리): %s", exc)
+        return None
     finally:
         if conn is not None:
             try:
@@ -179,8 +185,10 @@ def roots_missing_from_local(
             if db.count_for_root(conn, root_n) <= 0:
                 missing.append(root_n)
     except (OSError, sqlite3.DatabaseError) as exc:
-        logger.debug("로컬 루트 커버리지 조회 실패: %s", exc)
-        return [libcfg.normalize_path(r) for r in roots if r]
+        # 조회 실패(락 등)를 "전부 빠짐"으로 돌려주면 폴백 스캔·게시가 오발된다.
+        # 모르면 빠진 것 없음으로 취급하고 다음 기회에 다시 본다 (fail-closed).
+        logger.debug("로컬 루트 커버리지 조회 실패(빠짐 없음 처리): %s", exc)
+        return []
     finally:
         if conn is not None:
             try:
@@ -252,13 +260,16 @@ def needs_pull_reason() -> Optional[str]:
     shared_items = int(shared.get("items") or 0)
     local_count = _local_total_safe()
     marker_items = int(local.get("items") or 0)
-    # 로컬이 공유보다 적으면 마커가 같아도 강제 pull (MMK 누락 케이스)
-    if shared_items > 0 and local_count < shared_items:
-        return "items_mismatch local={} shared={} marker={}".format(
-            local_count, shared_items, marker_items
-        )
-    if marker_items > 0 and local_count < marker_items:
-        return "marker_items_mismatch local={} marker={}".format(local_count, marker_items)
+    # 로컬 건수를 모르면(DB 락 등) 건수 비교로 pull 을 강제하지 않는다 —
+    # "모름"을 0으로 취급하면 멀쩡한 로컬 인덱스를 공유본으로 되돌린다.
+    if local_count is not None:
+        # 로컬이 공유보다 적으면 마커가 같아도 강제 pull (MMK 누락 케이스)
+        if shared_items > 0 and local_count < shared_items:
+            return "items_mismatch local={} shared={} marker={}".format(
+                local_count, shared_items, marker_items
+            )
+        if marker_items > 0 and local_count < marker_items:
+            return "marker_items_mismatch local={} marker={}".format(local_count, marker_items)
 
     missing_local = roots_missing_from_local()
     for root in missing_local:

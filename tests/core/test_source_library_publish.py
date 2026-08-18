@@ -174,6 +174,39 @@ def test_pull_refused_for_outdated_grouping(tmp_path: Path, monkeypatch, tmp_app
     assert err is None
 
 
+def test_unknown_local_count_does_not_force_pull(tmp_path: Path, monkeypatch, tmp_app_dir: Path):
+    """로컬 건수 조회 실패(락 등)="모름" — 건수 비교 pull 이 오발되면 안 된다.
+
+    예전엔 실패를 0으로 취급해 items_mismatch 가 성립, 멀쩡한(혹은 방금 스캔한)
+    로컬 인덱스를 공유본으로 되돌렸다 (스캔 취소/락 함정).
+    """
+    import sqlite3 as _sqlite3
+
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    monkeypatch.setattr(libcfg, "config_dir", lambda: shared)
+
+    conn = db.connect()
+    try:
+        items = group_entries([FileEntry("a.mov", 3, 1.0)])
+        db.replace_dir_items(conn, str(tmp_path / "m").replace("\\", "/"), "", items)
+        conn.commit()
+        publish.publish_index(conn)
+    finally:
+        conn.close()
+
+    # 로컬 DB 열기가 실패하는 상황(락/손상) 재현
+    def _boom(path=None):
+        raise _sqlite3.DatabaseError("database is locked")
+
+    monkeypatch.setattr(db, "connect", _boom)
+    assert publish._local_total_safe() is None
+    # 건수 비교 분기가 스킵되어 pull 사유가 없어야 한다
+    assert publish.needs_pull_reason() is None
+    # 커버리지 조회도 "전부 빠짐"이 아니라 빈 리스트(오발 방지)
+    assert publish.roots_missing_from_local(["W:/lib"]) == []
+
+
 def test_needs_pull_when_root_missing_locally(tmp_path: Path, monkeypatch, tmp_app_dir: Path):
     shared = tmp_path / "shared"
     shared.mkdir()
