@@ -704,8 +704,9 @@ class SourceLibrarySettingsDialog(QDialog):
         organized_all = libcfg.library_organized_paths(self._library)
         for g in groups:
             gname = str(g.get("name") or "")
-            if libcfg.is_builtin_group(gname) or libcfg.is_org_folder(g):
-                label = "[폴더] {}".format(gname)
+            if libcfg.is_builtin_group(gname):
+                # 삭제·이름변경 불가(순서 이동만 가능)한 기본 그룹임을 구분 표기
+                label = "[기본 폴더] {}".format(gname)
             else:
                 label = "[폴더] {}".format(gname)
             g_item = QTreeWidgetItem([label])
@@ -877,11 +878,20 @@ class SourceLibrarySettingsDialog(QDialog):
             # 예전엔 여기서 promote_top_level_to_virtual()이 실패하며 "루트를 먼저
             # 빼세요"라는 오해 유발 메시지가 떴는데, 그 안내를 따라가면 실제로 CS의
             # 등록 루트가 삭제되는 사고로 이어질 수 있었다.
-            self._status.setText(
-                "「{}」는 다른 그룹 안으로 넣을 수 없습니다 (순서 이동만 가능합니다).".format(
-                    libcfg.COMMON_LABEL
+            # 상황별 안내: 빈 영역/자기 자신 드롭까지 "안으로 넣기 거부"로 말하면
+            # 엉뚱한 안내가 된다 — 실제 시도였을 때만 거부 사유를 보여준다.
+            info = self._drop_target_info(target)
+            tgt_group = str(info.get("parent_group") or "") if info else ""
+            if target is None:
+                self._status.setText("보관함 또는 폴더 위에 놓으세요.")
+            elif not tgt_group or tgt_group == group_name:
+                pass  # 자기 자신/자기 하위로의 드롭 — 의미 없는 조작이라 무음
+            else:
+                self._status.setText(
+                    "「{}」는 다른 그룹 안으로 넣을 수 없습니다 (순서 이동만 가능합니다).".format(
+                        libcfg.COMMON_LABEL
+                    )
                 )
-            )
             return
         info = self._drop_target_info(target)
         kind = info.get("kind") or ""
@@ -998,8 +1008,10 @@ class SourceLibrarySettingsDialog(QDialog):
         if tkind != _KIND_GROUP or not tpath:
             self.drop_top_level_group(group_name, target)
             return
+        if tpath == group_name:
+            return  # 자기 자신 위/아래로의 드롭 — 무동작인데 "실패"로 보이지 않게 무음
         if not libcfg.reorder_top_level_group(self._library, group_name, tpath, after=after):
-            self._status.setText("최상위 폴더 순서를 바꾸지 못했습니다.")
+            self._status.setText("최상위 폴더 순서를 바꾸지 못했습니다 (대상을 찾을 수 없음).")
             return
         self._persist_and_status(
             "폴더 순서 변경: 「{}」".format(group_name),
@@ -1399,11 +1411,11 @@ class SourceLibrarySettingsDialog(QDialog):
         self, kind: str, path: str, neighbor_path: str, *, after: bool
     ) -> None:
         """컨텍스트 메뉴 「위로/아래로 이동」 — 드래그 재정렬과 같은 core 함수 사용."""
-        if not neighbor_path:
+        if not neighbor_path or neighbor_path == path:
             return
         if kind == _KIND_GROUP:
             if not libcfg.reorder_top_level_group(self._library, path, neighbor_path, after=after):
-                self._status.setText("최상위 폴더 순서를 바꾸지 못했습니다.")
+                self._status.setText("최상위 폴더 순서를 바꾸지 못했습니다 (대상을 찾을 수 없음).")
                 return
             self._persist_and_status(
                 "폴더 순서 변경: 「{}」".format(path),
