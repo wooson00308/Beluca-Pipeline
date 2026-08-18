@@ -174,6 +174,49 @@ def test_pull_refused_for_outdated_grouping(tmp_path: Path, monkeypatch, tmp_app
     assert err is None
 
 
+def test_pull_succeeds_while_local_db_handle_is_open(
+    tmp_path: Path, monkeypatch, tmp_app_dir: Path
+):
+    """GUI 가 로컬 DB 를 열어둔 채로도 pull 이 성공해야 한다 (신규 PC 시나리오).
+
+    예전 구현(os.replace 파일 교체)은 Windows 에서 열린 sqlite 핸들 때문에
+    PermissionError 로 실패해, 신규 PC 가 라이브러리를 영영 못 받았다 (실측 재현).
+    backup 방식은 열린 핸들과 공존한다.
+    """
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    monkeypatch.setattr(libcfg, "config_dir", lambda: shared)
+
+    # 공유본 게시 (항목 1개)
+    conn = db.connect()
+    try:
+        items = group_entries([FileEntry("a.mov", 3, 1.0)])
+        db.replace_dir_items(conn, str(tmp_path / "m").replace("\\", "/"), "", items)
+        conn.commit()
+        publish.publish_index(conn)
+    finally:
+        conn.close()
+
+    # 신규 PC 재현: 로컬 DB 비우고 마커 삭제
+    marker = publish.local_marker_path()
+    if marker.is_file():
+        marker.unlink()
+    local_db = db.index_path()
+    if local_db.is_file():
+        local_db.unlink()
+
+    # GUI 처럼 로컬 DB 를 미리 열어둔다 (빈 스키마 생성 + 핸들 유지)
+    held = db.connect()
+    try:
+        assert db.total_indexed(held) == 0
+        meta = publish.pull_index()
+        assert meta is not None and meta["items"] == 1
+        # 열려 있던 핸들도 새 내용을 본다 (backup 은 파일 교체가 아니라 내용 교체)
+        assert db.total_indexed(held) == 1
+    finally:
+        held.close()
+
+
 def test_unknown_local_count_does_not_force_pull(tmp_path: Path, monkeypatch, tmp_app_dir: Path):
     """로컬 건수 조회 실패(락 등)="모름" — 건수 비교 pull 이 오발되면 안 된다.
 

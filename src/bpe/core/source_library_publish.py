@@ -291,6 +291,12 @@ def pull_index() -> Optional[Dict[str, Any]]:
     """공유 인덱스를 로컬 캐시로 복사한다. 더 새롭지 않으면 None.
 
     원본 미디어 루트에는 쓰지 않는다. 대상은 ``SOURCE_LIBRARY_INDEX_FILE`` 뿐.
+
+    로컬 DB 를 ``os.replace`` 로 파일째 갈아끼우면 GUI 가 열어둔 sqlite 핸들
+    때문에 Windows 에서 ``PermissionError`` 로 실패한다(실측 — 신규 PC 가
+    라이브러리를 영영 못 받던 원인). 그래서 공유본을 임시 파일로 받아온 뒤
+    ``sqlite3.Connection.backup`` 으로 로컬 DB "내용"만 교체한다 —
+    ``publish_index`` 가 쓰는 것과 같은 패턴이라 열린 핸들과 공존한다.
     """
     reason = needs_pull_reason()
     if not reason:
@@ -309,14 +315,22 @@ def pull_index() -> Optional[Dict[str, Any]]:
     tmp_path = Path(tmp_name)
     try:
         shutil.copy2(str(src), str(tmp_path))
-        os.replace(str(tmp_path), str(dest))
-    except BaseException:
+        src_conn = sqlite3.connect(str(tmp_path))
+        try:
+            dest_conn = db.connect(dest)
+            try:
+                src_conn.backup(dest_conn)
+                dest_conn.commit()
+            finally:
+                dest_conn.close()
+        finally:
+            src_conn.close()
+    finally:
         try:
             if tmp_path.exists():
                 tmp_path.unlink()
         except OSError:
             pass
-        raise
     meta = read_shared_meta()
     write_json_file(
         local_marker_path(),
