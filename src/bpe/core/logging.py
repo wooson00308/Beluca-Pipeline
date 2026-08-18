@@ -5,9 +5,11 @@ from __future__ import annotations
 import logging
 import sys
 
-from bpe.core.config import APP_DIR
+# 값 바인딩(from ... import APP_DIR) 금지 — import 시점에 경로가 굳어 테스트의
+# monkeypatch(cfg.APP_DIR)가 안 먹고, 테스트가 실사용자 ~/.setup_pro/bpe.log 를
+# truncate 하는 사고가 났다. 런타임 참조 규칙(CLAUDE.md config 패턴) 준수.
+import bpe.core.config as cfg
 
-_LOG_FILE = APP_DIR / "bpe.log"
 _CONFIGURED = False
 
 
@@ -23,14 +25,14 @@ def _ensure_configured() -> None:
         return
     _CONFIGURED = True
 
-    APP_DIR.mkdir(parents=True, exist_ok=True)
+    cfg.APP_DIR.mkdir(parents=True, exist_ok=True)
 
     root = logging.getLogger("bpe")
     root.setLevel(logging.DEBUG)
 
     # File handler — rotated manually if needed; keeps last run
     try:
-        fh = logging.FileHandler(_LOG_FILE, encoding="utf-8", mode="w")
+        fh = logging.FileHandler(cfg.APP_DIR / "bpe.log", encoding="utf-8", mode="w")
         fh.setLevel(logging.DEBUG)
         fh.setFormatter(
             logging.Formatter(
