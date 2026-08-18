@@ -128,9 +128,14 @@ class SourceLibraryDialog(QDialog):
         if missing_roots:
             outdated = publish.shared_grouping_outdated()
             if outdated:
-                self._status_label.setText("공유 인덱스가 구버전 형식 — 다시 스캔·게시합니다.")
+                msg = "공유 인덱스가 구버전 형식 — 다시 스캔·게시합니다."
+                cur = self._status_label.text() or ""
+                self._status_label.setText("{} · {}".format(cur, msg) if cur else msg)
             if not publish.read_shared_meta().get("published_at") or outdated:
-                self.enqueue_library_scan(self._roots, force=False, publish=True)
+                # 구버전 공유본 전환(outdated)은 전체 재게시가 목적이라 전체 루트,
+                # 그 외에는 로컬에 빠진 루트만 — 불필요한 전체 워크·게시를 막는다.
+                scan_roots = self._roots if outdated else missing_roots
+                self.enqueue_library_scan(scan_roots, force=False, publish=True)
 
     def _clamp_and_resize(self, w: int, h: int) -> None:
         screen = QGuiApplication.primaryScreen()
@@ -730,7 +735,12 @@ class SourceLibraryDialog(QDialog):
         self._set_path_display("")
         self._set_action_enabled(False)
         self._apply_filter()
-        self._status_label.setText("소분류를 선택하세요")
+        # 창 생성 직후에도 불리므로 맨 setText 를 쓰면 앞서 붙은 경고
+        # (설정 파일 읽기 실패·ffmpeg 없음 등)를 지워버린다 — 이어붙인다.
+        hint = "소분류를 선택하세요"
+        cur = self._status_label.text() or ""
+        if hint not in cur:
+            self._status_label.setText("{} · {}".format(cur, hint) if cur else hint)
 
     def _current_selection_key(self) -> str:
         item = self._tree.currentItem()
