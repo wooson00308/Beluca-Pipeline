@@ -24,7 +24,6 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSplitter,
     QToolButton,
-    QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
@@ -40,6 +39,7 @@ from bpe.core.nuke_render_paths import normalize_path_str
 from bpe.core.settings import get_source_library_settings
 from bpe.core.source_library_scan import row_dir_path, row_pattern_path
 from bpe.gui import theme
+from bpe.gui.widgets.library_tree import LibraryTree
 from bpe.gui.widgets.lock_overlay import LockOverlay
 from bpe.gui.widgets.sequence_scrub_widget import MediaPreviewWidget
 from bpe.gui.widgets.source_library_grid import SourceLibraryGrid, SourceLibraryModel
@@ -196,11 +196,10 @@ class SourceLibraryDialog(QDialog):
         )
         left_lay.addWidget(cat_title)
 
-        self._tree = QTreeWidget()
+        self._tree = LibraryTree()
         self._tree.setHeaderHidden(True)
         self._tree.setMinimumHeight(280)
         self._tree.setViewportMargins(0, 10, 0, 0)
-        self._tree.setStyleSheet(theme.tree_stylesheet())
         self._tree.currentItemChanged.connect(lambda *_: self._on_tree_selection())
         left_lay.addWidget(self._tree, 1)
         splitter.addWidget(left)

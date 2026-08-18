@@ -34,6 +34,7 @@ from bpe.core import source_library_db as db
 from bpe.core.logging import get_logger
 from bpe.core.nuke_render_paths import normalize_path_str
 from bpe.gui import theme
+from bpe.gui.widgets.library_tree import LibraryTree
 
 logger = get_logger("gui.widgets.source_library_settings_dialog")
 
@@ -57,7 +58,7 @@ _MIME_GROUP = "application/x-bpe-library-group"
 _MIME_NESTED = "application/x-bpe-library-nested"
 
 
-class _GroupTree(QTreeWidget):
+class _GroupTree(LibraryTree):
     """그룹 트리 — 루트를 그룹으로 드래그해 배정한다."""
 
     def __init__(self, owner: "SourceLibrarySettingsDialog") -> None:
@@ -71,7 +72,6 @@ class _GroupTree(QTreeWidget):
         self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.setViewportMargins(0, 10, 0, 0)
-        self.setStyleSheet(theme.tree_stylesheet())
 
     def startDrag(self, supported_actions: Qt.DropAction) -> None:  # noqa: N802
         roots = [i for i in self.selectedItems() if str(i.data(0, _ROLE_KIND) or "") == _KIND_ROOT]
@@ -352,10 +352,9 @@ class SourceLibrarySettingsDialog(QDialog):
 
         left = QVBoxLayout()
         left.addWidget(self._section_title("등록된 소스 (펼쳐서 소분류 드래그)"))
-        self._roots_tree = QTreeWidget()
+        self._roots_tree = LibraryTree()
         self._roots_tree.setHeaderHidden(True)
         self._roots_tree.setViewportMargins(0, 10, 0, 0)
-        self._roots_tree.setStyleSheet(theme.tree_stylesheet())
         self._roots_tree.setDragEnabled(True)
         self._roots_tree.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
         self._roots_tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
