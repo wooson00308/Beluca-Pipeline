@@ -585,49 +585,24 @@ def find_shot_folder_by_task(
 def _nk_search_roots_from_shot_root(shot_root: Path, task_slug: str = "") -> List[Path]:
     """shot_root 하위에서 NK 파일을 찾아볼 디렉토리 목록을 반환한다.
 
-    *task_slug* 가 ``comp`` 가 아니고 ``{slug}/devl/nuke`` 가 실재하면
-    해당 태스크 폴더만 탐색한다. 그렇지 않으면 기존(comp 우선) 목록을 쓴다.
-    """
-    roots: List[Path] = []
-    slug = (task_slug or "").strip().lower()
-    if slug and slug != DEFAULT_TASK_FOLDER:
-        task_nuke = shot_root / slug / "devl" / "nuke"
-        try:
-            if task_nuke.is_dir():
-                for rel in (
-                    task_nuke,
-                    shot_root / slug / "devl",
-                    shot_root / slug,
-                ):
-                    try:
-                        p = Path(normalize_path_str(Path(rel).resolve()))
-                        if p.is_dir():
-                            roots.append(p)
-                    except OSError:
-                        continue
-                if roots:
-                    return roots
-        except OSError:
-            pass
+    **해당 태스크 폴더 안만** 본다 — comp 카드는 ``comp/``, rnd 카드는 ``rnd/``.
+    *task_slug* 가 비면 ``comp`` 로 본다(기존과 동일).
 
-    for rel in (
-        shot_root / "comp" / "devl" / "nuke",
-        shot_root / "comp",
-        shot_root / "comp" / "devl",
-        shot_root / "work",
-        shot_root / "scripts",
-    ):
+    태스크 폴더가 없으면 빈 목록을 돌려준다. 다른 파트 폴더나 샷 루트로 넘어가지
+    않는다 — 남의 파트 NK 를 열어 덮어쓰는 사고를 막기 위함.
+    ``find_latest_nk_path`` 는 각 root 를 ``rglob`` 하므로 ``task_root`` 하나로
+    그 폴더 전체가 커버된다(``devl/nuke`` 는 우선순위 표시용).
+    """
+    slug = (task_slug or "").strip().lower() or DEFAULT_TASK_FOLDER
+    task_root = shot_root / slug
+    roots: List[Path] = []
+    for rel in (task_root / "devl" / "nuke", task_root / "devl", task_root):
         try:
             p = Path(normalize_path_str(Path(rel).resolve()))
             if p.is_dir():
                 roots.append(p)
         except OSError:
             continue
-    if not roots:
-        try:
-            roots = [Path(normalize_path_str(shot_root.resolve()))]
-        except OSError:
-            pass
     return roots
 
 
@@ -669,7 +644,8 @@ def find_latest_nk_path(
 
     버전 접미사(v###)가 있으면 최대 버전, 없으면 mtime 기준.
     build_shot_paths 실패 시 BFS 휴리스틱으로 폴백.
-    *task_content* 가 비-comp 이고 해당 태스크 NK 폴더가 있으면 그 쪽만 탐색한다.
+    *task_content* 의 태스크 폴더 안만 탐색한다(비면 ``comp``). 그 폴더가 없거나
+    NK 가 없으면 ``None`` — 다른 파트 폴더로 넘어가지 않는다.
     """
     sn = (shot_name or "").strip()
     pc = (project_code or "").strip()
@@ -681,9 +657,16 @@ def find_latest_nk_path(
     if shot_root is None:
         return None
 
-    task_slug = canonical_task_slug(task_content) if (task_content or "").strip() else ""
+    task_slug = canonical_task_slug(task_content)
     roots = _nk_search_roots_from_shot_root(shot_root, task_slug=task_slug)
     if not roots:
+        logger.info(
+            "NK 없음: 태스크 폴더를 찾지 못함 shot=%s task=%s slug=%s root=%s",
+            sn,
+            task_content or "(없음)",
+            task_slug,
+            normalize_path_str(str(shot_root)),
+        )
         return None
 
     seen: set = set()
@@ -707,6 +690,12 @@ def find_latest_nk_path(
             continue
 
     if not nk_files:
+        logger.info(
+            "NK 없음: %s 폴더 아래 .nk 파일이 없음 shot=%s tried=%s",
+            task_slug,
+            sn,
+            [normalize_path_str(str(r)) for r in roots],
+        )
         return None
 
     needle = sn.lower()
@@ -871,14 +860,8 @@ def launch_nk_with_launcher(nk_path: Path, launcher: NukexLauncher) -> None:
     subprocess.Popen([str(launcher.exe), *launcher.args, launch], close_fds=True)
 
 
-def find_latest_nk_and_open(
-    shot_name: str,
-    project_code: str,
-    server_root: str,
-    launcher: Optional[NukexLauncher] = None,
-    task_content: str = "",
-) -> Optional[Path]:
-    """최신 NK를 찾아 연다.
+def open_nk_path(path: Path, launcher: Optional[NukexLauncher] = None) -> Path:
+    """이미 찾아둔 NK 를 패치하고 연다.
 
     열기 전에 ``string trim`` 기반 렌더 경로 식을 ``file dirname`` 기반으로
     자동 교체한다 (UNC 경로 버그 대응). EXE 재배포만으로 기존 서버 NK에 수정이
@@ -886,12 +869,10 @@ def find_latest_nk_and_open(
 
     Windows: NukeX 실행 파일로만 연다. 일반 Nuke나 파일 연결 프로그램으로는 열지 않는다.
     ``launcher``가 주어지면(win32) 최신 버전 자동 선택 대신 그 실행 후보로 연다.
-    *task_content* 가 있으면 해당 태스크 폴더의 NK를 우선 탐색한다.
-    """
-    path = find_latest_nk_path(shot_name, project_code, server_root, task_content=task_content)
-    if path is None:
-        return None
 
+    GUI 가 "찾기 → 없으면 안내 → 있을 때만 열기" 순서로 쓸 수 있도록 분리해 둔 것.
+    탐색을 두 번 하지 않게 하려는 목적도 있다.
+    """
     patch_nk_string_trim_in_place(path)
 
     launch = normalize_path_str(path)
@@ -915,6 +896,23 @@ def find_latest_nk_and_open(
     except Exception:
         logger.warning("NK 파일 열기 실패: %s", path)
     return Path(launch)
+
+
+def find_latest_nk_and_open(
+    shot_name: str,
+    project_code: str,
+    server_root: str,
+    launcher: Optional[NukexLauncher] = None,
+    task_content: str = "",
+) -> Optional[Path]:
+    """최신 NK를 찾아 연다 (찾기 + :func:`open_nk_path`).
+
+    *task_content* 의 태스크 폴더 안만 탐색한다. 못 찾으면 ``None``.
+    """
+    path = find_latest_nk_path(shot_name, project_code, server_root, task_content=task_content)
+    if path is None:
+        return None
+    return open_nk_path(path, launcher=launcher)
 
 
 # ---------------------------------------------------------------------------

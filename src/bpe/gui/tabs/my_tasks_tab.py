@@ -47,13 +47,15 @@ from bpe.core.logging import get_logger
 from bpe.core.nk_finder import (
     find_all_nukex_launchers,
     find_latest_comp_version_display,
-    find_latest_nk_and_open,
+    find_latest_nk_path,
     find_server_root_auto,
     find_shot_folder_by_task,
     open_comp_render_in_rv,
+    open_nk_path,
     open_plate_in_rv,
 )
 from bpe.core.nuke_render_paths import normalize_path_str
+from bpe.core.shot_builder import canonical_task_slug
 from bpe.core.shot_filter_logic import ShotFacetField, matching_shot_ids, selection_value_count
 from bpe.core.shotgrid_browser import build_project_overview_url, try_launch_chrome_app_url
 from bpe.core.shotgrid_settings import get_shotgrid_settings
@@ -711,9 +713,25 @@ class _ShotCard(QFrame):
                 project_code,
             )
             return
-        # Windows: NukeX가 여러 버전 설치되어 있으면 버전 선택 팝업을 띄운다.
-        # 그 외 OS는 기존 동작(open/xdg-open)을 그대로 유지한다.
+        # 먼저 NK를 찾는다. 없으면 여기서 안내하고 끝 — 버전 선택 팝업을 띄운 뒤
+        # 아무 일도 안 일어나는 헛수고를 막기 위해 순서가 중요하다.
+        task_content = d.get("task_content", "")
         try:
+            nk_path = find_latest_nk_path(
+                shot_code, project_code, server_root, task_content=task_content
+            )
+            if nk_path is None:
+                slug = canonical_task_slug(task_content)
+                QMessageBox.information(
+                    self,
+                    "NukeX",
+                    f"{slug}/devl/nuke 아래에서 작업 파일(.nk)을 찾지 못했습니다.\n"
+                    "「Shot Build」로 NK를 먼저 만들거나 「폴더 열기」로 확인해 주세요.",
+                )
+                return
+
+            # Windows: NukeX가 여러 버전 설치되어 있으면 버전 선택 팝업을 띄운다.
+            # 그 외 OS는 기존 동작(open/xdg-open)을 그대로 유지한다.
             if sys.platform == "win32":
                 launchers = find_all_nukex_launchers()
                 if not launchers:
@@ -727,20 +745,9 @@ class _ShotCard(QFrame):
                 launcher = choose_nukex_launcher(self, launchers)
                 if launcher is None:
                     return  # 사용자가 취소
-                find_latest_nk_and_open(
-                    shot_code,
-                    project_code,
-                    server_root,
-                    launcher=launcher,
-                    task_content=d.get("task_content", ""),
-                )
+                open_nk_path(nk_path, launcher=launcher)
             else:
-                find_latest_nk_and_open(
-                    shot_code,
-                    project_code,
-                    server_root,
-                    task_content=d.get("task_content", ""),
-                )
+                open_nk_path(nk_path)
         except Exception as e:
             logger.warning("NK 열기 실패: %s", e)
 

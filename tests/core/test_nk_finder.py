@@ -186,15 +186,59 @@ class TestFindLatestNkPath:
         assert "rnd" in result.name.lower()
         assert "comp" not in result.name.lower()
 
-    def test_task_content_rnd_falls_back_to_comp_when_missing(self, tmp_path):
-        """rnd 폴더가 없으면 기존처럼 comp NK를 찾는다."""
+    def test_task_content_rnd_no_fallback_to_comp(self, tmp_path):
+        """rnd 폴더가 없으면 comp NK 로 넘어가지 않고 None — 태스크 폴더 안만 본다."""
         shot_root = self._make_shot_tree(tmp_path, "E01_S01_061")
         nuke_dir = shot_root / "comp" / "devl" / "nuke"
         (nuke_dir / "E01_S01_061_comp_v001.nk").write_text("comp")
 
-        result = find_latest_nk_path("E01_S01_061", "PRJ", str(tmp_path), task_content="RND")
+        assert find_latest_nk_path("E01_S01_061", "PRJ", str(tmp_path), task_content="RND") is None
+        # comp 카드는 그대로 찾아야 한다 (회귀 가드)
+        assert find_latest_nk_path("E01_S01_061", "PRJ", str(tmp_path)) is not None
+
+    # ── 태스크 폴더 밖은 보지 않는다 ────────────────────────────
+
+    def test_comp_finds_nk_anywhere_under_comp(self, tmp_path):
+        """회귀 가드 — comp/devl/nuke 가 비어도 comp 하위 어디든 있으면 찾는다."""
+        shot_root = self._make_shot_tree(tmp_path, "E01_S01_070")
+        pub = shot_root / "comp" / "pub"
+        pub.mkdir(parents=True)
+        (pub / "E01_S01_070_comp_v005.nk").write_text("x")
+
+        result = find_latest_nk_path("E01_S01_070", "PRJ", str(tmp_path))
         assert result is not None
-        assert "comp" in result.name.lower()
+        assert result.name == "E01_S01_070_comp_v005.nk"
+
+    def test_comp_card_does_not_pick_other_task_nk(self, tmp_path):
+        """comp 폴더가 아예 없고 rnd 에만 NK 가 있으면 None — 남의 파트 파일 방지."""
+        shot_root = tmp_path / "PRJ" / "04_sq" / "E01" / "E01_S01_071"
+        rnd_nuke = shot_root / "rnd" / "devl" / "nuke"
+        rnd_nuke.mkdir(parents=True)
+        (rnd_nuke / "E01_S01_071_rnd_v002.nk").write_text("rnd")
+
+        assert find_latest_nk_path("E01_S01_071", "PRJ", str(tmp_path)) is None
+        # rnd 카드로 열면 정상적으로 찾아야 한다
+        got = find_latest_nk_path("E01_S01_071", "PRJ", str(tmp_path), task_content="rnd")
+        assert got is not None
+        assert got.name == "E01_S01_071_rnd_v002.nk"
+
+    @pytest.mark.parametrize("legacy_dir", ["work", "scripts"])
+    def test_work_and_scripts_dirs_are_not_searched(self, tmp_path, legacy_dir):
+        """서버에 존재하지 않는 레거시 경로 — 더 이상 탐색하지 않는다."""
+        shot_root = tmp_path / "PRJ" / "04_sq" / "E01" / "E01_S01_072"
+        d = shot_root / legacy_dir
+        d.mkdir(parents=True)
+        (d / "E01_S01_072_comp_v001.nk").write_text("x")
+
+        assert find_latest_nk_path("E01_S01_072", "PRJ", str(tmp_path)) is None
+
+    def test_shot_root_is_not_swept(self, tmp_path):
+        """샷 루트 직계 NK 도 태스크 폴더 밖이므로 잡지 않는다."""
+        shot_root = tmp_path / "PRJ" / "04_sq" / "E01" / "E01_S01_073"
+        shot_root.mkdir(parents=True)
+        (shot_root / "E01_S01_073_comp_v001.nk").write_text("x")
+
+        assert find_latest_nk_path("E01_S01_073", "PRJ", str(tmp_path)) is None
 
 
 # ── find_latest_comp_version_display ───────────────────────────────
@@ -243,6 +287,15 @@ class TestFindLatestCompVersionDisplay:
         (nuke_dir / "new.nk").write_text("new")
 
         assert find_latest_comp_version_display("E01_S01_002", "PRJ", str(tmp_path)) is None
+
+    def test_does_not_show_other_task_version(self, tmp_path):
+        """comp 폴더가 없으면 남의 파트 버전을 내 버전인 것처럼 보여주지 않는다."""
+        shot_root = tmp_path / "PRJ" / "04_sq" / "E01" / "E01_S01_005"
+        rnd_nuke = shot_root / "rnd" / "devl" / "nuke"
+        rnd_nuke.mkdir(parents=True)
+        (rnd_nuke / "E01_S01_005_rnd_v007.nk").write_text("rnd")
+
+        assert find_latest_comp_version_display("E01_S01_005", "PRJ", str(tmp_path)) is None
 
 
 # ── find_comp_render_mov ─────────────────────────────────────────
