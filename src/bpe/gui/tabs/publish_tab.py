@@ -301,6 +301,8 @@ class PublishTab(QWidget):
         td = self._task_data
         shot_code = td.get("shot_code", "")
         project_code = td.get("project_code") or td.get("project_folder", "")
+        # 태스크별 렌더 폴더 탐색용 (comp/빈값이면 기존 comp 후보 폴더 그대로).
+        task_content = (td.get("task_content") or "").strip()
 
         if not shot_code or not project_code:
             self._mov_label.setText("shot_code / project_code 없음")
@@ -323,7 +325,12 @@ class PublishTab(QWidget):
 
             proj_u = (project_code or "").strip().upper()
             if proj_u == _MMK_PROJECT_CODE:
-                mov, lut = find_comp_render_mov_pair(shot_code, project_code, server_root)
+                mov, lut = find_comp_render_mov_pair(
+                    shot_code,
+                    project_code,
+                    server_root,
+                    task_content=task_content,
+                )
                 return {
                     "mov": str(mov) if mov else None,
                     "lut": str(lut) if lut else None,
@@ -334,6 +341,7 @@ class PublishTab(QWidget):
                     project_code,
                     server_root,
                     exclude_lut_stem=True,
+                    task_content=task_content,
                 )
                 return {"mov": str(mov) if mov else None, "lut": None}
 
@@ -342,6 +350,7 @@ class PublishTab(QWidget):
                 project_code,
                 server_root,
                 exclude_lut_stem=False,
+                task_content=task_content,
             )
             return {"mov": str(mov) if mov else None, "lut": None}
 
@@ -364,11 +373,14 @@ class PublishTab(QWidget):
             mov_path = result
 
         if not mov_path:
+            from bpe.core.shot_builder import canonical_task_slug
+
+            slug = canonical_task_slug(self._task_data.get("task_content") or "")
             self._mov_label.setText("렌더된 MOV 없음")
             self._mov_label.setStyleSheet("color: #e07070;")
             self._version_label.setText("—")
             self._set_lut_row_visible(False)
-            self._log_msg("comp/devl/renders/ 아래 .mov 파일을 찾을 수 없습니다.")
+            self._log_msg(f"{slug}/devl/renders/ 아래 .mov 파일을 찾을 수 없습니다.")
             return
 
         from bpe.shotgrid.parser import parse_version_name_from_filename

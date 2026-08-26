@@ -358,6 +358,88 @@ class TestFindCompRenderMov:
         (shot_root / "comp" / "devl" / "nuke").mkdir(parents=True)
         assert find_comp_render_mov("E01_S01_003", "PRJ", str(tmp_path)) is None
 
+    # ── task_content: comp 외 태스크 폴더 탐색 ──────────────────
+
+    def _task_renders(self, tmp_path: Path, shot_name: str, task: str) -> Path:
+        """``{shot_root}/{task}/devl/renders`` 를 만들어 돌려준다."""
+        ep = shot_name.split("_")[0].upper()
+        rd = tmp_path / "PRJ" / "04_sq" / ep / shot_name.upper() / task / "devl" / "renders"
+        rd.mkdir(parents=True)
+        return rd
+
+    @pytest.mark.parametrize("task", ["rnd", "precomp", "test"])
+    def test_task_content_finds_mov_in_task_folder(self, tmp_path, task):
+        """rnd/precomp/test 등은 자기 태스크 폴더에서 찾는다."""
+        shot = "E01_S01_010"
+        rd = self._task_renders(tmp_path, shot, task)
+        (rd / f"{shot}_{task}_v001.mov").write_bytes(b"a")
+        (rd / f"{shot}_{task}_v004.mov").write_bytes(b"b")
+
+        result = find_comp_render_mov(shot, "PRJ", str(tmp_path), task_content=task)
+        assert result is not None
+        assert result.name == f"{shot}_{task}_v004.mov"
+
+    def test_task_content_does_not_fall_back_to_comp(self, tmp_path):
+        """태스크 폴더에 없고 comp 에만 있으면 None — comp 렌더 오발 방지."""
+        shot = "E01_S01_011"
+        self._make_renders_tree(tmp_path, shot)
+        comp_rd = tmp_path / "PRJ" / "04_sq" / "E01" / shot / "comp" / "devl" / "renders"
+        (comp_rd / f"{shot}_comp_v002.mov").write_bytes(b"a")
+        self._task_renders(tmp_path, shot, "rnd")  # 비어 있음
+
+        assert find_comp_render_mov(shot, "PRJ", str(tmp_path), task_content="rnd") is None
+
+    def test_task_content_ignores_shot_root_shared_renders(self, tmp_path):
+        """샷 루트 직계 renders/ 는 공용 폴더 — 비-comp 태스크는 가져가지 않는다."""
+        shot = "E01_S01_012"
+        shot_root = tmp_path / "PRJ" / "04_sq" / "E01" / shot
+        shared = shot_root / "renders"
+        shared.mkdir(parents=True)
+        (shared / f"{shot}_comp_v005.mov").write_bytes(b"a")
+        self._task_renders(tmp_path, shot, "rnd")  # 비어 있음
+
+        assert find_comp_render_mov(shot, "PRJ", str(tmp_path), task_content="rnd") is None
+        # comp(=미지정)는 기존대로 공용 폴더를 본다
+        assert find_comp_render_mov(shot, "PRJ", str(tmp_path)) is not None
+
+    @pytest.mark.parametrize("task", ["fx", "matte", "Matte", "FX"])
+    def test_fx_and_matte_still_scan_comp_folder(self, tmp_path, task):
+        """fx/matte 는 기존 규칙대로 comp 로 접혀 comp 폴더를 본다."""
+        shot = "E01_S01_013"
+        self._make_renders_tree(tmp_path, shot)
+        comp_rd = tmp_path / "PRJ" / "04_sq" / "E01" / shot / "comp" / "devl" / "renders"
+        (comp_rd / f"{shot}_comp_v002.mov").write_bytes(b"a")
+
+        result = find_comp_render_mov(shot, "PRJ", str(tmp_path), task_content=task)
+        assert result is not None
+        assert result.name == f"{shot}_comp_v002.mov"
+
+    def test_without_task_content_keeps_comp_behavior(self, tmp_path):
+        """회귀 가드 — task_content 미지정이면 예전처럼 comp 폴더만 본다."""
+        shot = "E01_S01_014"
+        self._make_renders_tree(tmp_path, shot)
+        comp_rd = tmp_path / "PRJ" / "04_sq" / "E01" / shot / "comp" / "devl" / "renders"
+        (comp_rd / f"{shot}_comp_v001.mov").write_bytes(b"a")
+        rnd_rd = self._task_renders(tmp_path, shot, "rnd")
+        (rnd_rd / f"{shot}_rnd_v009.mov").write_bytes(b"b")
+
+        result = find_comp_render_mov(shot, "PRJ", str(tmp_path))
+        assert result is not None
+        assert result.name == f"{shot}_comp_v001.mov"
+
+    def test_task_content_with_exclude_lut_stem(self, tmp_path):
+        """CRS2 식 _lut 제외 룰이 태스크 폴더 안에서도 그대로 걸린다."""
+        shot = "E01_S01_015"
+        rd = self._task_renders(tmp_path, shot, "test")
+        (rd / f"{shot}_test_v001.mov").write_bytes(b"a")
+        (rd / f"{shot}_test_v001_lut.mov").write_bytes(b"b")
+
+        result = find_comp_render_mov(
+            shot, "PRJ", str(tmp_path), exclude_lut_stem=True, task_content="test"
+        )
+        assert result is not None
+        assert result.name == f"{shot}_test_v001.mov"
+
 
 class TestFindCompRenderMovPair:
     """MMK용 일반 + _lut MOV 쌍 탐색."""
@@ -435,6 +517,39 @@ class TestFindCompRenderMovPair:
             parents=True
         )
         primary, lut = find_comp_render_mov_pair(shot, "MMK_028", str(tmp_path))
+        assert primary is None
+        assert lut is None
+
+    def test_task_content_pair_in_task_folder(self, tmp_path):
+        """MMK LUT 쌍 룰이 comp 외 태스크 폴더에서도 그대로 걸린다."""
+        shot = "EP06_S007_0030"
+        rd = tmp_path / "MMK_028" / "04_sq" / "EP06" / shot / "rnd" / "devl" / "renders"
+        rd.mkdir(parents=True)
+        for name in (
+            f"{shot}_rnd_v001.mov",
+            f"{shot}_rnd_v002.mov",
+            f"{shot}_rnd_v002_lut.mov",
+        ):
+            (rd / name).write_bytes(b"x")
+
+        primary, lut = find_comp_render_mov_pair(shot, "MMK_028", str(tmp_path), task_content="rnd")
+        assert primary is not None
+        assert lut is not None
+        assert primary.name == f"{shot}_rnd_v002.mov"
+        assert lut.name == f"{shot}_rnd_v002_lut.mov"
+
+    def test_task_content_pair_no_fallback_to_comp(self, tmp_path):
+        """태스크 폴더가 비어 있으면 comp 쌍을 대신 집지 않는다."""
+        shot = "EP06_S007_0040"
+        comp_rd = tmp_path / "MMK_028" / "04_sq" / "EP06" / shot / "comp" / "devl" / "renders"
+        comp_rd.mkdir(parents=True)
+        (comp_rd / f"{shot}_comp_v002.mov").write_bytes(b"a")
+        (comp_rd / f"{shot}_comp_v002_lut.mov").write_bytes(b"b")
+        (tmp_path / "MMK_028" / "04_sq" / "EP06" / shot / "rnd" / "devl" / "renders").mkdir(
+            parents=True
+        )
+
+        primary, lut = find_comp_render_mov_pair(shot, "MMK_028", str(tmp_path), task_content="rnd")
         assert primary is None
         assert lut is None
 
@@ -889,6 +1004,22 @@ class TestResolveCompRendersDir:
         target = shot_root / "comp" / "devl" / "renders"
         target.mkdir(parents=True)
         got = resolve_comp_renders_dir(shot_name, project_code, str(server_root))
+        assert got is not None
+        assert got.resolve() == target.resolve()
+
+    def test_task_content_returns_task_renders_dir(self, tmp_path) -> None:
+        """task_content 지정 시 해당 태스크의 renders 폴더를 돌려준다 (comp 폴백 없음)."""
+        server_root = tmp_path / "srv"
+        project_code = "SNO_015"
+        shot_name = "S010_0030"
+        shot_root = server_root / project_code / "04_sq" / "S010" / shot_name
+        (shot_root / "comp" / "devl" / "renders").mkdir(parents=True)
+        target = shot_root / "rnd" / "devl" / "renders"
+        target.mkdir(parents=True)
+
+        got = resolve_comp_renders_dir(
+            shot_name, project_code, str(server_root), task_content="rnd"
+        )
         assert got is not None
         assert got.resolve() == target.resolve()
 

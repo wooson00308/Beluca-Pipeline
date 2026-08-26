@@ -1038,6 +1038,27 @@ _RENDER_SUBDIRS: Tuple[Tuple[str, ...], ...] = (
 )
 
 
+def _render_subdirs_for_task(task_slug: str) -> Tuple[Tuple[str, ...], ...]:
+    """태스크 슬러그에 맞는 렌더/리뷰 후보 폴더 목록.
+
+    ``comp`` 이거나 빈 값이면 :data:`_RENDER_SUBDIRS` 를 그대로 돌려준다(기존 동작).
+    그 외에는 comp 목록과 **같은 자리**를 해당 태스크 폴더 안에서 찾는다.
+
+    샷 루트 직계 ``renders`` / ``review`` 는 파트 구분이 없는 공용 폴더라
+    비-comp 태스크에서는 **의도적으로 제외**한다 (comp 렌더를 다른 파트가 집는 사고 방지).
+    """
+    slug = (task_slug or "").strip().lower()
+    if not slug or slug == DEFAULT_TASK_FOLDER:
+        return _RENDER_SUBDIRS
+    return (
+        (slug, "devl", "renders"),
+        (slug, "renders"),
+        (slug, "devl"),
+        (slug, "devl", "review"),
+        (slug, "review"),
+    )
+
+
 def parse_sg_path_to_movie_string(raw: Any) -> str:
     """Best-effort local path from ShotGrid ``sg_path_to_movie`` (string or file URL)."""
     if raw is None:
@@ -1075,9 +1096,11 @@ def _pick_newest_among_candidates(paths: List[Path]) -> Path:
 def _collect_render_video_candidates(
     shot_root: Path,
     extensions: Tuple[str, ...],
+    task_slug: str = "",
 ) -> Tuple[List[Path], List[str]]:
-    """``_RENDER_SUBDIRS`` 아래 영상 파일 후보와 시도한 디렉터리 목록을 반환한다.
+    """태스크별 렌더 폴더 아래 영상 파일 후보와 시도한 디렉터리 목록을 반환한다.
 
+    *task_slug* 가 빈 값이거나 ``comp`` 면 기존 comp 후보 폴더를 쓴다.
     확장자 비교는 대소문자 무시 (Linux/macOS 대소문자 구분 FS 대응).
     """
     candidates: List[Path] = []
@@ -1086,7 +1109,7 @@ def _collect_render_video_candidates(
     ext_set = {(e if e.startswith(".") else f".{e}").lower() for e in extensions if e}
     if not ext_set:
         return candidates, tried_dirs
-    for parts in _RENDER_SUBDIRS:
+    for parts in _render_subdirs_for_task(task_slug):
         d = shot_root.joinpath(*parts)
         tried_dirs.append(str(d))
         try:
@@ -1122,6 +1145,7 @@ def find_comp_render_video(
     extensions: Tuple[str, ...] = (".mov", ".mp4", ".mxf", ".mkv"),
     fallback_latest_if_version_unmatched: bool = False,
     exclude_lut_stem: bool = False,
+    task_content: str = "",
 ) -> Optional[Path]:
     """샷 루트 아래 여러 후보 폴더에서 영상 파일을 찾는다.
 
@@ -1132,6 +1156,9 @@ def find_comp_render_video(
     exclude_lut_stem :
         True이면 파일 stem이 ``_lut`` 로 끝나는 후보를 제외한다.
         제외 후 후보가 없으면 None (기본 False — RV/피드백 등 기존 동작 유지).
+    task_content :
+        ShotGrid Task Name. 지정하면 해당 태스크 폴더(``{slug}/devl/renders`` 등)만 찾는다.
+        comp 폴더로의 폴백은 없다. 빈 값이면 기존 comp 후보 폴더를 쓴다.
     """
     sn = (shot_name or "").strip()
     pc = (project_code or "").strip()
@@ -1150,7 +1177,8 @@ def find_comp_render_video(
     if not exts:
         exts = (".mov", ".mp4", ".mxf", ".mkv")
 
-    candidates, tried_dirs = _collect_render_video_candidates(shot_root, exts)
+    task_slug = canonical_task_slug(task_content) if task_content else ""
+    candidates, tried_dirs = _collect_render_video_candidates(shot_root, exts, task_slug)
 
     if exclude_lut_stem and candidates:
         non_lut = [p for p in candidates if not p.stem.lower().endswith("_lut")]
@@ -1224,6 +1252,8 @@ def resolve_comp_renders_dir(
     shot_name: str,
     project_code: str,
     server_root: str,
+    *,
+    task_content: str = "",
 ) -> Optional[Path]:
     """샷 루트 아래 ``find_comp_render_video``와 동일한 후보에서 렌더 *폴더*만 반환."""
     sn = (shot_name or "").strip()
@@ -1234,7 +1264,8 @@ def resolve_comp_renders_dir(
     shot_root = _resolve_shot_root(sr, pc, sn)
     if shot_root is None:
         return None
-    for parts in _RENDER_SUBDIRS:
+    task_slug = canonical_task_slug(task_content) if task_content else ""
+    for parts in _render_subdirs_for_task(task_slug):
         d = shot_root.joinpath(*parts)
         try:
             if d.is_dir():
@@ -1250,6 +1281,7 @@ def resolve_comp_renders_dir(
         sr,
         version_code=None,
         fallback_latest_if_version_unmatched=True,
+        task_content=task_content,
     )
     if mov is not None:
         try:
@@ -1317,6 +1349,7 @@ def find_comp_render_mov(
     *,
     version_code: Optional[str] = None,
     exclude_lut_stem: bool = False,
+    task_content: str = "",
 ) -> Optional[Path]:
     """``comp/devl/renders`` 등 후보 폴더에서 ``.mov`` 만 찾는다 (RV 등 기존 호출 호환).
 
@@ -1328,6 +1361,8 @@ def find_comp_render_mov(
         None이면 버전 번호 최대(동률 시 mtime) 파일을 반환.
     exclude_lut_stem :
         True이면 stem이 ``_lut`` 로 끝나는 파일을 제외 (퍼블리시 CRS2 등).
+    task_content :
+        ShotGrid Task Name. 지정하면 해당 태스크 폴더만 찾는다 (comp 폴백 없음).
 
     샷 루트는 ``_resolve_shot_root`` (``build_shot_paths`` → BFS 휴리스틱)로 구한다.
     """
@@ -1338,6 +1373,7 @@ def find_comp_render_mov(
         version_code=version_code,
         extensions=(".mov",),
         exclude_lut_stem=exclude_lut_stem,
+        task_content=task_content,
     )
 
 
@@ -1345,8 +1381,15 @@ def find_comp_render_mov_pair(
     shot_name: str,
     project_code: str,
     server_root: str,
+    *,
+    task_content: str = "",
 ) -> Tuple[Optional[Path], Optional[Path]]:
     """최신 버전 번호의 일반 MOV 와 ``_lut`` MOV 쌍을 반환한다.
+
+    Parameters
+    ----------
+    task_content :
+        ShotGrid Task Name. 지정하면 해당 태스크 폴더만 찾는다 (comp 폴백 없음).
 
     Returns
     -------
@@ -1363,7 +1406,8 @@ def find_comp_render_mov_pair(
     if shot_root is None:
         return None, None
 
-    candidates, _tried = _collect_render_video_candidates(shot_root, (".mov",))
+    task_slug = canonical_task_slug(task_content) if task_content else ""
+    candidates, _tried = _collect_render_video_candidates(shot_root, (".mov",), task_slug)
     if not candidates:
         return None, None
 
