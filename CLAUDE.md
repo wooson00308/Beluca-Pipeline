@@ -112,6 +112,29 @@ from bpe.core.atomic_io import read_json_file, write_json_file
 ```
 직접 open()으로 JSON 쓰지 말 것. 네트워크 폴더에서 파일이 깨질 수 있음.
 
+## 공유 서버는 읽기 전용 (절대 위반 금지)
+
+`W:` 드라이브(`\\zeus.lennon.co.kr\beluca`)는 팀 전체가 쓰는 실서버다.
+조사·확인 목적의 **읽기만** 허용한다.
+
+**사용자의 명시적 허락 없이 금지:** 파일·폴더의 수정 / 삭제 / 이동 / 이름 변경 /
+생성(임시 파일 포함) / 권한 변경. 빌드 산출물 복사(`W:\team\_Pipeline\dits-test`)처럼
+서버에 쓰는 작업은 **먼저 묻고 명시적 승인을 받은 뒤에만** 실행한다.
+알림·팝업은 승인의 대체물이 아니다.
+
+**허용:** `ls`·`find`·`cat`·`head`·`sed -n`·`Get-Content`·Glob·Grep·Read,
+sqlite `mode=ro`. 서버 경로에 `rm`/`mv`/`cp`/`mkdir`/`>`/`Remove-Item`/`Set-Content`/
+`open(..., "w")`/`write_json_file` 등을 쓰지 말 것.
+
+**임시 파일은 로컬에만** — 조사 스크립트·중간 결과·캡쳐는 `tempfile.mkdtemp()` 나
+`tmp_path` 에만 만든다.
+
+**테스트 격리** — `config_dir()`·`APP_DIR` 등 서버를 가리킬 수 있는 경로를 건드리는
+테스트는 실행 전에 `monkeypatch`/`tmp_path` 격리가 걸려 있는지 확인한다.
+2026-08-13 에 격리 누락으로 팀 공유 `library.json` 이 덮어써진 사고가 있었다.
+
+자세한 내용은 `.cursor/rules/server-readonly.mdc` 참조.
+
 ## 에러 처리
 
 ShotGrid 관련 에러는 ShotGridError로 감싸기:

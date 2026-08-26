@@ -1,0 +1,69 @@
+---
+description: 공유 서버(W: 드라이브) 읽기 전용 — 수정·삭제·이동·생성 절대 금지
+alwaysApply: true
+---
+
+# 공유 서버는 읽기 전용
+
+`W:` 드라이브(`\\zeus.lennon.co.kr\beluca`)는 팀 전체가 쓰는 실서버다.
+조사·확인 목적의 **읽기만** 허용한다. 실수 하나가 팀 데이터 사고가 된다.
+
+## 절대 금지 (사용자의 명시적 허락 없이는)
+
+- 파일·폴더 **수정**
+- 파일·폴더 **삭제**
+- 파일·폴더 **이동 / 이름 변경**
+- 파일·폴더 **생성** (임시 파일 포함)
+- 권한·속성 변경
+
+빌드 산출물 복사(`W:\team\_Pipeline\dits-test`)처럼 서버에 쓰는 작업은
+**반드시 먼저 묻고 명시적 승인을 받은 뒤에만** 실행한다.
+알림·팝업은 승인의 대체물이 아니다.
+
+## 허용 (읽기 전용 명령만)
+
+| 목적 | 써도 되는 것 |
+|------|-------------|
+| 폴더 목록 | `ls`, `Get-ChildItem`, Glob |
+| 파일 찾기 | `find`, Glob, Grep |
+| 내용 보기 | `cat`, `head`, `sed -n`, `Get-Content`, Read |
+| 개수/통계 | `wc -l`, `Measure-Object` |
+| SQLite | `file:...?mode=ro` (읽기 전용 URI) |
+
+**금지 패턴** — 서버 경로를 대상으로 절대 쓰지 말 것:
+
+```bash
+rm / mv / cp / mkdir / touch / > / >> / tee        # 셸
+Remove-Item / Move-Item / Copy-Item / New-Item     # PowerShell
+Set-Content / Out-File / Add-Content
+```
+
+```python
+open(server_path, "w")   # 또는 "a", "x"
+Path(server_path).write_text(...) / .unlink() / .rename() / .mkdir()
+shutil.copy / shutil.move / shutil.rmtree
+write_json_file(server_path, ...)
+```
+
+## 임시 파일은 로컬에만
+
+조사용 스크립트·중간 결과·캡쳐 이미지는 **로컬 임시 폴더**(`tempfile.mkdtemp()`,
+`tmp_path`)에만 만든다. 서버 경로에는 어떤 임시 파일도 남기지 않는다.
+
+## 테스트 격리 (사고 이력 있음)
+
+테스트가 **간접적으로** 서버에 쓸 수 있다. `config_dir()`, `APP_DIR`,
+`get_source_library_root()` 등 서버를 가리킬 수 있는 함수를 건드리는 테스트는
+실행 **전에** `monkeypatch` / `tmp_path` 격리가 실제로 걸려 있는지 확인한다.
+특히 새로 추가한 테스트 함수는 fixture 인자를 빠뜨리기 쉽다.
+
+> 2026-08-13: 테스트 격리 누락으로 `W:\team\_Pipeline\BPE_SourceLibrary\library.json`
+> 이 3회 덮어써져 팀의 MMK 라이브러리 그룹과 등록 루트 2개가 소실됐다.
+> `tests/conftest.py` 의 격리 fixture 를 먼저 확인할 것.
+
+## 조사하다 실수하지 않으려면
+
+- 서버 경로를 다루는 명령은 **읽기 동사로 시작하는지** 눈으로 확인하고 실행한다.
+- 리다이렉션(`>`)이 섞인 한 줄 명령을 서버 경로에 쓰지 않는다.
+- 파이프 마지막이 쓰기 명령으로 끝나지 않는지 확인한다.
+- 확신이 없으면 **실행하지 말고 사용자에게 묻는다.**
