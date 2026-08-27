@@ -534,8 +534,11 @@ def find_shot_folder_by_task(
     * ``comp`` → ``shot_root/comp/devl`` (있으면)
     * ``fx`` → ``shot_root/fx``
     * ``matte`` → ``shot_root/matte``
-    * 그 외(``rnd`` 등) → ``shot_root/<slug>/devl`` (``devl/nuke`` 가 있을 때만)
-    * 폴더 없거나 빈 문자열 → :func:`find_shot_folder` 와 동일 ( ``comp/devl/nuke`` 우선 등 )
+    * 그 외(``rnd``·``env`` 등) → ``shot_root/<slug>/devl`` → ``shot_root/<slug>`` →
+      둘 다 없으면 ``shot_root``. **다른 파트(comp)로 넘어가지 않는다** — 「NukeX 열기」와
+      같은 원칙. 남의 파트 폴더를 열어 작업 파일을 덮어쓰는 사고를 막기 위함.
+    * 태스크가 비었거나 comp 별칭이면 :func:`find_shot_folder` 와 동일
+      ( ``comp/devl/nuke`` 우선 등 )
     """
     sn = (shot_name or "").strip()
     pc = (project_code or "").strip()
@@ -561,18 +564,30 @@ def find_shot_folder_by_task(
         except OSError:
             return Path(normalize_path_str(shot_root))
 
-    # 미등록 태스크: Shot Build로 만든 {slug}/devl/nuke 가 있으면 그 devl 열기
+    # 미등록 태스크(rnd·env 등): 자기 파트 폴더 안에서만 찾는다.
+    # Shot Build 전이라 devl/nuke 가 아직 없어도 comp 로 넘어가지 않고,
+    # 파트 폴더 → 샷 폴더 순으로 물러난다.
     slug = canonical_task_slug(task_content)
     if slug and slug != DEFAULT_TASK_FOLDER:
         shot_root = _resolve_shot_root(sr, pc, sn)
-        if shot_root is not None:
-            nuke_dir = shot_root / slug / "devl" / "nuke"
+        if shot_root is None:
+            return None
+        task_root = shot_root / slug
+        for cand in (task_root / "devl", task_root):
             try:
-                if nuke_dir.is_dir():
-                    devl = shot_root / slug / "devl"
-                    return Path(normalize_path_str(devl.resolve()))
+                if cand.is_dir():
+                    return Path(normalize_path_str(cand.resolve()))
             except OSError:
-                pass
+                continue
+        logger.info(
+            "폴더 열기: %s 파트 폴더가 없어 샷 폴더를 연다 shot=%s",
+            slug,
+            sn,
+        )
+        try:
+            return Path(normalize_path_str(shot_root.resolve()))
+        except OSError:
+            return Path(normalize_path_str(shot_root))
 
     return find_shot_folder(shot_name, project_code, server_root)
 

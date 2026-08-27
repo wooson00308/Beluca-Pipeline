@@ -882,12 +882,13 @@ class TestFindShotFolderByTask:
             got = find_shot_folder_by_task("E01_S01_030", "PRJ", str(tmp_path), tc)
             assert got == matte_dir.resolve()
 
-    def test_other_task_delegates_to_find_shot_folder(self, tmp_path):
+    def test_other_task_never_opens_comp(self, tmp_path):
+        """파트 폴더가 없으면 comp 가 멀쩡해도 comp 를 열지 않고 샷 폴더로 물러난다."""
         shot_root = self._make_standard_shot(tmp_path, "E01_S01_040")
         nuke_dir = shot_root / "comp" / "devl" / "nuke"
         nuke_dir.mkdir(parents=True)
         got = find_shot_folder_by_task("E01_S01_040", "PRJ", str(tmp_path), "Lighting")
-        assert got == nuke_dir.resolve()
+        assert got == shot_root.resolve()
 
     def test_rnd_opens_rnd_devl_when_nuke_exists(self, tmp_path):
         shot_root = self._make_standard_shot(tmp_path, "E01_S01_050")
@@ -896,13 +897,32 @@ class TestFindShotFolderByTask:
         got = find_shot_folder_by_task("E01_S01_050", "PRJ", str(tmp_path), "RND")
         assert got == (shot_root / "rnd" / "devl").resolve()
 
-    def test_rnd_without_nuke_falls_back_to_comp(self, tmp_path):
+    def test_rnd_without_nuke_opens_own_devl(self, tmp_path):
+        """Shot Build 전이라 nuke 가 없어도 자기 devl 을 연다 (comp 로 안 감)."""
         shot_root = self._make_standard_shot(tmp_path, "E01_S01_051")
-        (shot_root / "rnd" / "devl").mkdir(parents=True)  # nuke 없음
+        rnd_devl = shot_root / "rnd" / "devl"
+        rnd_devl.mkdir(parents=True)  # nuke 없음
+        (shot_root / "comp" / "devl" / "nuke").mkdir(parents=True)
+        got = find_shot_folder_by_task("E01_S01_051", "PRJ", str(tmp_path), "RND")
+        assert got == rnd_devl.resolve()
+
+    def test_task_folder_without_devl_opens_task_folder(self, tmp_path):
+        """파트 폴더만 있고 속이 비었으면 그 파트 폴더를 연다."""
+        shot_root = self._make_standard_shot(tmp_path, "E01_S01_052")
+        env_dir = shot_root / "env"
+        env_dir.mkdir(parents=True)  # devl 없음
+        (shot_root / "comp" / "devl" / "nuke").mkdir(parents=True)
+        got = find_shot_folder_by_task("E01_S01_052", "PRJ", str(tmp_path), "ENV")
+        assert got == env_dir.resolve()
+
+    def test_missing_task_folder_opens_shot_root_not_comp(self, tmp_path):
+        """파트 폴더 자체가 없으면 comp 가 아니라 샷 폴더."""
+        shot_root = self._make_standard_shot(tmp_path, "E01_S01_053")
         comp_nuke = shot_root / "comp" / "devl" / "nuke"
         comp_nuke.mkdir(parents=True)
-        got = find_shot_folder_by_task("E01_S01_051", "PRJ", str(tmp_path), "RND")
-        assert got == comp_nuke.resolve()
+        got = find_shot_folder_by_task("E01_S01_053", "PRJ", str(tmp_path), "ENV")
+        assert got == shot_root.resolve()
+        assert got != comp_nuke.resolve()
 
     def test_empty_task_content_delegates_to_find_shot_folder(self, tmp_path):
         shot_root = self._make_standard_shot(tmp_path, "E01_S01_041")
