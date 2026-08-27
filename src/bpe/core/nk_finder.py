@@ -619,13 +619,16 @@ def _version_ints_from_nk_path(p: Path) -> List[int]:
 
 
 def find_latest_comp_version_display(
-    shot_name: str, project_code: str, server_root: str
+    shot_name: str, project_code: str, server_root: str, task_content: str = ""
 ) -> Optional[str]:
     """``find_latest_nk_path``와 동일한 NK를 기준으로 표시용 ``v###`` 문자열을 반환한다.
 
+    *task_content* 의 태스크 폴더 안만 본다(비면 ``comp``). 열기 경로와 판정 기준을
+    맞춰서, 남의 파트 NK 버전을 내 버전인 것처럼 표시하지 않는다.
+
     NK가 없거나 파일/부모에 ``v###``가 없으면 ``None`` (UI는 ``—`` 유지).
     """
-    p = find_latest_nk_path(shot_name, project_code, server_root)
+    p = find_latest_nk_path(shot_name, project_code, server_root, task_content)
     if p is None:
         return None
     merged = _version_ints_from_nk_path(p)

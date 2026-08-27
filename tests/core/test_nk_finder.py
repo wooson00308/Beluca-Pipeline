@@ -297,6 +297,48 @@ class TestFindLatestCompVersionDisplay:
 
         assert find_latest_comp_version_display("E01_S01_005", "PRJ", str(tmp_path)) is None
 
+    def test_other_task_card_does_not_borrow_comp_version(self, tmp_path):
+        """comp 가 있어도 rnd 카드는 comp 버전을 빌려오지 않는다.
+
+        회귀 — 열기 경로만 파트별로 고치고 표시 경로를 빠뜨려, rnd 작업이 없는데도
+        카드에 comp 의 v002 가 찍히던 버그.
+        """
+        shot_root = self._make_shot_tree(tmp_path, "E01_S01_006")
+        comp_nuke = shot_root / "comp" / "devl" / "nuke"
+        (comp_nuke / "E01_S01_006_comp_v002.nk").write_text("comp")
+
+        # rnd 폴더 자체가 없는 경우
+        assert find_latest_comp_version_display("E01_S01_006", "PRJ", str(tmp_path), "rnd") is None
+
+        # rnd 폴더는 있지만 비어 있는 경우
+        (shot_root / "rnd" / "devl" / "nuke").mkdir(parents=True)
+        assert find_latest_comp_version_display("E01_S01_006", "PRJ", str(tmp_path), "rnd") is None
+
+    def test_each_task_reports_its_own_version(self, tmp_path):
+        """comp·rnd 가 둘 다 있으면 각 카드가 자기 파트 버전을 본다."""
+        shot_root = self._make_shot_tree(tmp_path, "E01_S01_007")
+        comp_nuke = shot_root / "comp" / "devl" / "nuke"
+        (comp_nuke / "E01_S01_007_comp_v002.nk").write_text("comp")
+        rnd_nuke = shot_root / "rnd" / "devl" / "nuke"
+        rnd_nuke.mkdir(parents=True)
+        (rnd_nuke / "E01_S01_007_rnd_v007.nk").write_text("rnd")
+
+        assert (
+            find_latest_comp_version_display("E01_S01_007", "PRJ", str(tmp_path), "comp") == "v002"
+        )
+        assert (
+            find_latest_comp_version_display("E01_S01_007", "PRJ", str(tmp_path), "rnd") == "v007"
+        )
+
+    def test_blank_task_content_still_means_comp(self, tmp_path):
+        """태스크를 안 넘기면 기존과 동일하게 comp 를 본다."""
+        shot_root = self._make_shot_tree(tmp_path, "E01_S01_008")
+        comp_nuke = shot_root / "comp" / "devl" / "nuke"
+        (comp_nuke / "E01_S01_008_comp_v004.nk").write_text("comp")
+
+        assert find_latest_comp_version_display("E01_S01_008", "PRJ", str(tmp_path)) == "v004"
+        assert find_latest_comp_version_display("E01_S01_008", "PRJ", str(tmp_path), "") == "v004"
+
 
 # ── find_comp_render_mov ─────────────────────────────────────────
 

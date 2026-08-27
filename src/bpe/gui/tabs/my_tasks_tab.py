@@ -235,9 +235,14 @@ def _normalize_task_status(t: Dict[str, Any]) -> str:
 
 
 def _version_cache_key(t: Dict[str, Any]) -> str:
+    """샷·프로젝트·태스크 폴더까지 묶은 키.
+
+    파트를 빼면 같은 샷의 comp/rnd 카드가 한 슬롯을 공유해 서로 값을 덮어쓴다.
+    """
     shot = (t.get("shot_code") or "").strip()
     proj = (t.get("project_code") or t.get("project_folder") or "").strip()
-    return f"{shot}\x00{proj}"
+    slug = canonical_task_slug(t.get("task_content") or "")
+    return f"{shot}\x00{proj}\x00{slug}"
 
 
 def _filter_tasks_by_status(tasks: List[Dict[str, Any]], active: str) -> List[Dict[str, Any]]:
@@ -2681,8 +2686,9 @@ class MyTasksTab(QWidget):
                 if not server_root:
                     out.append(None)
                     continue
+                task_content = (t.get("task_content") or "").strip()
                 try:
-                    ver = find_latest_comp_version_display(shot, proj, server_root)
+                    ver = find_latest_comp_version_display(shot, proj, server_root, task_content)
                 except Exception:
                     ver = None
                 out.append(ver)
