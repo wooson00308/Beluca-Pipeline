@@ -80,6 +80,266 @@ def test_second_run_skips_unchanged_folders(tmp_app_dir: Path, tmp_path: Path) -
         conn.close()
 
 
+# ── strict (설정 「새로고침」 안전 모드) ────────────────────────────────
+
+
+def _norm(p: object) -> str:
+    return str(p).replace("\\", "/").rstrip("/")
+
+
+def _fail_reading(monkeypatch, failing: List[Path]) -> List[str]:
+    """``failing`` 경로의 폴더 읽기를 실패로 만든다. 실제로 불린 경로 목록을 돌려준다."""
+    import bpe.gui.workers.library_scan_worker as lsw
+
+    real = lsw.read_dir_checked
+    called: List[str] = []
+    bad = {_norm(p) for p in failing}
+
+    def fake(path: str):
+        called.append(_norm(path))
+        if _norm(path) in bad:
+            return [], [], False
+        return real(path)
+
+    monkeypatch.setattr(lsw, "read_dir_checked", fake)
+    return called
+
+
+def _dirs(lib: Path) -> List[str]:
+    conn = db.connect()
+    try:
+        return sorted(db.known_dirs(conn, str(lib)))
+    finally:
+        conn.close()
+
+
+def _names(lib: Path) -> List[str]:
+    conn = db.connect()
+    try:
+        return sorted(r["name"] for r in db.fetch_items(conn, roots=[str(lib)]))
+    finally:
+        conn.close()
+
+
+def _make_days(tmp_path: Path) -> Path:
+    lib = tmp_path / "clips"
+    (lib / "Day1" / "ReelA").mkdir(parents=True)
+    (lib / "Day1" / "ReelB").mkdir(parents=True)
+    (lib / "Day10").mkdir(parents=True)
+    (lib / "Day1" / "ReelA" / "a.mov").write_bytes(b"x")
+    (lib / "Day1" / "ReelB" / "b.mov").write_bytes(b"x")
+    (lib / "Day10" / "c.mov").write_bytes(b"x")
+    LibraryScanWorker([str(lib)]).run()
+    return lib
+
+
+def test_strict_picks_up_new_file_like_normal_scan(tmp_app_dir: Path, tmp_path: Path) -> None:
+    lib = _make_days(tmp_path)
+    (lib / "Day1" / "ReelA" / "new.mov").write_bytes(b"x")
+    (lib / "Day2").mkdir()
+    (lib / "Day2" / "d.mov").write_bytes(b"x")
+
+    w = LibraryScanWorker([str(lib)], strict=True)
+    done: List[int] = []
+    w.scan_done.connect(done.append)
+    w.run()
+
+    assert w.read_failures == 0
+    assert done and done[0] >= 2
+    assert _names(lib) == ["a", "b", "c", "d", "new"]
+
+
+def test_strict_keeps_old_index_when_folder_unreadable(
+    tmp_app_dir: Path, tmp_path: Path, monkeypatch
+) -> None:
+    lib = _make_days(tmp_path)
+    dirs_before = _dirs(lib)
+    (lib / "Day1" / "ReelA" / "new.mov").write_bytes(b"x")
+    _fail_reading(monkeypatch, [lib / "Day1"])
+
+    w = LibraryScanWorker([str(lib)], strict=True)
+    w.run()
+
+    assert w.read_failures == 1
+    # 못 읽은 Day1 과 그 하위는 "비었다"로 적히지도, 지워지지도 않는다
+    assert _dirs(lib) == dirs_before
+    assert _names(lib) == ["a", "b", "c"]  # new.mov 는 다음 새로고침 때
+
+
+def test_strict_failure_prefix_does_not_protect_sibling(
+    tmp_app_dir: Path, tmp_path: Path, monkeypatch
+) -> None:
+    """「Day1」 실패가 이름이 비슷한 「Day10」 을 지켜주면 안 된다 (삭제는 정상 반영)."""
+    lib = _make_days(tmp_path)
+    (lib / "Day10" / "c.mov").unlink()
+    (lib / "Day10").rmdir()
+    _fail_reading(monkeypatch, [lib / "Day1"])
+
+    w = LibraryScanWorker([str(lib)], strict=True)
+    w.run()
+
+    assert w.read_failures == 1
+    assert "Day10" not in _dirs(lib)
+    assert _names(lib) == ["a", "b"]
+
+
+def test_strict_unreadable_root_keeps_everything(
+    tmp_app_dir: Path, tmp_path: Path, monkeypatch
+) -> None:
+    lib = _make_days(tmp_path)
+    dirs_before = _dirs(lib)
+    _fail_reading(monkeypatch, [lib])
+
+    w = LibraryScanWorker([str(lib)], strict=True)
+    w.run()
+
+    assert w.read_failures == 1
+    assert _dirs(lib) == dirs_before
+    assert _names(lib) == ["a", "b", "c"]
+
+
+def test_strict_zero_mtime_counts_as_failure(
+    tmp_app_dir: Path, tmp_path: Path, monkeypatch
+) -> None:
+    import bpe.gui.workers.library_scan_worker as lsw
+
+    lib = _make_days(tmp_path)
+    real = lsw.dir_mtime
+    target = _norm(lib / "Day10")
+    monkeypatch.setattr(lsw, "dir_mtime", lambda p: 0.0 if _norm(p) == target else real(p))
+    (lib / "Day10" / "c.mov").unlink()
+
+    w = LibraryScanWorker([str(lib)], strict=True)
+    w.run()
+
+    assert w.read_failures == 1
+    assert _names(lib) == ["a", "b", "c"]  # 확인 못 한 폴더는 예전 목록 유지
+
+
+def test_default_mode_ignores_strict_path(tmp_app_dir: Path, tmp_path: Path, monkeypatch) -> None:
+    """strict=False(전체 스캔 등)는 새 함수를 전혀 안 쓰고 기존 동작 그대로."""
+    lib = _make_days(tmp_path)
+    called = _fail_reading(monkeypatch, [lib / "Day1"])
+    (lib / "Day1" / "ReelA" / "new.mov").write_bytes(b"x")
+
+    w = LibraryScanWorker([str(lib)])
+    w.run()
+
+    assert called == []
+    assert w.read_failures == 0
+    assert _names(lib) == ["a", "b", "c", "new"]
+
+
+def test_strict_is_ignored_for_pack_roots(tmp_app_dir: Path, tmp_path: Path, monkeypatch) -> None:
+    lib = _make_days(tmp_path)
+    called = _fail_reading(monkeypatch, [lib / "Day1"])
+
+    w = LibraryScanWorker([str(lib)], pack_roots=[str(lib)], strict=True)
+    w.run()
+
+    assert called == []
+    assert w.read_failures == 0
+
+
+# ── preview (설정 「새로고침」: 쓰지 않고 모으기만) ────────────────────
+
+
+def _mtimes(lib: Path) -> dict:
+    conn = db.connect()
+    try:
+        rows = conn.execute(
+            "SELECT dir_rel, mtime FROM dirs WHERE root=?", (_norm(lib),)
+        ).fetchall()
+        return {str(r[0]): float(r[1]) for r in rows}
+    finally:
+        conn.close()
+
+
+def test_preview_records_changes_without_writing(tmp_app_dir: Path, tmp_path: Path) -> None:
+    lib = _make_days(tmp_path)
+    before_names, before_dirs, before_mtimes = _names(lib), _dirs(lib), _mtimes(lib)
+    (lib / "Day1" / "ReelA" / "new.mov").write_bytes(b"x")
+    (lib / "Day2").mkdir()
+    (lib / "Day2" / "d.mov").write_bytes(b"x")
+    (lib / "Day10" / "c.mov").unlink()
+    (lib / "Day10").rmdir()
+
+    w = LibraryScanWorker([str(lib)], strict=True, preview=True)
+    done: List[int] = []
+    w.scan_done.connect(done.append)
+    w.run()
+
+    assert w.read_failures == 0
+    assert (_names(lib), _dirs(lib), _mtimes(lib)) == (before_names, before_dirs, before_mtimes)
+    res = w.preview_result
+    assert res is not None
+    assert sorted((c.dir_rel, c.added) for c in res.changes) == [("Day1/ReelA", 1), ("Day2", 1)]
+    assert [(g.dir_rel, g.removed) for g in res.gone] == [("Day10", 1)]
+    groups = res.groups()
+    assert [(g.category, g.kind) for g in groups] == [
+        ("Day2", "new"),
+        ("Day1", "existing"),
+        ("Day10", "existing"),
+    ]
+
+
+def test_preview_ignores_mtime_only_change(tmp_app_dir: Path, tmp_path: Path) -> None:
+    import os
+
+    lib = _make_days(tmp_path)
+    os.utime(lib / "Day10", (1.0, 1.0))
+    w = LibraryScanWorker([str(lib)], strict=True, preview=True)
+    w.run()
+    assert w.preview_result is not None
+    assert w.preview_result.is_empty()
+    assert _mtimes(lib)["Day10"] != 1.0  # preview 는 기록 시각도 안 건드린다
+
+
+def test_preview_read_failure_and_hidden_are_not_gone(
+    tmp_app_dir: Path, tmp_path: Path, monkeypatch
+) -> None:
+    lib = _make_days(tmp_path)
+    _fail_reading(monkeypatch, [lib / "Day1"])
+    w = LibraryScanWorker(
+        [str(lib)], hidden_folders=[str(lib / "Day10")], strict=True, preview=True
+    )
+    w.run()
+    assert w.read_failures == 1
+    assert w.preview_result is not None
+    assert w.preview_result.gone == []
+    assert _names(lib) == ["a", "b", "c"]
+
+
+def test_preview_skips_pack_roots_entirely(tmp_app_dir: Path, tmp_path: Path, monkeypatch) -> None:
+    lib = _make_days(tmp_path)
+    called = _fail_reading(monkeypatch, [])
+    w = LibraryScanWorker([str(lib)], pack_roots=[str(lib)], strict=True, preview=True)
+    w.run()
+    assert called == []
+    assert w.preview_result is not None and w.preview_result.is_empty()
+
+
+def test_preview_then_apply_subset_then_preview_again(tmp_app_dir: Path, tmp_path: Path) -> None:
+    lib = _make_days(tmp_path)
+    (lib / "Day2").mkdir()
+    (lib / "Day2" / "d.mov").write_bytes(b"x")
+    (lib / "Day3").mkdir()
+    (lib / "Day3" / "e.mov").write_bytes(b"x")
+    w = LibraryScanWorker([str(lib)], strict=True, preview=True)
+    w.run()
+    conn = db.connect()
+    try:
+        assert w.preview_result is not None
+        w.preview_result.apply(conn, {(_norm(lib), "Day2")})
+    finally:
+        conn.close()
+    assert _names(lib) == ["a", "b", "c", "d"]
+    w2 = LibraryScanWorker([str(lib)], strict=True, preview=True)
+    w2.run()
+    assert w2.preview_result is not None
+    assert [(g.category, g.kind) for g in w2.preview_result.groups()] == [("Day3", "new")]
+
+
 def test_stop_prevents_pruning_and_further_work(tmp_app_dir: Path, tmp_path: Path) -> None:
     lib = tmp_path / "lib"
     (lib / "Fire").mkdir(parents=True)
