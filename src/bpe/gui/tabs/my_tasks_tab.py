@@ -811,6 +811,10 @@ class MyTasksTab(QWidget):
         self._user_search_seq: int = 0
         self._cards: List[_ShotCard] = []
         self._workers: List[ShotGridWorker] = []
+        # 소스 라이브러리 독립 창 — 열린 창 재사용용 + 만든 창 전부 보관(GC 방지,
+        # 닫힌 창 안의 스레드가 끝나기 전에 파이썬이 창을 지우면 튕긴다).
+        self._source_library_dlg: Optional[Any] = None  # SourceLibraryDialog (지연 import)
+        self._source_library_dlgs: List[QDialog] = []
         self._note_widgets: List[QFrame] = []
         self._last_shot_ids: List[int] = []
         self._notes_req_seq: int = 0
@@ -3371,13 +3375,38 @@ class MyTasksTab(QWidget):
         dlg.exec()
 
     def _open_source_library_dialog(self) -> None:
-        """소스 라이브러리 팝업 — 현재 프로젝트 + 공용 소스를 보여 준다."""
+        """소스 라이브러리 독립 창 — 열어둔 채 BPE 를 계속 쓸 수 있다.
+
+        이미 열려 있으면 새로 만들지 않고 앞으로 가져온다(최소화면 복원).
+        """
         from bpe.gui.widgets.source_library_dialog import SourceLibraryDialog
 
+        dlg = self._source_library_dlg
+        if dlg is not None and not dlg.is_closed() and dlg.isVisible():
+            if dlg.isMinimized():
+                # showNormal() 은 최대화까지 풀어버린다 — 최소화 플래그만 뺀다.
+                dlg.setWindowState(
+                    (dlg.windowState() & ~Qt.WindowState.WindowMinimized)
+                    | Qt.WindowState.WindowActive
+                )
+            dlg.raise_()
+            dlg.activateWindow()
+            return
+
+        # parent 없이 만든 독립 창: BPE 위에 붙어 있지 않고 작업표시줄·최소화가 따로 된다.
         dlg = SourceLibraryDialog(
-            self,
+            None,
             project_id=self._project_combo.currentData(),
             project_name=self._project_combo.currentText(),
             projects=getattr(self, "_projects", None) or [],
         )
-        dlg.exec()
+        dlg.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowMinMaxButtonsHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
+        # 이 창이 남아 있어도 BPE 메인 창을 닫으면 앱이 종료되게 한다.
+        dlg.setAttribute(Qt.WidgetAttribute.WA_QuitOnClose, False)
+        self._source_library_dlg = dlg
+        self._source_library_dlgs.append(dlg)
+        dlg.show()
