@@ -10,9 +10,10 @@ import os
 import sqlite3
 import subprocess
 import sys
-from typing import Any, Dict, List, Optional, Tuple
+import time
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
-from PySide6.QtCore import Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QCoreApplication, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QFontMetrics, QGuiApplication
 from PySide6.QtWidgets import (
     QApplication,
@@ -33,12 +34,14 @@ from bpe.core import media_thumbs
 from bpe.core import source_library_config as libcfg
 from bpe.core import source_library_db as db
 from bpe.core import source_library_publish as publish
+from bpe.core import source_library_refresh as refresh
 from bpe.core.library_reveal import row_reveal_path, windows_explorer_select_args
 from bpe.core.logging import get_logger
 from bpe.core.nuke_render_paths import normalize_path_str
 from bpe.core.settings import get_source_library_settings
 from bpe.core.source_library_scan import row_dir_path, row_pattern_path
 from bpe.gui import theme
+from bpe.gui.widgets.library_refresh_review_dialog import LibraryRefreshReviewDialog
 from bpe.gui.widgets.library_tree import LibraryTree
 from bpe.gui.widgets.lock_overlay import LockOverlay
 from bpe.gui.widgets.sequence_scrub_widget import MediaPreviewWidget
@@ -63,6 +66,49 @@ _admin_unlocked_this_session = False
 
 _nuke_plugin_warning_shown_this_session = False
 """Nuke 플러그인 자동 동기화 결과 안내 — 라이브러리 창 열 때마다 반복하지 않고 한 번만."""
+
+# ── 앱 종료 시 워커 스레드 대기 ────────────────────────────────────────
+# 라이브러리 창은 BPE 를 잠그지 않아 스캔·공유 목록 받기 도중 BPE 를 끌 수 있다.
+# Qt 는 종료 때 창의 closeEvent(_shutdown — 짧게만 기다림)를 먼저 부르고 그 뒤
+# aboutToQuit 을 보내므로, 아직 도는 스레드를 여기 모아 두었다가 한 번 더 기다린다
+# (돌던 QThread 가 파괴되면 프로세스가 튕긴다).
+_LIVE_THREADS: List[QThread] = []
+_QUIT_WAIT_MS = 8000
+_quit_hook_installed = False
+
+
+def _track_thread(thread: QThread) -> None:
+    """시작한 워커를 종료 대기 목록에 넣고, 끝난 것은 정리한다."""
+    global _quit_hook_installed
+    alive: List[QThread] = []
+    for t in _LIVE_THREADS:
+        try:
+            if t.isRunning():
+                alive.append(t)
+        except RuntimeError:  # C++ 객체가 이미 삭제됨
+            pass
+    alive.append(thread)
+    _LIVE_THREADS[:] = alive
+    if not _quit_hook_installed:
+        app = QCoreApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(_wait_live_threads_on_quit)
+            _quit_hook_installed = True
+
+
+def _wait_live_threads_on_quit() -> None:
+    """앱 종료 직전 — 살아있는 워커를 합쳐서 최대 ``_QUIT_WAIT_MS`` 까지 기다린다."""
+    deadline = time.monotonic() + _QUIT_WAIT_MS / 1000.0
+    for t in list(_LIVE_THREADS):
+        remaining = int((deadline - time.monotonic()) * 1000)
+        if remaining <= 0:
+            logger.warning("종료 대기 시간 초과 — 라이브러리 작업이 아직 도는 중")
+            break
+        try:
+            if t.isRunning():
+                t.wait(remaining)
+        except RuntimeError:
+            pass
 
 
 class SourceLibraryDialog(QDialog):
@@ -98,6 +144,14 @@ class SourceLibraryDialog(QDialog):
         self._index_sync_worker: Optional[IndexSyncWorker] = None
         self._scan_queue: List[Dict[str, Any]] = []
         self._scan_publish = True
+        # 설정 「새로고침」(바뀐 부분만) 상태 — 다른 스캔 job 에는 쓰지 않는다.
+        self._refresh_pending = False
+        self._scan_is_refresh = False
+        self._scan_refresh_roots: List[str] = []
+        self._refresh_baseline: Optional[Dict[str, Any]] = None
+        self._refresh_shared_at = ""
+        self._refresh_reviewing = False
+        self._settings_dlg: Optional[SourceLibrarySettingsDialog] = None
         self._current_row: Dict[str, Any] = {}
         self._selected_rows: List[Dict[str, Any]] = []
         self._shutdown_done = False
@@ -349,10 +403,14 @@ class SourceLibraryDialog(QDialog):
         worker.sync_error.connect(self._on_index_sync_error)
         self._index_sync_worker = worker
         worker.start()
+        _track_thread(worker)
 
     def _on_index_sync_done(self, meta: object) -> None:
         if self._shutdown_done:
             return
+        # 끝났지만 신호가 늦게 온 이전 동기와 헷갈리지 않게 — 새로고침은 현재 동기만 잇는다.
+        sender = self.sender()
+        from_current = sender is None or sender is self._index_sync_worker
         if meta:
             meta_d = meta if isinstance(meta, dict) else {}
             self._status_label.setText(
@@ -365,6 +423,8 @@ class SourceLibraryDialog(QDialog):
             # 새로 받은 인덱스를 반영해 조용히 다시 연다 (스캔 중이면 충돌 방지로 건너뜀).
             if not self.is_library_scanning():
                 self._reload_after_scan()
+            if from_current:
+                self._continue_refresh_after_sync()
             return
         shared = publish.read_shared_meta()
         if shared.get("published_at"):
@@ -378,11 +438,18 @@ class SourceLibraryDialog(QDialog):
                     "공유 인덱스 최신 ({:,}개)".format(int(shared.get("items") or 0))
                 )
         self._warn_empty_group_index()
+        if from_current:
+            self._continue_refresh_after_sync()
 
     def _on_index_sync_error(self, err: str) -> None:
         if self._shutdown_done:
             return
         self._status_label.setText("공유 인덱스 동기 실패: {}".format(err))
+        if self._refresh_pending:
+            self._refresh_pending = False
+            self._status_label.setText(
+                "공유 목록을 받지 못해 새로고침을 멈췄습니다: {}".format(err)
+            )
 
     def _warn_empty_group_index(self) -> None:
         """배정은 됐는데 로컬 인덱스가 비어 있는 그룹을 상태줄에 알린다."""
@@ -912,7 +979,11 @@ class SourceLibraryDialog(QDialog):
             _admin_unlocked_this_session = True
 
         dlg = SourceLibrarySettingsDialog(self)
-        dlg.exec()
+        self._settings_dlg = dlg  # 새로고침 리뷰 창의 부모·자동 분류 저장 경로
+        try:
+            dlg.exec()
+        finally:
+            self._settings_dlg = None
         # 설정 반영 (스캔 중이면 pull 생략 — 로컬 writer 와 충돌 방지)
         self._library = libcfg.load_library()
         self._pending_load_warning = libcfg.probe_library_read()
@@ -949,7 +1020,9 @@ class SourceLibraryDialog(QDialog):
 
     def is_library_scanning(self) -> bool:
         w = self._scan_worker
-        return bool(self._scan_queue) or (w is not None and w.isRunning())
+        return (
+            bool(self._scan_queue) or self._refresh_reviewing or (w is not None and w.isRunning())
+        )
 
     def enqueue_library_scan(
         self,
@@ -977,7 +1050,9 @@ class SourceLibraryDialog(QDialog):
             "publish": bool(publish),
             "hidden": list(libcfg.hidden_folders(self._library)),
         }
-        if self._scan_worker is not None and self._scan_worker.isRunning():
+        if self._refresh_reviewing or (
+            self._scan_worker is not None and self._scan_worker.isRunning()
+        ):
             self._merge_scan_job(job)
             self._status_label.setText("스캔·게시 대기열에 추가됨…")
             return
@@ -998,15 +1073,22 @@ class SourceLibraryDialog(QDialog):
         roots = list(job.get("roots") or [])
         if not roots:
             return
+        # 새로고침 여부는 job 마다 새로 정한다 — 이전 새로고침 상태가 다른 스캔에 남지 않게.
+        self._scan_is_refresh = bool(job.get("refresh"))
+        self._refresh_baseline = (
+            self._prepare_refresh_baseline(roots) if self._scan_is_refresh else None
+        )
         limit_mb = int(self._settings.get("thumb_cache_max_mb") or 2048)
         self._scan_publish = bool(job.get("publish", True))
         worker = LibraryScanWorker(
             roots,
             trim_cache_bytes=limit_mb * 1024 * 1024,
-            pack_roots=libcfg.pack_roots(self._library),
+            pack_roots=job.get("pack_roots", libcfg.pack_roots(self._library)),
             hidden_folders=list(job.get("hidden") or []),
             force=bool(job.get("force")),
             parent=self,
+            strict=self._scan_is_refresh,
+            preview=self._scan_is_refresh,
         )
         worker.progress.connect(self._on_scan_progress)
         worker.scan_done.connect(self._on_owner_scan_done)
@@ -1016,6 +1098,7 @@ class SourceLibraryDialog(QDialog):
         self._status_label.setText("스캔·게시 중… (원본은 읽기만)")
         self._scan_cancel_btn.setVisible(True)
         worker.start()
+        _track_thread(worker)
 
     def _on_cancel_scan(self) -> None:
         if self._scan_worker is not None:
@@ -1032,6 +1115,9 @@ class SourceLibraryDialog(QDialog):
         if not self._scan_publish:
             self._status_label.setText("인덱싱 완료 ({:,}개)".format(indexed))
             self._reload_tree(initial=True)
+            return
+        if self._scan_is_refresh:
+            self._finish_refresh(indexed)
             return
         self._status_label.setText("인덱싱 완료 ({:,}개) — 게시 중…".format(indexed))
         try:
@@ -1067,6 +1153,335 @@ class SourceLibraryDialog(QDialog):
             self._conn = None
         self._open_index()
         self._reload_tree(initial=True)
+
+    # ── 설정 「새로고침」 (고른 폴더에서 바뀐 부분만) ───────────────────
+
+    def is_closed(self) -> bool:
+        """창을 닫아 정리가 끝났는지 — My Tasks 가 열린 창을 다시 쓸지 판단한다."""
+        return self._shutdown_done
+
+    def request_library_refresh(self, roots: Sequence[str]) -> str:
+        """설정 창이 부른다. 공유 목록을 먼저 받은 뒤 고른 폴더를 안전 모드로 훑는다.
+
+        반환: 설정 창 상태줄에 띄울 문구.
+        """
+        if self._shutdown_done:
+            return "라이브러리 창이 닫혀 있어 새로고침할 수 없습니다."
+        if self.is_library_scanning():
+            return "이미 스캔 중입니다 — 끝난 뒤 다시 눌러주세요."
+        if self._refresh_pending:
+            return "새로고침 준비 중입니다 — 잠시만 기다려주세요."
+        wanted = list(dict.fromkeys(libcfg.normalize_path(r) for r in roots if r))
+        wanted = [w for w in wanted if w]
+        if not wanted:
+            return "새로고침할 폴더를 고르세요."
+        self._scan_refresh_roots = wanted
+        self._refresh_pending = True
+        self._status_label.setText("새로고침: 공유 목록 확인 중…")
+        # 이미 받는 중이면 그 결과를 기다렸다가 이어서 한다 (_on_index_sync_done).
+        self._start_index_sync()
+        return (
+            "새로고침 요청됨 — 진행·결과는 라이브러리 창 아래쪽에 표시됩니다 "
+            "(창을 닫아도 계속됩니다)"
+        )
+
+    def _continue_refresh_after_sync(self) -> None:
+        """공유 목록 받기가 끝난 뒤 — 대기 중인 새로고침이 있으면 스캔을 시작한다."""
+        if not self._refresh_pending:
+            return
+        self._refresh_pending = False
+        if self._shutdown_done:
+            return
+        if self.is_library_scanning():
+            self._status_label.setText(
+                "다른 스캔이 진행 중이라 새로고침은 건너뜀 — 끝난 뒤 다시 눌러주세요"
+            )
+            return
+        # 설정 창이 열려 있는 동안에도 최신 숨김·분류를 쓰도록 새로 읽는다.
+        # self._library 는 바꾸지 않는다 — 설정 창을 닫을 때 기존 코드가 갱신한다.
+        try:
+            lib = libcfg.load_library()
+            warn = libcfg.probe_library_read()
+        except Exception as exc:
+            lib, warn = None, str(exc)
+        if lib is None or warn:
+            self._status_label.setText(
+                "설정 파일을 못 읽어 새로고침을 멈췄습니다 ({})".format(warn)
+            )
+            return
+        allowed = {root for root, ok in libcfg.refresh_root_choices(lib) if ok}
+        roots = [r for r in self._scan_refresh_roots if r in allowed]
+        if not roots:
+            self._status_label.setText(
+                "새로고침할 폴더가 없습니다 (등록 해제됐거나 Compositing Source로 옮겨짐)"
+            )
+            return
+        try:
+            shared_at = str(publish.read_shared_meta().get("published_at") or "")
+        except Exception:
+            shared_at = ""
+        if not shared_at:
+            self._status_label.setText("공유 목록 정보를 읽지 못해 새로고침을 멈췄습니다")
+            return
+        self._refresh_shared_at = shared_at
+        self._scan_refresh_roots = roots
+        self._start_scan_job(
+            {
+                "roots": roots,
+                "force": False,
+                "publish": True,
+                "hidden": list(libcfg.hidden_folders(lib)),
+                "pack_roots": libcfg.pack_roots(lib),
+                "refresh": True,
+            }
+        )
+        if self._scan_worker is not None and self._scan_worker.isRunning():
+            self._status_label.setText("새로고침: 새 파일 찾는 중… (원본은 읽기만)")
+
+    def _refresh_snapshot_safe(self, roots: Sequence[str]) -> Optional[Dict[str, Any]]:
+        """열려 있는 인덱스 연결로 비교용 요약을 만든다. 실패하면 None(→ 공유 보류)."""
+        if self._conn is None:
+            return None
+        try:
+            return db.refresh_snapshot(self._conn, list(roots))
+        except sqlite3.Error as exc:
+            logger.warning("새로고침 비교 요약 실패: %s", exc)
+            return None
+
+    def _prepare_refresh_baseline(self, roots: Sequence[str]) -> Optional[Dict[str, Any]]:
+        """비교 기준선 = 마지막으로 팀 장부와 맞춘 상태 (로컬 캐시 파일에 보관)."""
+        before = self._refresh_snapshot_safe(roots)
+        try:
+            stored = publish.read_refresh_baseline()
+        except Exception:
+            stored = {}
+        baseline = publish.merge_refresh_baseline(
+            stored, self._refresh_shared_at, before, list(roots)
+        )
+        if baseline is not None:
+            try:
+                publish.write_refresh_baseline(baseline)
+            except Exception as exc:
+                logger.warning("새로고침 기준선 저장 실패: %s", exc)
+        return baseline
+
+    @staticmethod
+    def _organize_suffix(done: Sequence[str], failed: Sequence[str]) -> str:
+        parts: List[str] = []
+        if done:
+            parts.append(
+                "분류에 넣음 {}개 ({}{})".format(
+                    len(done), refresh.leaf_name(done[0]), " 외" if len(done) > 1 else ""
+                )
+            )
+        if failed:
+            parts.append(
+                "분류 못 넣은 폴더 {}개 ({}{}) — 설정에서 넣어주세요".format(
+                    len(failed), refresh.leaf_name(failed[0]), " 외" if len(failed) > 1 else ""
+                )
+            )
+        return "".join(" · " + p for p in parts)
+
+    def _bring_to_front(self) -> None:
+        if self.isMinimized():
+            self.setWindowState(
+                (self.windowState() & ~Qt.WindowState.WindowMinimized) | Qt.WindowState.WindowActive
+            )
+        self.raise_()
+        self.activateWindow()
+
+    def _review_refresh(
+        self, groups: Sequence[refresh.RefreshGroup], failures: int
+    ) -> Optional[Set[refresh.GroupKey]]:
+        """「새로 찾은 것」 창 — 고른 (root, category) 집합, 취소면 None."""
+        self._bring_to_front()
+        parent: QWidget = self._settings_dlg if self._settings_dlg is not None else self
+        dlg = LibraryRefreshReviewDialog(
+            parent,
+            groups,
+            read_failures=failures,
+            multi_root=len({g.root for g in groups}) > 1,
+        )
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        self._status_label.setText("새로고침: 찾은 것을 확인하고 추가할 폴더를 고르세요…")
+        self._refresh_reviewing = True
+        try:
+            rc = dlg.exec()
+        finally:
+            self._refresh_reviewing = False
+        keys = dlg.selected_keys() if rc == QDialog.DialogCode.Accepted else None
+        dlg.deleteLater()
+        return keys
+
+    @staticmethod
+    def _apply_refresh(result: refresh.RefreshPreview, selected: Set[refresh.GroupKey]) -> int:
+        conn = db.connect()
+        try:
+            return result.apply(conn, selected)
+        finally:
+            conn.close()
+
+    def _auto_organize(self, pairs: Sequence[refresh.GroupKey]) -> Tuple[List[str], List[str]]:
+        """새 최상위 폴더를 옆 폴더와 같은 분류에 넣고 library.json 에 저장한다.
+
+        설정 창이 열려 있으면 그 창의 사본에 적용해 저장한다 — 설정 창이 닫힐 때 옛
+        사본으로 덮어쓰지 않게.
+        """
+        if not pairs:
+            return [], []
+        settings = self._settings_dlg
+        if settings is not None:
+            return settings.apply_auto_organize(list(pairs))
+        lib = libcfg.load_library()
+        targets = refresh.auto_organize_targets(lib, pairs)
+        done, failed = refresh.apply_auto_organize(lib, targets)
+        if done:
+            libcfg.save_library(lib)
+            self._library = lib
+            self._roots = libcfg.roots_for_view(lib)
+        return done, failed
+
+    @staticmethod
+    def _refresh_hold_text(reason: str, failures: int) -> str:
+        if reason == publish.REFRESH_UNCHANGED:
+            return "새로고침 완료 — 새로 들어오거나 바뀐 파일 없음"
+        if reason == publish.REFRESH_READ_ERROR:
+            return (
+                "새로고침: 폴더 {}개를 읽지 못해 팀 공유 보류 (내 PC만 반영) "
+                "— 네트워크 확인 후 다시 눌러주세요".format(failures)
+            )
+        if reason == publish.REFRESH_BIG_LOSS:
+            return "새로고침: 항목이 많이 줄어 팀 공유 보류 — 「전체 스캔」 필요"
+        if reason == publish.REFRESH_SHARED_MOVED:
+            return "새로고침: 그사이 다른 사람이 공유 목록을 갱신해 올리지 않음 — 다시 누르면 반영"
+        if reason == publish.REFRESH_SHARED_NEWER_FORMAT:
+            return "새로고침: 공유 목록이 더 새 BPE 형식이라 올리지 않음 — BPE 업데이트 필요"
+        return "새로고침: 상태 확인 실패로 팀 공유 보류"
+
+    def _finish_refresh(self, indexed: int) -> None:
+        """새로고침 스캔 완료 — 찾은 것을 보여주고 고른 폴더만 넣은 뒤, 팀 장부와
+        비교해 바뀐 게 있을 때만 게시한다."""
+        baseline = self._refresh_baseline
+        roots = list(self._scan_refresh_roots)
+        self._scan_is_refresh = False
+        self._refresh_baseline = None
+        worker = self._scan_worker
+        failures = int(getattr(worker, "read_failures", 0) or 0)
+        result = getattr(worker, "preview_result", None) or refresh.RefreshPreview()
+        # 인덱스엔 있는데 트리에 안 보이는 폴더(분류 안 됨)도 같이 보여준다.
+        lib_now: Optional[Dict[str, Any]] = None
+        try:
+            lib_now = libcfg.load_library()
+            counts = db.list_folders(self._conn, roots=roots) if self._conn is not None else []
+            for r, c, n in refresh.unorganized_categories(lib_now, counts):
+                result.add_unorganized(r, c, n)
+        except Exception as exc:
+            logger.warning("분류 안 된 폴더 조회 실패: %s", exc)
+        groups = result.groups()
+        applied = 0
+        organized_done: List[str] = []
+        organized_failed: List[str] = []
+        if groups:
+            selected = self._review_refresh(groups, failures)
+            if self._shutdown_done or QCoreApplication.closingDown():
+                return
+            if selected is None:
+                self._status_label.setText("새로고침 취소 — 아무것도 추가하지 않음")
+                return
+            try:
+                applied = self._apply_refresh(result, selected)
+            except Exception as exc:
+                logger.warning("새로고침 적용 실패: %s", exc)
+                self._status_label.setText("새로고침: 추가하지 못했습니다 — {}".format(exc))
+                return
+            # 그룹이 소유한 루트(평탄 표시)의 폴더는 분류 없이도 보이므로 건너뛴다.
+            pairs = [
+                g.key
+                for g in groups
+                if g.key in selected
+                and g.kind in (refresh.GROUP_NEW, refresh.GROUP_UNORGANIZED)
+                and (lib_now is None or refresh.root_needs_organize(lib_now, g.root))
+            ]
+            try:
+                organized_done, organized_failed = self._auto_organize(pairs)
+            except Exception as exc:
+                logger.warning("자동 분류 실패: %s", exc)
+                organized_failed = [libcfg.folder_abs(r, c) for r, c in pairs]
+        indexed = applied
+        after = self._refresh_snapshot_safe(roots)
+        try:
+            shared = publish.read_shared_meta()
+        except Exception:
+            shared = {}
+        should_publish, reason = publish.refresh_publish_decision(
+            baseline,
+            after,
+            read_failures=failures,
+            shared_grouping_version=int(shared.get("grouping_version") or 0),
+            shared_moved=str(shared.get("published_at") or "") != self._refresh_shared_at,
+        )
+        suffix = self._organize_suffix(organized_done, organized_failed)
+        logger.info("새로고침 결과: %s (읽기 실패 %s, 갱신 %s)", reason, failures, indexed)
+        if not should_publish:
+            if reason != publish.REFRESH_UNCHANGED or organized_done:
+                self._reload_after_refresh()
+            text = self._refresh_hold_text(reason, failures) + suffix
+            if organized_done and reason != publish.REFRESH_UNCHANGED:
+                text += " · 팀 공유는 보류 — 다른 PC에는 다음 게시 후 보임"
+            self._status_label.setText(text)
+            return
+        self._status_label.setText("새로고침: 팀 공유 목록 올리는 중…")
+        self._status_label.repaint()
+        try:
+            conn = db.connect()
+            try:
+                meta = publish.publish_index(conn)
+            finally:
+                conn.close()
+            if after is not None:
+                try:
+                    publish.write_refresh_baseline(
+                        {
+                            "published_at": str(meta.get("published_at") or ""),
+                            "roots": after.get("roots") or {},
+                            "categories": after.get("categories") or {},
+                        }
+                    )
+                except Exception as exc:
+                    logger.warning("새로고침 기준선 갱신 실패: %s", exc)
+            final = "새로고침 완료 — 팀 공유 목록 갱신 (이번 갱신 {:,}개)".format(indexed)
+        except Exception as exc:
+            logger.warning("새로고침 게시 실패: %s", exc)
+            final = "게시 실패: {} (이 PC에는 반영됨)".format(exc)
+        self._reload_after_refresh()
+        self._status_label.setText(final + suffix)
+
+    def _reload_after_refresh(self) -> None:
+        """새로고침 뒤 — 인덱스를 다시 열되 트리는 보던 위치(펼침·선택)를 유지한다."""
+        if self._shutdown_done:
+            return
+        if self._model is not None:
+            try:
+                self._model.shutdown()
+            except Exception:
+                pass
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._conn = None
+        self._open_index()
+        self._reload_tree(initial=False)
+        # 모델이 바뀌어 그리드 선택은 풀렸다 — 옛 선택으로 복사·열기가 되지 않게 비운다.
+        self._current_row = {}
+        self._selected_rows = []
+        self._set_path_display("")
+        self._set_action_enabled(False)
+        try:
+            self._preview.clear()
+        except Exception:
+            pass
 
     def _drain_scan_queue(self) -> None:
         if self._shutdown_done:

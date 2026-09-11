@@ -410,6 +410,15 @@ class SourceLibrarySettingsDialog(QDialog):
         )
         scan_btn.clicked.connect(self._on_scan_publish)
         bottom.addWidget(scan_btn)
+        refresh_btn = QPushButton("새로고침")
+        refresh_btn.setFixedWidth(100)
+        refresh_btn.setToolTip(
+            "고른 폴더에서 바뀐 부분만 다시 훑어 새 파일을 반영합니다 (약 30초, 원본은 읽기만). "
+            "새 클립이 있을 때만 팀 공유 목록을 갱신합니다. "
+            "Compositing Source는 「전체 스캔」으로 갱신합니다."
+        )
+        refresh_btn.clicked.connect(self._on_refresh_request)
+        bottom.addWidget(refresh_btn)
         bottom.addStretch()
         close_btn = QPushButton("닫기")
         close_btn.setFixedWidth(80)
@@ -1500,6 +1509,45 @@ class SourceLibrarySettingsDialog(QDialog):
             return
         owner.enqueue_library_scan(roots, force=True, publish=True, missing_only=False)
         self._status.setText("전체 스캔 요청됨 (창을 닫아도 계속됩니다)")
+
+    def apply_auto_organize(self, pairs: List[Tuple[str, str]]) -> Tuple[List[str], List[str]]:
+        """새로고침이 추가한 최상위 폴더를 옆 폴더와 같은 분류에 넣고 저장한다.
+
+        메인 라이브러리가 이 창이 열려 있는 동안 부른다 — 이 창의 사본에 적용해야
+        닫을 때 옛 사본으로 덮어쓰지 않는다. 반환 ``(넣은 abs, 못 넣은 abs)``.
+        """
+        from bpe.core import source_library_refresh as refresh
+
+        targets = refresh.auto_organize_targets(self._library, pairs)
+        done, failed = refresh.apply_auto_organize(self._library, targets)
+        if done:
+            self._persist_and_status(
+                "새로고침: 분류에 넣음 {}개".format(len(done)),
+                reload=lambda: self._reload_group_tree(),
+            )
+        return done, failed
+
+    def _on_refresh_request(self) -> None:
+        """고른 폴더만 바뀐 부분 새로고침 — 실제 진행은 메인 라이브러리(스캔 소유자)."""
+        owner = self._owner_scan()
+        if owner is None or not hasattr(owner, "request_library_refresh"):
+            self._status.setText("스캔 소유자를 찾을 수 없습니다.")
+            return
+        choices = libcfg.refresh_root_choices(self._library)
+        if not any(selectable for _root, selectable in choices):
+            self._status.setText(
+                "새로고침할 폴더가 없습니다 (Compositing Source는 「전체 스캔」으로 갱신)."
+            )
+            return
+        from bpe.gui.widgets.library_refresh_roots_dialog import LibraryRefreshRootsDialog
+
+        picker = LibraryRefreshRootsDialog(self, choices)
+        if picker.exec() != QDialog.DialogCode.Accepted:
+            return
+        roots = picker.selected_roots()
+        if not roots:
+            return
+        self._status.setText(str(owner.request_library_refresh(roots)))
 
     def _shutdown(self) -> None:
         """설정만 닫음 — 스캔 워커는 메인 라이브러리가 소유하므로 stop 하지 않음."""
