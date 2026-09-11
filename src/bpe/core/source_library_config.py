@@ -594,6 +594,24 @@ def pack_roots(library: Dict[str, Any]) -> List[str]:
     return []
 
 
+def refresh_root_choices(library: Dict[str, Any]) -> List[Tuple[str, bool]]:
+    """설정 「새로고침」 폴더 선택지 — 등록 루트 순서대로 ``(root, 선택 가능)``.
+
+    Compositing Source(팩) 루트는 새로고침 안전 모드가 온전히 적용되지 않고
+    훑는 데 매우 오래 걸려(수천만 파일) 선택 불가로 둔다 — 「전체 스캔」 대상.
+    """
+    packs = {normalize_path(r) for r in pack_roots(library)}
+    out: List[Tuple[str, bool]] = []
+    seen: set = set()
+    for r in roots_for_view(library):
+        root_n = normalize_path(r)
+        if not root_n or root_n in seen:
+            continue
+        seen.add(root_n)
+        out.append((root_n, root_n not in packs))
+    return out
+
+
 def migrate_bag_to_virtual_folders(library: Dict[str, Any]) -> int:
     """최상위 bag[] 을 동명 virtual 폴더로 승격한다 (평탄 표시 → [폴더]).
 

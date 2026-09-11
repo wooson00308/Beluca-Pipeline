@@ -225,6 +225,17 @@ def read_dir(path: str) -> Tuple[List[str], List[FileEntry]]:
     네트워크 폴더에서 ``stat`` 을 파일마다 새로 부르지 않도록 ``scandir`` 의 캐시된
     ``DirEntry.stat()`` 을 쓴다. 접근 불가 항목은 조용히 건너뛴다.
     """
+    subdirs, files, _ok = read_dir_checked(path)
+    return subdirs, files
+
+
+def read_dir_checked(path: str) -> Tuple[List[str], List[FileEntry], bool]:
+    """:func:`read_dir` 와 같되 폴더 자체를 못 읽었는지(``ok=False``)도 알려준다.
+
+    폴더 열기·순회 중 ``OSError`` 면 ``([], [], False)``. 항목 하나의 오류는
+    기존처럼 건너뛰고 실패로 치지 않는다. 새로고침 안전 모드가 "못 읽음"을
+    "빈 폴더"로 오인하지 않으려고 쓴다.
+    """
     subdirs: List[str] = []
     files: List[FileEntry] = []
     try:
@@ -247,9 +258,9 @@ def read_dir(path: str) -> Tuple[List[str], List[FileEntry]]:
                 except OSError:
                     continue
     except OSError:
-        return [], []
+        return [], [], False
     subdirs.sort(key=str.lower)
-    return subdirs, files
+    return subdirs, files, True
 
 
 def scan_dir_items(path: str) -> List[LibraryItem]:

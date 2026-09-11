@@ -264,6 +264,31 @@ def test_read_dir_missing_path_returns_empty():
     assert read_dir("Z:/definitely/not/here") == ([], [])
 
 
+def test_read_dir_checked_reports_success(tmp_path: Path):
+    from bpe.core.source_library_scan import read_dir_checked
+
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "b.mov").write_bytes(b"x" * 5)
+    subdirs, files, ok = read_dir_checked(str(tmp_path))
+    assert ok is True
+    assert subdirs == ["sub"]
+    assert [f.name for f in files] == ["b.mov"]
+    # read_dir 는 같은 결과(ok 없이)를 돌려준다
+    assert read_dir(str(tmp_path)) == (subdirs, files)
+
+
+def test_read_dir_checked_empty_folder_is_ok(tmp_path: Path):
+    from bpe.core.source_library_scan import read_dir_checked
+
+    assert read_dir_checked(str(tmp_path)) == ([], [], True)
+
+
+def test_read_dir_checked_missing_path_is_failure():
+    from bpe.core.source_library_scan import read_dir_checked
+
+    assert read_dir_checked("Z:/definitely/not/here") == ([], [], False)
+
+
 def test_try_build_pack_actionvfx_layout(tmp_path: Path):
     from bpe.core.source_library_scan import row_pattern_path, row_preview_path, try_build_pack
 

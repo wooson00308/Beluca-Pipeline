@@ -9,6 +9,133 @@ from bpe.core import source_library_db as db
 from bpe.core import source_library_publish as publish
 from bpe.core.source_library_scan import FileEntry, group_entries
 
+# ── 설정 「새로고침」 판정 ────────────────────────────────────────────
+
+_R = "W:/proj/clips"
+
+
+def _snap(items: int, digest: str, cats=None):
+    return {
+        "roots": {_R: {"items": items, "digest": digest}},
+        "categories": {_R: dict(cats or {})},
+    }
+
+
+def _decide(baseline, after, **kw):
+    opts = {"read_failures": 0, "shared_grouping_version": 2, "shared_moved": False}
+    opts.update(kw)
+    return publish.refresh_publish_decision(baseline, after, **opts)
+
+
+def test_refresh_decision_unknown_when_snapshot_missing():
+    assert _decide(None, _snap(1, "a")) == (False, publish.REFRESH_UNKNOWN)
+    assert _decide(_snap(1, "a"), None) == (False, publish.REFRESH_UNKNOWN)
+
+
+def test_refresh_decision_unknown_when_root_missing_in_baseline():
+    after = {"roots": {"W:/other": {"items": 1, "digest": "x"}}, "categories": {}}
+    assert _decide(_snap(1, "a"), after) == (False, publish.REFRESH_UNKNOWN)
+
+
+def test_refresh_decision_read_error_wins_over_everything():
+    assert _decide(_snap(1, "a"), _snap(5, "b"), read_failures=2) == (
+        False,
+        publish.REFRESH_READ_ERROR,
+    )
+
+
+def test_refresh_decision_unchanged():
+    assert _decide(_snap(3, "a"), _snap(3, "a")) == (False, publish.REFRESH_UNCHANGED)
+
+
+def test_refresh_decision_changed_publishes():
+    assert _decide(_snap(3, "a"), _snap(10, "b")) == (True, publish.REFRESH_CHANGED)
+
+
+def test_refresh_decision_rename_same_count_publishes():
+    assert _decide(_snap(3, "a"), _snap(3, "b")) == (True, publish.REFRESH_CHANGED)
+
+
+def test_refresh_decision_shared_newer_format():
+    assert _decide(_snap(3, "a"), _snap(4, "b"), shared_grouping_version=99) == (
+        False,
+        publish.REFRESH_SHARED_NEWER_FORMAT,
+    )
+
+
+def test_refresh_decision_shared_moved():
+    assert _decide(_snap(3, "a"), _snap(4, "b"), shared_moved=True) == (
+        False,
+        publish.REFRESH_SHARED_MOVED,
+    )
+
+
+def test_refresh_decision_small_loss_publishes_big_loss_holds():
+    # 기준 1000개: 허용 감소 = max(200, 20) = 200
+    assert _decide(_snap(1000, "a"), _snap(800, "b")) == (True, publish.REFRESH_CHANGED)
+    assert _decide(_snap(1000, "a"), _snap(799, "b")) == (False, publish.REFRESH_BIG_LOSS)
+    # 기준 100000개: 허용 감소 = max(200, 2000) = 2000
+    assert _decide(_snap(100000, "a"), _snap(98000, "b")) == (True, publish.REFRESH_CHANGED)
+    assert _decide(_snap(100000, "a"), _snap(97999, "b")) == (False, publish.REFRESH_BIG_LOSS)
+
+
+def test_new_top_folders_lists_only_newly_appeared():
+    base = _snap(3, "a", {"KMM_old": 3, "_PDf": 0})
+    after = _snap(9, "b", {"KMM_old": 5, "KMM_new2": 2, "KMM_new1": 2, "": 1, "_PDf": 0})
+    assert publish.new_top_folders(base, after) == ["KMM_new1", "KMM_new2"]
+    assert publish.new_top_folders(None, after) == []
+
+
+def test_merge_refresh_baseline_resets_when_published_at_differs():
+    old = {"published_at": "2026-09-01T00:00:00Z", **_snap(1, "old")}
+    cur = _snap(5, "cur")
+    merged = publish.merge_refresh_baseline(old, "2026-09-02T00:00:00Z", cur, [_R])
+    assert merged == {"published_at": "2026-09-02T00:00:00Z", **cur}
+
+
+def test_merge_refresh_baseline_keeps_existing_and_fills_new_roots():
+    old = {"published_at": "T1", **_snap(1, "old")}
+    cur = {
+        "roots": {_R: {"items": 7, "digest": "cur"}, "W:/b": {"items": 2, "digest": "bb"}},
+        "categories": {_R: {"x": 7}, "W:/b": {"y": 2}},
+    }
+    merged = publish.merge_refresh_baseline(old, "T1", cur, [_R, "W:/b"])
+    assert merged is not None
+    assert merged["roots"][_R] == {"items": 1, "digest": "old"}
+    assert merged["roots"]["W:/b"] == {"items": 2, "digest": "bb"}
+    assert merged["categories"]["W:/b"] == {"y": 2}
+
+
+def test_merge_refresh_baseline_none_when_snapshot_failed():
+    assert publish.merge_refresh_baseline({}, "T1", None, [_R]) is None
+
+
+def test_refresh_retry_after_read_error_publishes():
+    """1차가 폴더 못 읽어 보류되면(성공분은 로컬에 이미 반영) 2차는 기준선 대비 변경으로 게시."""
+    baseline = publish.merge_refresh_baseline({}, "T1", _snap(10, "team"), [_R])
+    # 1차: 일부 반영 + 읽기 실패 → 보류, 기준선은 그대로 저장돼 있음
+    assert _decide(baseline, _snap(12, "partial"), read_failures=1)[0] is False
+    # 2차 시작: 로컬 before 는 이미 partial 이지만 같은 published_at 이라 기준선 유지
+    baseline2 = publish.merge_refresh_baseline(baseline, "T1", _snap(12, "partial"), [_R])
+    assert baseline2 == baseline
+    assert _decide(baseline2, _snap(15, "full")) == (True, publish.REFRESH_CHANGED)
+
+
+def test_refresh_retry_after_big_loss_still_holds():
+    baseline = publish.merge_refresh_baseline({}, "T1", _snap(1000, "team"), [_R])
+    assert _decide(baseline, _snap(500, "lost")) == (False, publish.REFRESH_BIG_LOSS)
+    # 2차: 줄어든 로컬에 새 파일 조금 — 기준선은 여전히 팀 장부(1000)
+    baseline2 = publish.merge_refresh_baseline(baseline, "T1", _snap(500, "lost"), [_R])
+    assert _decide(baseline2, _snap(510, "lost+new")) == (False, publish.REFRESH_BIG_LOSS)
+
+
+def test_refresh_baseline_file_roundtrip(tmp_app_dir: Path):
+    assert publish.read_refresh_baseline() == {}
+    data = {"published_at": "T1", **_snap(3, "a", {"x": 3})}
+    publish.write_refresh_baseline(data)
+    assert publish.refresh_baseline_path().parent == tmp_app_dir / "cache"
+    assert publish.read_refresh_baseline() == data
+
 
 def test_publish_and_pull_roundtrip(tmp_path: Path, monkeypatch, tmp_app_dir: Path):
     shared = tmp_path / "shared"

@@ -26,6 +26,20 @@ logger = get_logger("core.source_library_publish")
 _META_NAME = "index.json"
 _DB_NAME = "library.sqlite"
 _LOCAL_MARKER = "source_library_pulled.json"
+_REFRESH_BASELINE = "source_library_refresh_baseline.json"
+
+# 새로고침 「크게 줄어듦」 판정 — 루트 하나에서 이만큼 넘게 줄면 팀 공유 보류.
+REFRESH_BIG_LOSS_MIN = 200
+REFRESH_BIG_LOSS_RATIO = 0.02
+
+# refresh_publish_decision 사유 코드
+REFRESH_UNKNOWN = "unknown"
+REFRESH_READ_ERROR = "read_error"
+REFRESH_UNCHANGED = "unchanged"
+REFRESH_SHARED_NEWER_FORMAT = "shared_newer_format"
+REFRESH_SHARED_MOVED = "shared_moved"
+REFRESH_BIG_LOSS = "big_loss"
+REFRESH_CHANGED = "changed"
 
 # 스캔(그룹핑) 로직 세대. PNG/TGA 시퀀스 묶기(3D·ball_pass 한정)가 v2.
 # 구버전 BPE 가 게시한 공유 인덱스(값 없음=0 또는 더 낮음)는 pull 하지 않는다 —
@@ -59,6 +73,113 @@ def read_shared_meta() -> Dict[str, Any]:
 
 def read_local_marker() -> Dict[str, Any]:
     return read_json_file(local_marker_path(), {})
+
+
+# ── 설정 「새로고침」 (바뀐 부분만 반영) ────────────────────────────────
+
+
+def refresh_baseline_path() -> Path:
+    """새로고침 비교 기준선 — 로컬 캐시 전용(공유 형식 무관)."""
+    return cfg.CACHE_DIR / _REFRESH_BASELINE
+
+
+def read_refresh_baseline() -> Dict[str, Any]:
+    data = read_json_file(refresh_baseline_path(), {})
+    return data if isinstance(data, dict) else {}
+
+
+def write_refresh_baseline(data: Dict[str, Any]) -> None:
+    write_json_file(refresh_baseline_path(), data)
+
+
+def merge_refresh_baseline(
+    baseline: Optional[Dict[str, Any]],
+    shared_published_at: str,
+    current: Optional[Dict[str, Any]],
+    roots: List[str],
+) -> Optional[Dict[str, Any]]:
+    """새로고침 시작 시 비교 기준선("마지막으로 팀 장부와 맞춘 상태")을 정한다.
+
+    * 기준선의 ``published_at`` 이 현재 공유본과 다르면(누가 게시했거나 pull 함)
+      지금 로컬 스냅샷(= 방금 받은 팀 장부)으로 새로 시작한다.
+    * 같으면 기존 기준선을 유지하고, 기준선에 없는 루트만 지금 값으로 채운다 —
+      보류된 새로고침을 다시 눌러도 "이미 반영됨"으로 오판하지 않게.
+
+    ``current`` 가 None(스냅샷 실패)이면 None — 호출부는 게시를 보류한다.
+    """
+    if current is None:
+        return None
+    cur_roots = current.get("roots") or {}
+    cur_cats = current.get("categories") or {}
+    base: Dict[str, Any] = baseline if isinstance(baseline, dict) else {}
+    if not shared_published_at or str(base.get("published_at") or "") != shared_published_at:
+        base = {}
+    b_roots: Dict[str, Any] = dict(base.get("roots") or {})
+    b_cats: Dict[str, Any] = dict(base.get("categories") or {})
+    for root in roots:
+        if root not in b_roots and root in cur_roots:
+            b_roots[root] = cur_roots[root]
+            b_cats[root] = dict(cur_cats.get(root) or {})
+    return {"published_at": shared_published_at, "roots": b_roots, "categories": b_cats}
+
+
+def refresh_publish_decision(
+    baseline: Optional[Dict[str, Any]],
+    after: Optional[Dict[str, Any]],
+    *,
+    read_failures: int,
+    shared_grouping_version: int,
+    shared_moved: bool,
+) -> Tuple[bool, str]:
+    """새로고침 결과를 팀 공유 목록에 게시할지 ``(게시 여부, 사유 코드)``.
+
+    판정 순서: 상태 모름 → 폴더 읽기 실패 → 기준선과 내용 동일 → 공유본이 더 새
+    형식 → 그사이 남이 게시 → 크게 줄어듦 → 변경(게시).
+    """
+    if not baseline or not after:
+        return False, REFRESH_UNKNOWN
+    if int(read_failures) > 0:
+        return False, REFRESH_READ_ERROR
+    b_roots = baseline.get("roots") or {}
+    a_roots = after.get("roots") or {}
+    targets = list(a_roots.keys())
+    if not targets or any(r not in b_roots for r in targets):
+        return False, REFRESH_UNKNOWN
+    if all(
+        str((a_roots[r] or {}).get("digest") or "") == str((b_roots[r] or {}).get("digest") or "")
+        for r in targets
+    ):
+        return False, REFRESH_UNCHANGED
+    if int(shared_grouping_version or 0) > GROUPING_VERSION:
+        return False, REFRESH_SHARED_NEWER_FORMAT
+    if shared_moved:
+        return False, REFRESH_SHARED_MOVED
+    for r in targets:
+        before_n = int((b_roots[r] or {}).get("items") or 0)
+        after_n = int((a_roots[r] or {}).get("items") or 0)
+        allowed = max(REFRESH_BIG_LOSS_MIN, int(before_n * REFRESH_BIG_LOSS_RATIO))
+        if before_n - after_n > allowed:
+            return False, REFRESH_BIG_LOSS
+    return True, REFRESH_CHANGED
+
+
+def new_top_folders(
+    baseline: Optional[Dict[str, Any]],
+    after: Optional[Dict[str, Any]],
+) -> List[str]:
+    """기준선에는 없고(0개) 이번에 항목이 생긴 최상위 폴더 이름(정렬)."""
+    if not baseline or not after:
+        return []
+    b_cats = baseline.get("categories") or {}
+    out: List[str] = []
+    for root, cats in (after.get("categories") or {}).items():
+        before_cats = b_cats.get(root) or {}
+        for cat, n in (cats or {}).items():
+            if not cat or int(n) <= 0:
+                continue
+            if int(before_cats.get(cat) or 0) <= 0:
+                out.append(str(cat))
+    return sorted(set(out), key=str.lower)
 
 
 def shared_grouping_outdated() -> bool:

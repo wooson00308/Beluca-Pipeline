@@ -10,6 +10,7 @@ sqlite3 연결은 만든 스레드에서만 쓸 수 있다. 백그라운드 인�
 
 from __future__ import annotations
 
+import hashlib
 import re
 import sqlite3
 import time
@@ -380,6 +381,77 @@ def count_for_root(conn: sqlite3.Connection, root: str) -> int:
         (normalize_root(root),),
     ).fetchone()
     return int(row["n"]) if row else 0
+
+
+ITEM_CONTENT_COLUMNS = (
+    "name, ext, kind, seq_pattern, size_bytes, mtime, frame_first, frame_last, frame_count"
+)
+"""항목 "내용" 컬럼 — 새로고침 비교(같은 항목인지)와 스냅샷 digest 가 같은 순서를 쓴다."""
+_SNAPSHOT_COLUMNS = "dir_rel, " + ITEM_CONTENT_COLUMNS
+
+
+def dir_item_contents(conn: sqlite3.Connection, root: str, dir_rel: str) -> List[Tuple[Any, ...]]:
+    """폴더 하나의 항목 내용 tuple 목록 (``ITEM_CONTENT_COLUMNS`` 순서, 정렬됨)."""
+    rows = conn.execute(
+        "SELECT {cols} FROM items WHERE root=? AND dir_rel=? ORDER BY {cols}".format(
+            cols=ITEM_CONTENT_COLUMNS
+        ),
+        (normalize_root(root), dir_rel),
+    ).fetchall()
+    return [tuple(r) for r in rows]
+
+
+def item_counts_by_dir(conn: sqlite3.Connection, root: str) -> Dict[str, int]:
+    """루트 하나의 ``{dir_rel: 항목 수}``."""
+    rows = conn.execute(
+        "SELECT dir_rel, COUNT(*) AS n FROM items WHERE root=? GROUP BY dir_rel",
+        (normalize_root(root),),
+    ).fetchall()
+    return {str(r[0]): int(r[1]) for r in rows}
+
+
+def delete_dir(conn: sqlite3.Connection, root: str, dir_rel: str) -> None:
+    """폴더 하나의 항목·기록을 지운다. 커밋은 호출자가 한다."""
+    root_n = normalize_root(root)
+    conn.execute("DELETE FROM items WHERE root=? AND dir_rel=?", (root_n, dir_rel))
+    conn.execute("DELETE FROM dirs WHERE root=? AND dir_rel=?", (root_n, dir_rel))
+
+
+def refresh_snapshot(conn: sqlite3.Connection, roots: Sequence[str]) -> Dict[str, Any]:
+    """새로고침 전후 비교용 — 루트별 항목 수·내용 요약(digest)·카테고리별 수.
+
+    ``{"roots": {root: {"items": n, "digest": hex}},
+    "categories": {root: {category: n}}}``
+
+    digest 는 항목 내용(이름·크기·mtime·프레임 범위 등)만 본다. 폴더 mtime 이나
+    재인덱싱 시각은 넣지 않는다 — 탐색기 캐시 파일 등으로 폴더 시각만 바뀐 경우를
+    "변경"으로 치지 않으려고. 정렬은 모든 컬럼 기준이라 결과가 결정적이다.
+    """
+    out_roots: Dict[str, Dict[str, Any]] = {}
+    out_cats: Dict[str, Dict[str, int]] = {}
+    for root in roots:
+        root_n = normalize_root(root)
+        if not root_n or root_n in out_roots:
+            continue
+        h = hashlib.sha1()
+        n = 0
+        cur = conn.execute(
+            "SELECT {cols} FROM items WHERE root=? ORDER BY {cols}".format(cols=_SNAPSHOT_COLUMNS),
+            (root_n,),
+        )
+        for row in cur:
+            h.update(repr(tuple(row)).encode("utf-8"))
+            h.update(b"\n")
+            n += 1
+        out_roots[root_n] = {"items": n, "digest": h.hexdigest()}
+        cats: Dict[str, int] = {}
+        for row in conn.execute(
+            "SELECT category, COUNT(*) AS n FROM items WHERE root=? GROUP BY category",
+            (root_n,),
+        ):
+            cats[str(row[0] or "")] = int(row[1])
+        out_cats[root_n] = cats
+    return {"roots": out_roots, "categories": out_cats}
 
 
 def roots_with_items(conn: sqlite3.Connection) -> List[str]:

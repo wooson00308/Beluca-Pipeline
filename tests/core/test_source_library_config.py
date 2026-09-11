@@ -121,6 +121,26 @@ def test_assign_roots_to_user_group():
     assert libcfg.unassigned_roots(lib) == []
 
 
+def test_refresh_root_choices_excludes_pack_roots():
+    lib = libcfg.empty_library()
+    libcfg.set_scope(
+        lib,
+        libcfg.COMMON_SCOPE,
+        ["W:/library/element", "W:\\proj\\clips\\", "W:/proj/data"],
+        [{"name": libcfg.COMMON_LABEL, "folders": ["W:/library/element"]}],
+    )
+    choices = libcfg.refresh_root_choices(lib)
+    assert choices == [
+        ("W:/library/element", False),
+        ("W:/proj/clips", True),
+        ("W:/proj/data", True),
+    ]
+
+
+def test_refresh_root_choices_empty_library():
+    assert libcfg.refresh_root_choices(libcfg.empty_library()) == []
+
+
 def test_cannot_lose_builtin_group_on_view():
     lib = libcfg.empty_library()
     lib["common"] = {"roots": [], "groups": []}

@@ -75,6 +75,90 @@ def test_dir_needs_index_uses_mtime(conn):
     assert db.dir_needs_index(conn, _ROOT, "Fire", 200.0) is True
 
 
+def _snap(conn, roots=None):
+    return db.refresh_snapshot(conn, roots or [_ROOT])
+
+
+def test_refresh_snapshot_counts_and_categories(conn):
+    db.replace_dir_items(conn, _ROOT, "Fire", _items(["a.mov", "b.mov"]))
+    db.replace_dir_items(conn, _ROOT, "Rain/sub", _items(["c.mov"]))
+    db.replace_dir_items(conn, "W:/other", "X", _items(["z.mov"]))
+    conn.commit()
+    snap = _snap(conn)
+    assert list(snap["roots"].keys()) == [_ROOT]
+    assert snap["roots"][_ROOT]["items"] == 3
+    assert snap["categories"][_ROOT] == {"Fire": 2, "Rain": 1}
+
+
+def test_refresh_snapshot_empty_root(conn):
+    snap = _snap(conn)
+    assert snap["roots"][_ROOT]["items"] == 0
+    assert snap["categories"][_ROOT] == {}
+
+
+def test_refresh_snapshot_digest_stable_on_reindex(conn, monkeypatch):
+    db.replace_dir_items(conn, _ROOT, "Fire", _items(["a.mov", "b.mov"]), dir_mtime=1.0)
+    conn.commit()
+    before = _snap(conn)
+    # 같은 내용으로 다시 인덱싱(재인덱싱 시각·폴더 mtime 만 바뀜) → 변경 아님
+    monkeypatch.setattr(db.time, "time", lambda: 9_999_999.0)
+    db.replace_dir_items(conn, _ROOT, "Fire", _items(["a.mov", "b.mov"]), dir_mtime=2.0)
+    conn.commit()
+    assert _snap(conn) == before
+
+
+def test_refresh_snapshot_digest_detects_add_rename_size(conn):
+    db.replace_dir_items(conn, _ROOT, "Fire", _items(["a.mov"]))
+    conn.commit()
+    base = _snap(conn)["roots"][_ROOT]["digest"]
+
+    db.replace_dir_items(conn, _ROOT, "Fire", _items(["a.mov", "b.mov"]))
+    conn.commit()
+    added = _snap(conn)["roots"][_ROOT]["digest"]
+    assert added != base
+
+    db.replace_dir_items(conn, _ROOT, "Fire", _items(["c.mov"]))
+    conn.commit()
+    renamed = _snap(conn)["roots"][_ROOT]["digest"]
+    assert renamed not in (base, added)
+
+    db.replace_dir_items(conn, _ROOT, "Fire", group_entries([FileEntry("c.mov", 999, 10.0)]))
+    conn.commit()
+    assert _snap(conn)["roots"][_ROOT]["digest"] != renamed
+
+
+def test_refresh_snapshot_digest_detects_frame_range_growth(conn):
+    seq = ["f.1001.exr", "f.1002.exr"]
+    db.replace_dir_items(conn, _ROOT, "Fire", _items(seq))
+    conn.commit()
+    before = _snap(conn)
+    db.replace_dir_items(conn, _ROOT, "Fire", _items(seq + ["f.1003.exr"]))
+    conn.commit()
+    after = _snap(conn)
+    assert after["roots"][_ROOT]["items"] == before["roots"][_ROOT]["items"] == 1
+    assert after["roots"][_ROOT]["digest"] != before["roots"][_ROOT]["digest"]
+
+
+def test_refresh_snapshot_deterministic_with_same_stem(tmp_path: Path):
+    """``a.mov`` + ``a.mp4`` 처럼 이름이 같은 항목도 삽입 순서와 무관하게 같은 digest."""
+    digests = []
+    for i, order in enumerate((["a.mov", "a.mp4"], ["a.mp4", "a.mov"])):
+        c = db.connect(tmp_path / "idx{}.sqlite".format(i))
+        try:
+            # 삽입 순서(id)만 다르게 — 정렬이 모든 컬럼 기준이면 digest 가 같아야 한다
+            for name in order:
+                c.execute(
+                    "INSERT INTO items(root, dir_rel, category, name, name_lower, kind, ext)"
+                    " VALUES (?,?,?,?,?,?,?)",
+                    (_ROOT, "Fire", "Fire", "a", "a", "movie", name[-4:]),
+                )
+            c.commit()
+            digests.append(db.refresh_snapshot(c, [_ROOT])["roots"][_ROOT]["digest"])
+        finally:
+            c.close()
+    assert digests[0] == digests[1]
+
+
 def test_fetch_items_paging(conn):
     db.replace_dir_items(conn, _ROOT, "Fire", _items(["a.mov", "b.mov", "c.mov", "d.mov"]))
     conn.commit()
