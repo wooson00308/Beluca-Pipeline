@@ -11,11 +11,13 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
-# 라이브러리 창은 영상 미리보기(QtMultimedia)를 쓴다 — 오디오 라이브러리(libpulse)가
-# 없는 CI(Ubuntu)에서는 import 자체가 실패하므로 이 파일을 건너뛴다 (Windows·macOS 는 실행).
-pytest.importorskip("PySide6.QtMultimedia", reason="QtMultimedia 를 불러올 수 없는 환경")
-
-import bpe.gui.widgets.source_library_dialog as sdlg  # noqa: E402
+# 라이브러리 창은 영상 미리보기(QtMultimedia·QtMultimediaWidgets)를 쓴다 — 오디오
+# 라이브러리(libpulse)가 없는 CI(Ubuntu)에서는 import 자체가 실패하므로 이 파일을
+# 건너뛴다 (Windows·macOS 는 실행).
+try:
+    import bpe.gui.widgets.source_library_dialog as sdlg
+except ImportError as _exc:  # pragma: no cover - 환경 의존
+    pytest.skip("라이브러리 창을 불러올 수 없는 환경: {}".format(_exc), allow_module_level=True)
 from bpe.core import source_library_config as libcfg
 from bpe.core import source_library_db as db
 from bpe.core import source_library_publish as publish

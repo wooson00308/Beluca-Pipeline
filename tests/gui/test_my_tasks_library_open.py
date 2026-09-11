@@ -7,12 +7,14 @@ from typing import Any, List, Optional
 import pytest
 from PySide6.QtCore import Qt
 
-# 라이브러리 창은 영상 미리보기(QtMultimedia)를 쓴다 — 오디오 라이브러리(libpulse)가
-# 없는 CI(Ubuntu)에서는 import 자체가 실패하므로 이 파일을 건너뛴다 (Windows·macOS 는 실행).
-pytest.importorskip("PySide6.QtMultimedia", reason="QtMultimedia 를 불러올 수 없는 환경")
-
-import bpe.gui.widgets.source_library_dialog as sdlg  # noqa: E402
-from bpe.gui.tabs.my_tasks_tab import MyTasksTab  # noqa: E402
+# 라이브러리 창은 영상 미리보기(QtMultimedia·QtMultimediaWidgets)를 쓴다 — 오디오
+# 라이브러리(libpulse)가 없는 CI(Ubuntu)에서는 import 자체가 실패하므로 이 파일을
+# 건너뛴다 (Windows·macOS 는 실행).
+try:
+    import bpe.gui.widgets.source_library_dialog as sdlg
+    from bpe.gui.tabs.my_tasks_tab import MyTasksTab
+except ImportError as _exc:  # pragma: no cover - 환경 의존
+    pytest.skip("라이브러리 창을 불러올 수 없는 환경: {}".format(_exc), allow_module_level=True)
 
 
 class _FakeDialog:
