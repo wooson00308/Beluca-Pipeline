@@ -64,6 +64,7 @@ from bpe.gui.shotgrid_open_shot import setup_copy_shot_name_button, setup_shotgr
 from bpe.gui.widgets.clickable_image import ClickableImage
 from bpe.gui.widgets.facet_filter_panel import FacetFilterPanel
 from bpe.gui.widgets.nukex_version_dialog import choose_nukex_launcher
+from bpe.gui.widgets.seasonal_mascot import add_chuseok_mascot
 from bpe.gui.workers.sg_worker import ShotGridWorker
 from bpe.shotgrid.client import get_default_sg
 from bpe.shotgrid.notes import (
@@ -971,6 +972,9 @@ class MyTasksTab(QWidget):
         refresh_btn.setProperty("primary", True)
         refresh_btn.clicked.connect(self._refresh)
         filter_bar.addWidget(refresh_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        # 추석 장식 (9/22~9/26만 표시, 지나면 저절로 숨김) — 제거 시 이 줄만 빼면 됨
+        self._chuseok_mascot = add_chuseok_mascot(self, filter_bar)
 
         filter_bar.addStretch()
 
