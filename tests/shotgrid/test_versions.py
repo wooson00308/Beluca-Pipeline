@@ -5,7 +5,8 @@ from __future__ import annotations
 import os
 import tempfile
 from datetime import date, datetime
-from typing import Any
+from pathlib import Path
+from typing import Any, Dict, List
 
 import pytest
 
@@ -254,3 +255,133 @@ class TestUploadMovie:
         finally:
             if os.path.isfile(path):
                 os.unlink(path)
+
+
+# ── upload_movie_to_version: 로컬 임시 복사 시 원본 파일명 유지 ──────
+
+
+class _RecordingSG(MockShotgun):
+    """upload()에 넘어온 경로의 파일명·상위 폴더·존재 여부를 기록."""
+
+    def __init__(self, fail_first: str = "") -> None:
+        super().__init__()
+        self.seen: List[Dict[str, Any]] = []
+        self._fail_first = fail_first
+
+    def upload(
+        self,
+        entity_type: str,
+        entity_id: int,
+        path: str,
+        field_name: str = "sg_uploaded_movie",
+        **kwargs: Any,
+    ) -> int:
+        p = Path(path)
+        self.seen.append(
+            {
+                "name": p.name,
+                "parent": p.parent.name,
+                "exists": p.is_file(),
+                "data": p.read_bytes() if p.is_file() else b"",
+            }
+        )
+        if self._fail_first and len(self.seen) == 1:
+            raise RuntimeError(self._fail_first)
+        return super().upload(entity_type, entity_id, path, field_name, **kwargs)
+
+
+@pytest.fixture()
+def staging_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """로컬 임시 복사 강제 + tempfile 폴더·피드백 로그를 tmp_path로 격리."""
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    monkeypatch.setenv("BPE_SG_UPLOAD_ALWAYS_LOCAL_COPY", "1")
+    monkeypatch.setenv("BPE_FEEDBACK_LOG_DIR", str(tmp_path / "fblog"))
+    monkeypatch.setattr(tempfile, "tempdir", str(stage))
+    return stage
+
+
+def _make_movie(tmp_path: Path, name: str = "ep03_s003_0080_comp_v002.mov") -> Path:
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    mov = src_dir / name
+    mov.write_bytes(b"fake movie payload")
+    return mov
+
+
+class TestUploadMovieStaging:
+    @pytest.mark.parametrize("with_progress", [False, True])
+    def test_staged_upload_keeps_original_basename(
+        self, tmp_path: Path, staging_env: Path, with_progress: bool
+    ) -> None:
+        mov = _make_movie(tmp_path)
+        sg = _RecordingSG()
+        sg._add_entity("Version", {"id": 50, "sg_uploaded_movie": None})
+        fracs: List[float] = []
+        cb = fracs.append if with_progress else None
+
+        upload_movie_to_version(sg, 50, str(mov), progress_cb=cb)
+
+        assert len(sg.seen) == 1
+        seen = sg.seen[0]
+        assert seen["name"] == mov.name
+        assert seen["parent"].startswith("bpe_sg_upload_")
+        assert seen["exists"] is True
+        assert seen["data"] == mov.read_bytes()
+        assert list(staging_env.iterdir()) == []
+        assert mov.is_file()
+        if with_progress:
+            assert fracs and fracs[-1] == 1.0
+
+    def test_staged_korean_basename(self, tmp_path: Path, staging_env: Path) -> None:
+        mov = _make_movie(tmp_path, name="ep03_s003_0080_comp_v002_한글.mov")
+        sg = _RecordingSG()
+        sg._add_entity("Version", {"id": 54, "sg_uploaded_movie": None})
+
+        upload_movie_to_version(sg, 54, str(mov))
+
+        assert sg.seen[0]["name"] == mov.name
+        assert list(staging_env.iterdir()) == []
+
+    def test_staged_retry_reuses_copy_then_cleans_up(
+        self, tmp_path: Path, staging_env: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import bpe.shotgrid.versions as versions_mod
+
+        monkeypatch.setattr(versions_mod.time, "sleep", lambda _s: None)
+        mov = _make_movie(tmp_path)
+        sg = _RecordingSG(fail_first="read timed out")
+        sg._add_entity("Version", {"id": 51, "sg_uploaded_movie": None})
+
+        upload_movie_to_version(sg, 51, str(mov))
+
+        assert len(sg.seen) == 2
+        assert all(s["exists"] and s["name"] == mov.name for s in sg.seen)
+        assert list(staging_env.iterdir()) == []
+
+    def test_staged_upload_failure_cleans_up(self, tmp_path: Path, staging_env: Path) -> None:
+        mov = _make_movie(tmp_path)
+        sg = _RecordingSG(fail_first="boom (non-retryable)")
+        sg._add_entity("Version", {"id": 52, "sg_uploaded_movie": None})
+
+        with pytest.raises(RuntimeError, match="boom"):
+            upload_movie_to_version(sg, 52, str(mov))
+        assert list(staging_env.iterdir()) == []
+
+    def test_copy_failure_cleans_up(
+        self, tmp_path: Path, staging_env: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import bpe.shotgrid.versions as versions_mod
+
+        def _boom(*_a: Any, **_k: Any) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(versions_mod.shutil, "copy2", _boom)
+        mov = _make_movie(tmp_path)
+        sg = _RecordingSG()
+        sg._add_entity("Version", {"id": 53, "sg_uploaded_movie": None})
+
+        with pytest.raises(ShotGridError, match="로컬 임시 폴더로 복사하지"):
+            upload_movie_to_version(sg, 53, str(mov))
+        assert sg.seen == []
+        assert list(staging_env.iterdir()) == []

@@ -306,12 +306,13 @@ def upload_movie_to_version(
     _overall(0.02)
     upload_src = movie_path
     tmp_copy: Optional[str] = None
+    tmp_dir: Optional[str] = None
 
     if stage_local:
         try:
-            suf = Path(movie_path).suffix or ".mov"
-            fd, tmp_copy = tempfile.mkstemp(prefix="bpe_sg_upload_", suffix=suf)
-            os.close(fd)
+            # 폴더만 무작위 — 파일명은 원본 유지 (SG가 업로드 파일 basename을 이름으로 저장)
+            tmp_dir = tempfile.mkdtemp(prefix="bpe_sg_upload_")
+            tmp_copy = os.path.join(tmp_dir, Path(movie_path).name)
 
             def _stage_frac(local_f: float) -> None:
                 _overall(0.05 + 0.13 * max(0.0, min(1.0, local_f)))
@@ -324,11 +325,8 @@ def upload_movie_to_version(
             _overall(0.18)
             logger.debug("staged to temp: %s (%d bytes)", Path(tmp_copy).name, file_size)
         except Exception as e:
-            if tmp_copy and os.path.isfile(tmp_copy):
-                try:
-                    os.unlink(tmp_copy)
-                except OSError:
-                    pass
+            if tmp_dir:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
             raise ShotGridError(
                 "업로드 전 로컬 임시 폴더로 복사하지 못했습니다. "
                 "디스크 여유 공간과 경로 접근 권한을 확인하세요."
@@ -470,11 +468,8 @@ def upload_movie_to_version(
             sg_logger.setLevel(_old_level)
         except Exception:
             pass
-        if tmp_copy and os.path.isfile(tmp_copy):
-            try:
-                os.unlink(tmp_copy)
-            except OSError:
-                pass
+        if tmp_dir:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 # ── thumbnail ────────────────────────────────────────────────────────
