@@ -28,6 +28,7 @@ from bpe import __version__
 from bpe.core import update_checker
 from bpe.core.logging import get_logger
 from bpe.gui import theme
+from bpe.gui.widgets.seasonal_mascot import add_chuseok_mascot
 
 logger = get_logger("main_window")
 
@@ -104,6 +105,9 @@ class MainWindow(QMainWindow):
         self._tab_pages: Dict[str, QWidget] = {}
         self._build_tabs()
         root.addWidget(self._stack, 1)
+
+        # 추석 장식 (9/22~9/26만 표시, 지나면 저절로 숨김) — 제거 시 이 줄만 빼면 됨
+        self._chuseok_mascot = add_chuseok_mascot(central, sb, sb.indexOf(self._ver_label))
 
         self._switch_tab("my_tasks")
 

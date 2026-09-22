@@ -1,11 +1,11 @@
-"""추석 시즌 장식 — My Tasks 툴바 조회 버튼 옆 떡방아 토끼.
+"""추석 시즌 장식 — 사이드바 왼쪽 아래(버전 표시 위) 떡방아 토끼.
 
 평소엔 그림만 보이고, 누르면 떡방아를 두 번 찧으며 말풍선 인사가 나온다.
 인사말과 말풍선 등장 방식은 누를 때마다 순서대로 바뀐다.
 표시 기간·인사말·도트 그림 데이터는 ``bpe.core.seasonal`` 에 있다.
 
-토끼 그림(60x44)이 버튼 줄보다 커서, 줄 안에는 빈 자리(``_Slot``)만 두고
-실제 그림과 말풍선은 탭 위에 겹쳐 그린다(레이아웃이 밀리지 않게).
+레이아웃 안에는 빈 자리(``_Slot``)만 두고, 실제 그림과 말풍선은 창 중앙 위젯 위에
+겹쳐 그린다. 그래서 말풍선이 사이드바 밖으로 나가도 잘리지 않는다.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ from PySide6.QtGui import (
     QPen,
     QPixmap,
 )
-from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QWidget
+from PySide6.QtWidgets import QBoxLayout, QSizePolicy, QWidget
 
 from bpe.core import seasonal
 from bpe.core.logging import get_logger
@@ -48,8 +48,8 @@ logger = get_logger("gui.widgets.seasonal_mascot")
 _SCALE = 2  # 도트 1칸 = 화면 2px
 _SPRITE_W = 30 * _SCALE
 _SPRITE_H = 22 * _SCALE
-_SLOT_GAP = 8  # 조회 버튼과의 추가 간격 (레이아웃 기본 6px 에 더해짐)
-_SLOT_H = 30
+_SLOT_GAP = 20  # 사이드바 왼쪽 여백 (버전 글자와 같은 선)
+_SLOT_H = _SPRITE_H
 _SLOT_W = _SLOT_GAP + _SPRITE_W
 
 _BUBBLE_DELAY_MS = 230
@@ -213,12 +213,11 @@ class _FxLayer(QWidget):
 class ChuseokMascot(QWidget):
     """떡방아 토끼 (탭 위에 겹쳐 그리는 버튼)."""
 
-    def __init__(self, tab: QWidget, filter_bar: QHBoxLayout) -> None:
-        super().__init__(tab)
-        self._tab = tab
-        self._bar = filter_bar
-        self._slot = _Slot(self, tab)
-        self._fx = _FxLayer(self, tab)
+    def __init__(self, overlay_parent: QWidget) -> None:
+        super().__init__(overlay_parent)
+        self._tab = overlay_parent
+        self._slot = _Slot(self, overlay_parent)
+        self._fx = _FxLayer(self, overlay_parent)
         self._fx.hide()
 
         self.setFixedSize(_SPRITE_W, _SPRITE_H)
@@ -282,7 +281,8 @@ class ChuseokMascot(QWidget):
         self.show()
         self.raise_()
         fx_left = max(0, self.x() - 40)
-        self._fx.setGeometry(QRect(fx_left, 0, 380, self.y() + _SPRITE_H + 40))
+        fx_top = max(0, self.y() - 140)
+        self._fx.setGeometry(QRect(fx_left, fx_top, 380, self.y() + _SPRITE_H + 40 - fx_top))
         if self._playing:
             self._fx.show()
             self._fx.raise_()
@@ -500,14 +500,19 @@ class ChuseokMascot(QWidget):
         super().focusOutEvent(event)
 
 
-def add_chuseok_mascot(tab: QWidget, filter_bar: QHBoxLayout) -> Optional[ChuseokMascot]:
-    """조회 버튼 바로 뒤(현재 위치)에 추석 토끼 자리를 넣는다. 기간 밖이면 자리는 숨겨진다."""
+def add_chuseok_mascot(
+    overlay_parent: QWidget, layout: QBoxLayout, index: int = -1
+) -> Optional[ChuseokMascot]:
+    """``layout`` 의 ``index`` 위치에 추석 토끼 자리를 넣는다. 기간 밖이면 자리는 숨겨진다.
+
+    ``overlay_parent`` 는 그림·말풍선을 겹쳐 그릴 위젯(레이아웃이 속한 위젯의 조상)이다.
+    """
     try:
-        mascot = ChuseokMascot(tab, filter_bar)
-    except Exception:  # 장식 실패가 탭 전체를 막지 않도록
+        mascot = ChuseokMascot(overlay_parent)
+    except Exception:  # 장식 실패가 창 전체를 막지 않도록
         logger.exception("추석 장식 생성 실패 — 건너뜀")
         return None
-    filter_bar.addWidget(mascot.slot, 0, Qt.AlignmentFlag.AlignVCenter)
+    layout.insertWidget(index, mascot.slot, 0, Qt.AlignmentFlag.AlignLeft)
     return mascot
 
 

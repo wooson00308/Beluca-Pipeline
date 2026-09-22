@@ -4,7 +4,7 @@ GUI 없이 표준 라이브러리만 사용한다. 화면 쪽은 ``bpe.gui.widge
 
 추석이 지나면 날짜 판단만으로 장식이 저절로 사라진다. 흔적까지 지우려면 이 파일,
 ``gui/widgets/seasonal_mascot.py``, ``tests/core/test_seasonal.py`` 를 지우고
-``my_tasks_tab.py`` 의 ``add_chuseok_mascot`` 호출 한 줄을 빼면 된다.
+``main_window.py`` 의 ``add_chuseok_mascot`` 호출 한 줄(과 import)을 빼면 된다.
 설정 파일(settings.json)에는 아무것도 저장하지 않는다.
 """
 
