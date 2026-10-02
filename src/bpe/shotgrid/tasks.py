@@ -128,7 +128,7 @@ def _delivery_date_from_row(t: Dict[str, Any], delivery_field: str) -> Any:
     return val
 
 
-# ── company task status presets (19) ─────────────────────────────────
+# ── company task status presets (20) ─────────────────────────────────
 
 BELUCA_TASK_STATUS_PRESETS: List[Tuple[str, str]] = [
     ("wtg", "Waiting to Start"),
@@ -150,6 +150,7 @@ BELUCA_TASK_STATUS_PRESETS: List[Tuple[str, str]] = [
     ("nocg", "nocg"),
     ("omt", "Omit"),
     ("error", "Error"),
+    ("cgi", "CGI Confirm"),
 ]
 
 

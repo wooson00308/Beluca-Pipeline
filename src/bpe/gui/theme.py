@@ -81,6 +81,7 @@ TASK_STATUS_COLORS: Dict[str, Tuple[str, str]] = {
     "error": ("#777777", "#FFFFFF"),
     "rev": ("#00AA77", "#FFFFFF"),
     "tm": ("#88CC88", "#111111"),
+    "cgi": ("#D4A017", "#111111"),
 }
 
 

@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from bpe.shotgrid.tasks import list_review_tasks_for_project
+from bpe.shotgrid.tasks import (
+    list_review_tasks_for_project,
+    merge_task_status_combo_options,
+    parse_task_status_selection,
+)
 from tests.shotgrid.mock_sg import MockShotgun
 
 
@@ -203,3 +207,17 @@ def test_list_review_tasks_sorted_oldest_version_first() -> None:
     )
     rows = list_review_tasks_for_project(sg, 1, statuses=["sv"])
     assert [r.get("shot_code") for r in rows] == ["S001", "S002"]
+
+
+def test_publish_status_combo_keeps_wip_default_and_single_cgi() -> None:
+    opts = merge_task_status_combo_options([])
+    assert opts[0] == "(비움)"
+    assert "wip — work in process" in opts
+    assert opts.count("cgi — CGI Confirm") == 1
+    # 스키마에서 cgi 가 와도 중복으로 붙지 않는다
+    assert merge_task_status_combo_options(["cgi"]).count("cgi — CGI Confirm") == 1
+    assert "cgi" not in merge_task_status_combo_options(["cgi"])
+
+
+def test_parse_cgi_status_selection() -> None:
+    assert parse_task_status_selection("cgi — CGI Confirm") == "cgi"
