@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QSplitter,
+    QStyle,
     QToolButton,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -45,7 +46,7 @@ from bpe.gui.widgets.library_refresh_review_dialog import LibraryRefreshReviewDi
 from bpe.gui.widgets.library_tree import LibraryTree
 from bpe.gui.widgets.lock_overlay import LockOverlay
 from bpe.gui.widgets.sequence_scrub_widget import MediaPreviewWidget
-from bpe.gui.widgets.source_library_grid import SourceLibraryGrid, SourceLibraryModel
+from bpe.gui.widgets.source_library_grid import CELL_W, SourceLibraryGrid, SourceLibraryModel
 from bpe.gui.widgets.source_library_settings_dialog import SourceLibrarySettingsDialog
 from bpe.gui.workers.index_sync_worker import IndexSyncWorker
 from bpe.gui.workers.library_scan_worker import LibraryScanWorker
@@ -60,6 +61,62 @@ _KIND_GROUP = "group"
 _KIND_FOLDER = "folder"
 _KIND_NESTED = "nested"
 _EMPTY_FOLDERS: List[db.FolderKey] = [("__none__", "__none__")]
+
+# 왼쪽 열(프리뷰 + 분류) 크기 — 경계선을 끌어 좌우·위아래로 조절한다(저장하지 않음).
+_LEFT_DEFAULT_W = 720  # 예전 600 의 1.2배 — 프리뷰 가로·세로 20% 크게
+_LEFT_MIN_W = 520
+_PREVIEW_MIN_H = 260  # 화면부 + 슬라이더 + 재생 버튼줄이 잘리지 않는 높이
+_TREE_MIN_H = 150
+_GRID_MIN_COLS = 3
+_SPLIT_HANDLE_W = 6
+_SPLIT_NAME = "srclib_split"
+
+
+def _preview_height_for_width(left_width: int) -> int:
+    """왼쪽 열 폭 기준 16:9 프리뷰 높이 (재생 버튼줄 몫 15% 포함)."""
+    w = max(320, left_width - 8)
+    return max(180, int(w * 9 / 16 * 1.15))
+
+
+def _grid_min_width(cell_w: int, spacing: int, frame: int, scrollbar: int) -> int:
+    """썸네일이 한 줄에 ``_GRID_MIN_COLS`` 장은 들어가는 그리드 폭."""
+    return _GRID_MIN_COLS * (cell_w + spacing) + spacing + 2 * frame + scrollbar + 8
+
+
+def _split_style() -> str:
+    """이 창의 경계선만 — 잡는 폭은 넓게, 보이는 선은 가운데 1px, 올리면 강조색."""
+    clear = "rgba(0,0,0,0)"
+
+    def line(axis: str, color: str) -> str:
+        coords = "x1:0, y1:0, x2:1, y2:0" if axis == "x" else "x1:0, y1:0, x2:0, y2:1"
+        return (
+            "qlineargradient({c}, stop:0 {t}, stop:0.42 {t}, stop:0.42 {col}, "
+            "stop:0.58 {col}, stop:0.58 {t}, stop:1 {t})".format(c=coords, t=clear, col=color)
+        )
+
+    return (
+        "QSplitter#{n}::handle:horizontal {{ width: {w}px; background: {h}; }}"
+        "QSplitter#{n}::handle:horizontal:hover {{ background: {hh}; }}"
+        "QSplitter#{n}::handle:vertical {{ height: {w}px; background: {v}; }}"
+        "QSplitter#{n}::handle:vertical:hover {{ background: {vh}; }}".format(
+            n=_SPLIT_NAME,
+            w=_SPLIT_HANDLE_W,
+            h=line("x", theme.BORDER),
+            hh=line("x", theme.ACCENT),
+            v=line("y", theme.BORDER),
+            vh=line("y", theme.ACCENT),
+        )
+    )
+
+
+def _style_split(splitter: QSplitter) -> None:
+    splitter.setObjectName(_SPLIT_NAME)
+    splitter.setHandleWidth(_SPLIT_HANDLE_W)
+    splitter.setChildrenCollapsible(False)
+    splitter.setStyleSheet(_split_style())
+    for i in range(1, splitter.count()):
+        splitter.handle(i).setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+
 
 _admin_unlocked_this_session = False
 """Source Library 설정 관리자 잠금 — 앱을 켜둔 동안(프로세스 수명) 한 번만 물어본다."""
@@ -163,6 +220,10 @@ class SourceLibraryDialog(QDialog):
         self._awaiting_subcategory = True
         self._left_col: Optional[QWidget] = None
         self._main_splitter: Optional[QSplitter] = None
+        self._preview_split: Optional[QSplitter] = None
+        self._cat_box: Optional[QWidget] = None
+        # 위아래 경계선을 직접 끌었으면 True — 그 높이를 유지. 좌우로 끌면 다시 비율대로.
+        self._preview_height_user_set = False
 
         self._search_timer = QTimer(self)
         self._search_timer.setSingleShot(True)
@@ -233,45 +294,72 @@ class SourceLibraryDialog(QDialog):
         root.addLayout(top)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.setChildrenCollapsible(False)
 
         left = QWidget()
-        left.setMinimumWidth(520)
-        left.setMaximumWidth(700)
+        left.setMinimumWidth(_LEFT_MIN_W)
         self._left_col = left
         left_lay = QVBoxLayout(left)
         left_lay.setContentsMargins(0, 0, 0, 0)
-        left_lay.setSpacing(8)
+        left_lay.setSpacing(0)
+
+        # 프리뷰 ↕ 분류 — 위아래 경계선으로 높이를 나눈다.
+        preview_split = QSplitter(Qt.Orientation.Vertical)
 
         self._preview = MediaPreviewWidget()
-        self._preview.setMinimumHeight(230)
-        self._preview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        left_lay.addWidget(self._preview, 0)
-        left_lay.addSpacing(10)  # 프리뷰와 분류 박스 사이 여백 (라벨↔트리 간격은 유지)
+        self._preview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self._preview.setMinimumHeight(
+            max(_PREVIEW_MIN_H, self._preview.minimumSizeHint().height())
+        )
+        preview_split.addWidget(self._preview)
+
+        cat_box = QWidget()
+        self._cat_box = cat_box
+        cat_lay = QVBoxLayout(cat_box)
+        # 위 여백 + 경계선 = 예전 프리뷰↔분류 간격(8 + 10 + 8)
+        cat_lay.setContentsMargins(0, 26 - _SPLIT_HANDLE_W, 0, 0)
+        cat_lay.setSpacing(8)
 
         cat_title = QLabel("분류")
         cat_title.setStyleSheet(
             "color: {}; font-size: {}px;".format(theme.TEXT_LABEL, theme.FONT_SIZE_SMALL)
         )
-        left_lay.addWidget(cat_title)
+        cat_lay.addWidget(cat_title)
 
         self._tree = LibraryTree()
         self._tree.setHeaderHidden(True)
-        self._tree.setMinimumHeight(280)
+        self._tree.setMinimumHeight(_TREE_MIN_H)
         self._tree.setViewportMargins(0, 10, 0, 0)
         self._tree.currentItemChanged.connect(lambda *_: self._on_tree_selection())
-        left_lay.addWidget(self._tree, 1)
+        cat_lay.addWidget(self._tree, 1)
+        preview_split.addWidget(cat_box)
+
+        preview_split.setStretchFactor(0, 0)
+        preview_split.setStretchFactor(1, 1)
+        _style_split(preview_split)
+        preview_split.splitterMoved.connect(self._on_preview_split_moved)
+        self._preview_split = preview_split
+        left_lay.addWidget(preview_split, 1)
         splitter.addWidget(left)
 
         self._grid = SourceLibraryGrid()
         self._grid.item_selected.connect(self._on_item_selected)
         self._grid.item_activated.connect(self._on_item_activated)
         self._grid.selection_rows_changed.connect(self._on_selection_rows)
+        self._grid.setMinimumWidth(
+            _grid_min_width(
+                CELL_W,
+                self._grid.spacing(),
+                self._grid.frameWidth(),
+                self._grid.style().pixelMetric(QStyle.PixelMetric.PM_ScrollBarExtent),
+            )
+        )
         splitter.addWidget(self._grid)
 
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([600, 1400])
+        splitter.setSizes([_LEFT_DEFAULT_W, 1400])
+        _style_split(splitter)
+        splitter.splitterMoved.connect(self._on_main_split_moved)
         self._main_splitter = splitter
         root.addWidget(splitter, 1)
         QTimer.singleShot(0, self._update_preview_aspect)
@@ -1009,12 +1097,27 @@ class SourceLibraryDialog(QDialog):
         self._update_preview_aspect()
 
     def _update_preview_aspect(self) -> None:
-        """왼쪽 열 폭 기준 16:9 높이."""
-        if self._left_col is None:
+        """왼쪽 열 폭 기준 16:9 높이 — 위아래 경계선을 직접 끌었으면 그 높이를 둔다."""
+        split = self._preview_split
+        if self._left_col is None or split is None or self._preview_height_user_set:
             return
-        w = max(320, self._left_col.width() - 8)
-        h = max(180, int(w * 9 / 16 * 1.15))
-        self._preview.setFixedHeight(h)
+        total = split.height() - split.handleWidth()
+        if total <= 0:
+            return  # 아직 화면에 안 뜸 — 첫 resizeEvent 에서 다시 맞춘다
+        h = _preview_height_for_width(self._left_col.width())
+        if self._cat_box is not None:
+            h = min(h, total - self._cat_box.minimumSizeHint().height())
+        h = max(self._preview.minimumHeight(), h)
+        # setSizes 는 합을 비율로 다시 나누므로 합을 실제 높이와 맞춘다.
+        split.setSizes([h, max(0, total - h)])
+
+    def _on_preview_split_moved(self, _pos: int, _index: int) -> None:
+        self._preview_height_user_set = True
+
+    def _on_main_split_moved(self, _pos: int, _index: int) -> None:
+        # 마지막에 끈 쪽이 이긴다 — 좌우로 끌면 높이를 다시 폭 비율에 맞춘다.
+        self._preview_height_user_set = False
+        self._update_preview_aspect()
 
     # ── 스캔 소유 (설정 창이 닫혀도 계속) ─────────────────────────────
 
