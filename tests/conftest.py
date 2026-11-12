@@ -104,3 +104,16 @@ def _block_real_user_and_team_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     import bpe.core.nuke_plugin_install as npi
 
     monkeypatch.setattr(npi, "nuke_home", lambda: tmp_path / "_nuke_home")
+
+    # 5) 실제 ShotGrid 연결 — 격리를 깜빡한 테스트가 실서버에 노트·상태를 쓰지 못하게
+    #    연결 생성 자체를 fail-loud 로 막는다. MockShotgun 을 직접 넘기는 테스트는
+    #    영향이 없고, Shotgun 을 자체 monkeypatch 하는 테스트는 그쪽이 나중에 덮어쓴다.
+    import bpe.shotgrid.client as sg_client
+
+    def _real_shotgun_blocked(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError(
+            "테스트가 실제 ShotGrid 에 연결하려 했습니다. "
+            "MockShotgun 을 넘기거나 bpe.shotgrid.client.Shotgun 을 monkeypatch 하세요."
+        )
+
+    monkeypatch.setattr(sg_client, "Shotgun", _real_shotgun_blocked)
