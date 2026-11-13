@@ -154,9 +154,8 @@ def test_draw_rect_then_type_goes_to_memo(win: Any, qtbot: Any) -> None:
     assert shapes[0]["frame"] == frame
     x0, y0 = shapes[0]["points"][0]
     assert abs(x0 - 0.2) < 0.02 and abs(y0 - 0.2) < 0.03
-    memo = win._panel._memo_list
-    assert memo.count() == 1 and memo.item(0).text() == f"[{frame}] edge"
-    assert win._timeline._marks == [frame]
+    assert win._panel.memo_texts() == [f"[{frame}] edge"]
+    assert win._timeline.marks() == [frame]
 
     # 확대해도 그림은 영상의 같은 자리에 붙어 있다
     before = layer.doc().shapes()[0]["points"]
@@ -170,7 +169,7 @@ def test_draw_rect_then_type_goes_to_memo(win: Any, qtbot: Any) -> None:
     assert layer.doc().shapes_at(win.frame_number()) == []
     layer.undo()
     layer.undo()
-    assert layer.doc().is_empty() and memo.count() == 0
+    assert layer.doc().is_empty() and win._panel.memo_texts() == []
 
 
 def test_note_images_are_made_per_marked_frame(win: Any) -> None:
@@ -211,7 +210,7 @@ def test_draft_is_saved_under_app_dir_and_restored(
 
 
 def test_status_buttons_need_shotgrid_context(win: Any) -> None:
-    assert not win._panel._btn_retake.isEnabled()  # 파일만 열었을 때는 보내기 버튼이 꺼져 있다
+    assert not win._panel.can_send()  # 파일만 열었을 때는 보내기 버튼이 꺼져 있다
     win._on_status_requested("retake")
     assert not win._send_timer.isActive()
 
@@ -240,3 +239,33 @@ def test_timeline_maps_x_to_frame(qapp: Any) -> None:
     mid = t.index_at(400)
     assert 48 <= mid <= 51
     assert t._label_step() in (5, 10)
+
+
+def test_drawing_tools_are_icons_not_words(win: Any) -> None:
+    # 그리기 도구는 글자 버튼이 아니라 아이콘 띠다(시안 2판 기준)
+    tools = list(win._tool_btns.values()) + [win._btn_erase]
+    assert len(tools) == 6
+    assert all(b.text() == "" and not b.icon().isNull() for b in tools)
+    win._set_tool("pen")
+    assert win._tool_btns["pen"].isChecked() and not win._tool_btns["select"].isChecked()
+    assert win._tool_hint.text() != ""
+
+
+def test_header_follows_list_and_moves_between_shots(win: Any, monkeypatch: Any) -> None:
+    rows = [
+        {
+            "task_id": i,
+            "shot_code": f"S_00{i}0",
+            "uploader_type": "Group",
+            "uploader_name": "업체 A",
+        }
+        for i in (1, 2, 3)
+    ]
+    win._task = dict(rows[1])
+    win._drawer.set_rows(rows)
+    assert win._btn_list.text() == "외주 3" and win._pos.text() == "2 / 3"
+    assert win._btn_prev.isEnabled() and win._btn_next.isEnabled()
+    opened = []
+    monkeypatch.setattr(win, "_open_task", opened.append)
+    win._nav_shot(1)
+    assert opened and opened[0]["task_id"] == 3

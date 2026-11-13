@@ -1,38 +1,87 @@
-"""컨펌 창 오른쪽 칸 — 작업 내용, 지난 지적, 메모, 상태 버튼."""
+"""컨펌 창 오른쪽 칸 — 작업 내용, 지난 지적, 메모, 상태 버튼 (시안 2판 모양)."""
 
 from __future__ import annotations
 
+from html import escape
 from typing import Any, Dict, List, Optional, Tuple
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
-    QListWidget,
-    QListWidgetItem,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
 from bpe.core.confirm_checks import STATE_FAIL, STATE_PASS, CheckResult
-from bpe.gui import theme
+from bpe.gui.confirm import style
 
-PANEL_WIDTH = 360
-_ROLE_ID = Qt.ItemDataRole.UserRole
-_WARN = "#f0c060"
+PANEL_WIDTH = style.PANEL_WIDTH
+_NO_VERSION = "버전 없음"
 
 
 def _header(text: str) -> QLabel:
     lbl = QLabel(text)
-    lbl.setStyleSheet(
-        f"background: {theme.INPUT_BG}; color: {theme.TEXT_LABEL}; font-weight: bold; "
-        f"font-size: {theme.FONT_SIZE_SMALL}px; padding: 6px 10px;"
-    )
+    lbl.setStyleSheet(style.section_header_style())
     return lbl
+
+
+def _key(text: str) -> QLabel:
+    lbl = QLabel(text)
+    lbl.setStyleSheet(f"color: {style.DIM};")
+    lbl.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+    return lbl
+
+
+def _value() -> QLabel:
+    lbl = QLabel("")
+    lbl.setWordWrap(True)
+    lbl.setTextFormat(Qt.TextFormat.RichText)
+    lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+    return lbl
+
+
+def _short_version(code: str) -> str:
+    low = code.lower()
+    return code[low.rfind("_v") + 1 :] if "_v" in low else code
+
+
+class _ClickRow(QLabel):
+    """누를 수 있는 한 줄(지난 지적)."""
+
+    clicked = Signal(object)
+
+    def __init__(self, html: str, payload: Any) -> None:
+        super().__init__(html)
+        self._payload = payload
+        self.setWordWrap(True)
+        self.setTextFormat(Qt.TextFormat.RichText)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.set_selected(False)
+
+    def set_selected(self, on: bool) -> None:
+        bg = style.RAISED if on else "transparent"
+        edge = style.PAST if on else "transparent"
+        self.setStyleSheet(
+            f"padding: 6px 10px 6px 8px; border-bottom: 1px solid {style.EDGE}; "
+            f"border-left: 2px solid {edge}; background: {bg};"
+        )
+
+    def payload(self) -> Any:
+        return self._payload
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit(self._payload)
+        super().mousePressEvent(event)
 
 
 class ConfirmSidePanel(QWidget):
@@ -46,116 +95,180 @@ class ConfirmSidePanel(QWidget):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setFixedWidth(PANEL_WIDTH)
-        self.setStyleSheet(f"background: {theme.PANEL_BG};")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(
+            f"ConfirmSidePanel {{ background: {style.PANEL}; "
+            f"border-left: 1px solid {style.EDGE}; }}"
+        )
         self._past: List[Dict[str, Any]] = []
-        self._past_version = ""
-        self._memo_guard = False
+        self._past_rows: List[_ClickRow] = []
+        self._memo: List[Tuple[int, str, bool]] = []
+        self._memo_boxes: List[QCheckBox] = []
         self._build_ui()
 
     def _build_ui(self) -> None:
         col = QVBoxLayout(self)
-        col.setContentsMargins(0, 0, 0, 0)
+        col.setContentsMargins(1, 0, 0, 0)
         col.setSpacing(0)
 
         col.addWidget(_header("작업 내용"))
-        self._work = QLabel("샷그리드 정보 없음 — 파일만 열었습니다")
-        self._work.setWordWrap(True)
-        self._work.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        self._work.setContentsMargins(10, 8, 10, 4)
-        col.addWidget(self._work)
-        self._checks = QLabel("")
-        self._checks.setWordWrap(True)
-        self._checks.setContentsMargins(10, 0, 10, 8)
-        col.addWidget(self._checks)
+        info = QWidget()
+        grid = QGridLayout(info)
+        grid.setContentsMargins(10, 8, 10, 8)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(6)
+        grid.setColumnMinimumWidth(0, 62)
+        grid.setColumnStretch(1, 1)
+        self._v_order, self._v_desc = _value(), _value()
+        self._v_who, self._v_checks = _value(), _value()
+        self._k_desc = _key("샷 설명")
+        rows = (
+            (_key("워크 오더"), self._v_order),
+            (self._k_desc, self._v_desc),
+            (_key("작업"), self._v_who),
+            (_key("검사"), self._v_checks),
+        )
+        for r, (k, v) in enumerate(rows):
+            grid.addWidget(k, r, 0)
+            grid.addWidget(v, r, 1)
+        col.addWidget(info)
         self._btn_failures = QPushButton("검사 실패 문장을 메모에 넣기")
         self._btn_failures.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._btn_failures.setStyleSheet(style.warn_button_style())
         self._btn_failures.clicked.connect(self.insert_failures_requested)
         self._btn_failures.hide()
-        col.addWidget(self._btn_failures)
+        wrap = QHBoxLayout()
+        wrap.setContentsMargins(10, 0, 10, 8)
+        wrap.addWidget(self._btn_failures)
+        col.addLayout(wrap)
 
-        past_head = QHBoxLayout()
-        past_head.setContentsMargins(0, 0, 0, 0)
-        past_head.setSpacing(0)
-        past_head.addWidget(_header("지난 지적"), 1)
+        past_head = QFrame()
+        past_head.setStyleSheet(
+            f"QFrame {{ background: {style.HEADER}; border-top: 1px solid {style.EDGE}; "
+            f"border-bottom: 1px solid {style.EDGE}; }}"
+        )
+        ph = QHBoxLayout(past_head)
+        ph.setContentsMargins(10, 3, 6, 3)
+        ph.setSpacing(6)
+        title = QLabel("지난 지적")
+        title.setStyleSheet(
+            f"color: {style.LABEL}; font-size: {style.FONT_SMALL_PX}px; font-weight: bold; "
+            f"border: none;"
+        )
+        ph.addWidget(title, 1)
         self._past_versions = QComboBox()
         self._past_versions.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._past_versions.currentIndexChanged.connect(self._on_past_version)
-        past_head.addWidget(self._past_versions)
-        col.addLayout(past_head)
-        self._past_list = QListWidget()
-        self._past_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._past_list.setWordWrap(True)
-        self._past_list.setFixedHeight(190)
-        self._past_list.itemClicked.connect(self._on_past_clicked)
-        col.addWidget(self._past_list)
+        self._past_versions.setMinimumWidth(110)
+        self._past_versions.currentIndexChanged.connect(self._fill_past)
+        ph.addWidget(self._past_versions)
+        col.addWidget(past_head)
+
+        self._past_box = QWidget()
+        self._past_col = QVBoxLayout(self._past_box)
+        self._past_col.setContentsMargins(0, 0, 0, 0)
+        self._past_col.setSpacing(0)
+        past_scroll = QScrollArea()
+        past_scroll.setWidgetResizable(True)
+        past_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        past_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        past_scroll.setStyleSheet(
+            f"QScrollArea, QScrollArea > QWidget > QWidget {{ background: {style.PANEL}; }}"
+        )
+        past_scroll.setWidget(self._past_box)
+        past_scroll.setMinimumHeight(120)
+        col.addWidget(past_scroll, 2)
 
         self._memo_head = _header("메모")
+        self._memo_head.setStyleSheet(
+            style.section_header_style() + f"border-top: 1px solid {style.EDGE};"
+        )
         col.addWidget(self._memo_head)
-        self._memo_list = QListWidget()
-        self._memo_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._memo_list.setWordWrap(True)
-        self._memo_list.setFixedHeight(120)
-        self._memo_list.itemChanged.connect(self._on_memo_changed)
-        col.addWidget(self._memo_list)
+        self._memo_box = QWidget()
+        self._memo_col = QVBoxLayout(self._memo_box)
+        self._memo_col.setContentsMargins(10, 8, 10, 2)
+        self._memo_col.setSpacing(6)
+        col.addWidget(self._memo_box)
+        ex = QVBoxLayout()
+        ex.setContentsMargins(10, 6, 10, 6)
+        ex.setSpacing(4)
         self._extra = QPlainTextEdit()
         self._extra.setPlaceholderText("경로나 설명을 덧붙여 쓰기")
         self._extra.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
-        col.addWidget(self._extra, 1)
+        self._extra.setMinimumHeight(64)
+        ex.addWidget(self._extra, 1)
         self._attach = QLabel("")
-        self._attach.setStyleSheet(f"color: {theme.TEXT_LABEL};")
-        self._attach.setContentsMargins(10, 4, 10, 4)
-        col.addWidget(self._attach)
+        self._attach.setStyleSheet(f"color: {style.DIM}; font-size: {style.FONT_SMALL_PX}px;")
+        ex.addWidget(self._attach)
+        col.addLayout(ex, 3)
 
-        self._pending = QFrame()
-        self._pending.setStyleSheet(f"background: {theme.INPUT_BG};")
+        foot = QFrame()
+        foot.setStyleSheet(
+            f"QFrame {{ background: {style.HEADER}; border-top: 1px solid {style.EDGE}; }}"
+        )
+        fcol = QVBoxLayout(foot)
+        fcol.setContentsMargins(10, 8, 10, 8)
+        fcol.setSpacing(6)
+
+        self._pending = QWidget()
         prow = QHBoxLayout(self._pending)
-        prow.setContentsMargins(10, 6, 10, 6)
+        prow.setContentsMargins(0, 0, 0, 0)
+        prow.setSpacing(6)
         self._pending_lbl = QLabel("")
         self._pending_lbl.setWordWrap(True)
+        self._pending_lbl.setStyleSheet(f"color: {style.WARN}; border: none;")
         prow.addWidget(self._pending_lbl, 1)
         self._btn_cancel = QPushButton("취소")
         self._btn_cancel.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._btn_cancel.clicked.connect(self.cancel_requested)
         prow.addWidget(self._btn_cancel)
         self._pending.hide()
-        col.addWidget(self._pending)
+        fcol.addWidget(self._pending)
 
         self._result = QLabel("")
         self._result.setWordWrap(True)
-        self._result.setContentsMargins(10, 4, 10, 4)
         self._result.hide()
-        col.addWidget(self._result)
+        fcol.addWidget(self._result)
         self._btn_retry = QPushButton("상태만 다시 바꾸기")
         self._btn_retry.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._btn_retry.clicked.connect(self.retry_requested)
         self._btn_retry.hide()
-        col.addWidget(self._btn_retry)
+        fcol.addWidget(self._btn_retry)
 
         actions = QHBoxLayout()
-        actions.setContentsMargins(10, 8, 10, 10)
+        actions.setContentsMargins(0, 0, 0, 0)
         actions.setSpacing(6)
         self._btn_retake = QPushButton("retake")
+        self._btn_retake.setStyleSheet(
+            f"QPushButton {{ height: 34px; background: {style.PANEL}; color: {style.RETAKE}; "
+            f"border: 1px solid {style.RETAKE_EDGE}; {style.mono(13, bold=True)} }}"
+            f"QPushButton:hover {{ background: #3a2422; }}"
+            f"QPushButton:disabled {{ color: #6a6a6a; border-color: {style.EDGE}; }}"
+        )
         self._btn_cfrm = QPushButton("cfrm")
-        for b, color in ((self._btn_retake, theme.ERROR), (self._btn_cfrm, theme.ACCENT)):
+        self._btn_cfrm.setStyleSheet(
+            f"QPushButton {{ height: 34px; background: {style.ACCENT}; color: {style.ON_ACCENT}; "
+            f"border: 1px solid {style.EDGE}; {style.mono(13, bold=True)} }}"
+            f"QPushButton:hover {{ background: #35a08c; }}"
+            f"QPushButton:disabled {{ color: #6a6a6a; background: #2c2c2c; }}"
+        )
+        for b in (self._btn_retake, self._btn_cfrm):
             b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            b.setMinimumHeight(38)
-            b.setStyleSheet(
-                f"QPushButton {{ min-width: 0px; font-weight: bold; border: 1px solid {color}; "
-                f"color: {color}; "
-                f"border-radius: 4px; }} QPushButton:disabled {{ color: {theme.TEXT_DIM}; "
-                f"border-color: {theme.BORDER}; }}"
-            )
         self._btn_retake.clicked.connect(lambda: self.status_requested.emit("retake"))
         self._btn_cfrm.clicked.connect(lambda: self.status_requested.emit("cfrm"))
         actions.addWidget(self._btn_retake, 1)
         actions.addWidget(self._btn_cfrm, 1)
         self._other = QComboBox()
         self._other.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._other.setFixedWidth(84)
+        self._other.setStyleSheet("QComboBox { height: 32px; }")
         self._other.addItem("그 밖", "")
         self._other.activated.connect(self._on_other)
-        self._other.setFixedWidth(84)
         actions.addWidget(self._other)
-        col.addLayout(actions)
+        fcol.addLayout(actions)
+        col.addWidget(foot)
+        self.set_work_info("", "", "")
+        self._fill_past()
+        self.set_memo([])
 
     # ── 채우기 ───────────────────────────────────────────────────
 
@@ -165,16 +278,26 @@ class ConfirmSidePanel(QWidget):
         for code, label in items:
             self._other.addItem(f"{code} · {label}", code)
 
-    def set_work_info(self, text: str) -> None:
-        self._work.setText(text)
+    def set_work_info(self, order: str, description: str, who: str) -> None:
+        """워크 오더·샷 설명·작업 줄. 비어 있으면 '없음'으로 보여 준다."""
+        none = f'<span style="color:{style.DIM}">없음</span>'
+        self._v_order.setText(escape(order).replace("\n", "<br>") if order.strip() else none)
+        has_desc = bool(description.strip())
+        self._k_desc.setVisible(has_desc)
+        self._v_desc.setVisible(has_desc)
+        self._v_desc.setText(escape(description).replace("\n", "<br>"))
+        self._v_who.setText(escape(who) if who.strip() else none)
+
+    def work_order_text(self) -> str:
+        return self._v_order.text()
 
     def set_checks(self, results: List[CheckResult]) -> None:
-        colors = {STATE_PASS: theme.SUCCESS, STATE_FAIL: theme.ERROR}
+        colors = {STATE_PASS: style.OK, STATE_FAIL: style.FAIL}
         lines = [
-            f'<span style="color:{colors.get(r.state, theme.TEXT_LABEL)}">{r.message}</span>'
+            f'<span style="color:{colors.get(r.state, style.DIM)}">{escape(r.message)}</span>'
             for r in results
         ]
-        self._checks.setText("<br>".join(lines))
+        self._v_checks.setText("<br>".join(lines))
         self._btn_failures.setVisible(any(r.state == STATE_FAIL for r in results))
 
     def set_past_notes(self, notes: List[Dict[str, Any]], current_version: str = "") -> None:
@@ -182,63 +305,84 @@ class ConfirmSidePanel(QWidget):
         self._past = list(notes)
         versions: List[str] = []
         for n in self._past:
-            v = str(n.get("version_code") or "버전 없음")
+            v = str(n.get("version_code") or _NO_VERSION)
             if v not in versions:
                 versions.append(v)
         self._past_versions.blockSignals(True)
         self._past_versions.clear()
         self._past_versions.addItem("전체", "")
         for v in versions:
-            self._past_versions.addItem(v, v)
+            self._past_versions.addItem(_short_version(v), v)
         pick = 0
         for i, v in enumerate(versions):
             if v != current_version:
-                pick = i + 1
+                pick = i + 1  # 지금 버전이 아닌 것 중 가장 최근 = 직전에 받은 지적
                 break
         self._past_versions.setCurrentIndex(pick)
         self._past_versions.blockSignals(False)
-        self._past_version = str(self._past_versions.currentData() or "")
         self._fill_past()
 
-    def _fill_past(self) -> None:
-        self._past_list.clear()
+    def _fill_past(self, *_args: Any) -> None:
+        self._past_rows = []
+        while self._past_col.count():
+            item = self._past_col.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        version = str(self._past_versions.currentData() or "")
         rows = [
             n
             for n in self._past
-            if not self._past_version
-            or str(n.get("version_code") or "버전 없음") == self._past_version
+            if not version or str(n.get("version_code") or _NO_VERSION) == version
         ]
         if not rows:
-            item = QListWidgetItem("지적이 없습니다")
-            item.setFlags(Qt.ItemFlag.NoItemFlags)
-            self._past_list.addItem(item)
-            return
+            empty = QLabel("지적이 없습니다")
+            empty.setStyleSheet(f"color: {style.DIM}; padding: 8px 10px;")
+            self._past_col.addWidget(empty)
         for n in rows:
             head = " · ".join(
                 x
                 for x in (
-                    str(n.get("version_code") or ""),
+                    _short_version(str(n.get("version_code") or "")),
                     str(n.get("timestamp") or "")[:10],
                     str(n.get("author") or ""),
                 )
                 if x
             )
-            item = QListWidgetItem(f"{head}\n{(n.get('content') or '').strip()}")
-            item.setData(_ROLE_ID, n)
-            self._past_list.addItem(item)
+            body = escape((n.get("content") or "").strip()).replace("\n", "<br>")
+            html = (
+                f'<span style="color:{style.PAST}; {style.mono(style.FONT_SMALL_PX)}">'
+                f"{escape(head)}</span><br>{body}"
+            )
+            row = _ClickRow(html, n)
+            row.clicked.connect(self._on_past_clicked)
+            self._past_rows.append(row)
+            self._past_col.addWidget(row)
+        self._past_col.addStretch(1)
+
+    def past_count(self) -> int:
+        return len(self._past_rows)
 
     def set_memo(self, lines: List[Tuple[int, str, bool]]) -> None:
-        self._memo_guard = True
-        self._memo_list.clear()
+        self._memo = list(lines)
+        for b in self._memo_boxes:
+            b.deleteLater()
+        self._memo_boxes = []
         for shape_id, text, on in lines:
-            item = QListWidgetItem(text)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Checked if on else Qt.CheckState.Unchecked)
-            item.setData(_ROLE_ID, shape_id)
-            self._memo_list.addItem(item)
-        self._memo_guard = False
+            box = QCheckBox(text)
+            box.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            box.setChecked(on)
+            color = style.TEXT if on else style.DIM
+            box.setStyleSheet(f"QCheckBox {{ color: {color}; font-size: {style.FONT_PX}px; }}")
+            box.toggled.connect(lambda checked, sid=shape_id: self.memo_toggled.emit(sid, checked))
+            self._memo_boxes.append(box)
+            self._memo_col.addWidget(box)
+        self._memo_box.setVisible(bool(lines))
         n = sum(1 for _i, _t, on in lines if on)
         self._memo_head.setText(f"메모 · 보낼 줄 {n}" if lines else "메모")
+
+    def memo_texts(self) -> List[str]:
+        return [text for _i, text, _on in self._memo]
 
     def set_attach_text(self, text: str) -> None:
         self._attach.setText(text)
@@ -253,9 +397,6 @@ class ConfirmSidePanel(QWidget):
     def clear_extra(self) -> None:
         self._extra.clear()
 
-    def extra_has_focus(self) -> bool:
-        return self._extra.hasFocus()
-
     def set_pending(self, text: Optional[str]) -> None:
         self._pending.setVisible(bool(text))
         self._pending_lbl.setText(text or "")
@@ -263,7 +404,10 @@ class ConfirmSidePanel(QWidget):
     def set_result(self, text: str, ok: bool, *, can_retry: bool = False) -> None:
         self._result.setVisible(bool(text))
         self._result.setText(text)
-        self._result.setStyleSheet(f"color: {theme.SUCCESS if ok else _WARN};")
+        color = style.OK if ok else style.WARN
+        self._result.setStyleSheet(
+            f"color: {color}; font-size: {style.FONT_SMALL_PX}px; border: none;"
+        )
         self._btn_retry.setVisible(can_retry)
 
     def set_sendable(self, on: bool, tip: str = "") -> None:
@@ -271,23 +415,16 @@ class ConfirmSidePanel(QWidget):
             b.setEnabled(on)
             b.setToolTip(tip)
 
+    def can_send(self) -> bool:
+        return self._btn_retake.isEnabled()
+
     # ── 신호 ─────────────────────────────────────────────────────
 
-    def _on_past_version(self, _i: int) -> None:
-        self._past_version = str(self._past_versions.currentData() or "")
-        self._fill_past()
-
-    def _on_past_clicked(self, item: QListWidgetItem) -> None:
-        note = item.data(_ROLE_ID)
+    def _on_past_clicked(self, note: object) -> None:
+        for row in self._past_rows:
+            row.set_selected(row.payload() is note)
         if isinstance(note, dict):
             self.past_note_clicked.emit(note)
-
-    def _on_memo_changed(self, item: QListWidgetItem) -> None:
-        if self._memo_guard:
-            return
-        shape_id = item.data(_ROLE_ID)
-        if shape_id is not None:
-            self.memo_toggled.emit(int(shape_id), item.checkState() == Qt.CheckState.Checked)
 
     def _on_other(self, index: int) -> None:
         code = str(self._other.itemData(index) or "")

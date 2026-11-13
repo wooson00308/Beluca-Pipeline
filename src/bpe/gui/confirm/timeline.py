@@ -8,15 +8,23 @@ from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QMouseEvent, QPainter, QPaintEvent, QPen, QPolygonF
 from PySide6.QtWidgets import QWidget
 
-from bpe.gui import theme
+from bpe.gui.confirm import style
 
 _MARGIN = 26
-_HEIGHT = 50
+_HEIGHT = 46
 _BASE_Y = 30
 _LABEL_MIN_GAP = 46
-_CACHE_COLOR = "#4f9f6a"
-_MARK_COLOR = "#ff5a52"
 _TICK_STEPS = (1, 2, 5, 10, 20, 25, 50, 100, 200, 500, 1000)
+_MONO_FAMILIES = ["Consolas", "Cascadia Mono", "D2Coding"]
+
+
+def _mono_font(px: int, bold: bool = False) -> QFont:
+    f = QFont()
+    f.setFamilies(_MONO_FAMILIES)
+    f.setStyleHint(QFont.StyleHint.Monospace)
+    f.setPixelSize(px)
+    f.setBold(bold)
+    return f
 
 
 class ConfirmTimeline(QWidget):
@@ -33,7 +41,6 @@ class ConfirmTimeline(QWidget):
         self._current = 0
         self._cached: Set[int] = set()
         self._marks: List[int] = []
-        self._past_marks: List[int] = []
 
     def set_range(self, frame_start: int, count: int) -> None:
         self._start, self._count = int(frame_start), max(0, int(count))
@@ -50,18 +57,13 @@ class ConfirmTimeline(QWidget):
         self._cached.add(index)
         self.update()
 
-    def clear_cached(self) -> None:
-        self._cached.clear()
-        self.update()
-
     def set_marks(self, frames: List[int]) -> None:
         """그림을 남긴 화면 프레임 번호들."""
         self._marks = list(frames)
         self.update()
 
-    def set_past_marks(self, frames: List[int]) -> None:
-        self._past_marks = list(frames)
-        self.update()
+    def marks(self) -> List[int]:
+        return list(self._marks)
 
     def count(self) -> int:
         return self._count
@@ -90,25 +92,22 @@ class ConfirmTimeline(QWidget):
         del event
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        p.fillRect(self.rect(), QColor(theme.PANEL_BG))
+        p.fillRect(self.rect(), QColor(style.PANEL))
         if self._count <= 0:
             p.end()
             return
         per = (self.width() - 2 * _MARGIN) / self._count
 
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(_CACHE_COLOR))
+        p.setBrush(QColor(style.CACHE))
         for i in self._cached:
-            x = _MARGIN + per * i
-            p.drawRect(QRectF(x, 3, per + 0.6, 3))
+            p.drawRect(QRectF(_MARGIN + per * i, 0, per + 0.6, 2))
 
-        dim = QColor(theme.TEXT_DIM)
+        dim = QColor("#5b5b5b")
         p.setPen(QPen(dim, 1))
         p.drawLine(QPointF(_MARGIN, _BASE_Y), QPointF(self.width() - _MARGIN, _BASE_Y))
         step = self._label_step()
-        font = QFont(self.font())
-        font.setPixelSize(theme.FONT_SIZE_SMALL)
-        p.setFont(font)
+        p.setFont(_mono_font(style.FONT_SMALL_PX))
         draw_minor = per >= 4
         for i in range(self._count):
             frame = self._start + i
@@ -116,45 +115,41 @@ class ConfirmTimeline(QWidget):
             if not major and not draw_minor:
                 continue
             x = self._x_of(i)
-            p.setPen(QPen(QColor(theme.TEXT_LABEL) if major else dim, 1))
+            p.setPen(QPen(QColor(style.DIM) if major else dim, 1))
             p.drawLine(QPointF(x, _BASE_Y - (7 if major else 3)), QPointF(x, _BASE_Y))
             if major:
                 p.drawText(
-                    QRectF(x - 30, _BASE_Y + 2, 60, 14), Qt.AlignmentFlag.AlignCenter, str(frame)
+                    QRectF(x - 30, _BASE_Y + 1, 60, 14), Qt.AlignmentFlag.AlignCenter, str(frame)
                 )
 
-        p.setPen(Qt.PenStyle.NoPen)
-        for frames, color in ((self._past_marks, "#f0c060"), (self._marks, _MARK_COLOR)):
-            p.setBrush(QColor(color))
-            for frame in frames:
-                i = frame - self._start
-                if 0 <= i < self._count:
-                    x = self._x_of(i)
-                    p.drawPolygon(
-                        QPolygonF(
-                            [
-                                QPointF(x, _BASE_Y - 15),
-                                QPointF(x + 5.5, _BASE_Y - 9.5),
-                                QPointF(x, _BASE_Y - 4),
-                                QPointF(x - 5.5, _BASE_Y - 9.5),
-                            ]
-                        )
-                    )
-
         x = self._x_of(self._current)
-        accent = QColor(theme.ACCENT)
+        accent = QColor(style.ACCENT)
         p.setPen(QPen(accent, 2))
-        p.drawLine(QPointF(x, 8), QPointF(x, _BASE_Y + 1))
-        label = str(self._start + self._current)
-        flag = QRectF(x - 22, 8, 44, 14)
+        p.drawLine(QPointF(x, 6), QPointF(x, _BASE_Y + 1))
+        flag = QRectF(x - 21, 5, 42, 14)
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(accent)
         p.drawRect(flag)
-        bold = QFont(font)
-        bold.setBold(True)
-        p.setFont(bold)
-        p.setPen(QColor("#ffffff"))
-        p.drawText(flag, Qt.AlignmentFlag.AlignCenter, label)
+        p.setFont(_mono_font(style.FONT_SMALL_PX, bold=True))
+        p.setPen(QColor(style.ON_ACCENT))
+        p.drawText(flag, Qt.AlignmentFlag.AlignCenter, str(self._start + self._current))
+
+        p.setPen(QPen(QColor("#000000"), 1))
+        p.setBrush(QColor(style.MARK))
+        for frame in self._marks:
+            i = frame - self._start
+            if 0 <= i < self._count:
+                mx = self._x_of(i)
+                p.drawPolygon(
+                    QPolygonF(
+                        [
+                            QPointF(mx, _BASE_Y - 11),
+                            QPointF(mx + 5, _BASE_Y - 6),
+                            QPointF(mx, _BASE_Y - 1),
+                            QPointF(mx - 5, _BASE_Y - 6),
+                        ]
+                    )
+                )
         p.end()
 
     # ── 마우스 ───────────────────────────────────────────────────

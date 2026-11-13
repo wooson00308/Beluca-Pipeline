@@ -1,7 +1,7 @@
 """BPE 컨펌 전용 창 — 누크 없이 쓰는 뷰어 + 그림 메모 + 작업 비하인드.
 
 기존 피드백 탭과 따로 뜨는 독립 창이다. 영상을 프레임 단위로 메모리에 올려 재생하고,
-원본·전 버전·지금 버전·편집본을 번호 키로 번갈아 본다.
+원본·전 버전·지금 버전·편집본을 번호 키로 번갈아 본다. 모양은 ``style.py``(시안 2판).
 """
 
 from __future__ import annotations
@@ -10,11 +10,20 @@ import os
 import struct
 import sys
 import tempfile
+from html import escape
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QCloseEvent, QColor, QImage, QKeyEvent, QPainter, QShowEvent
+from PySide6.QtGui import (
+    QCloseEvent,
+    QColor,
+    QImage,
+    QKeyEvent,
+    QPainter,
+    QResizeEvent,
+    QShowEvent,
+)
 from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
@@ -33,6 +42,8 @@ import bpe.core.config as cfg
 from bpe.core.atomic_io import read_json_file, write_json_file
 from bpe.core.confirm_annotations import AnnotationDoc, compose_note_body, memo_lines
 from bpe.core.confirm_checks import (
+    STATE_FAIL,
+    STATE_PASS,
     CheckResult,
     check_work_against_reference,
     failure_lines,
@@ -57,7 +68,7 @@ from bpe.core.settings import (
     get_feedback_frame_start,
     save_confirm_settings,
 )
-from bpe.gui import theme
+from bpe.gui.confirm import style
 from bpe.gui.confirm.annotation_layer import (
     TOOL_ARROW,
     TOOL_PEN,
@@ -67,6 +78,7 @@ from bpe.gui.confirm.annotation_layer import (
     AnnotationLayer,
     paint_shapes,
 )
+from bpe.gui.confirm.shot_drawer import ShotDrawer
 from bpe.gui.confirm.side_panel import ConfirmSidePanel
 from bpe.gui.confirm.timeline import ConfirmTimeline
 from bpe.gui.confirm.viewer_gl import SLOT_A, SLOT_B, ConfirmGLView
@@ -90,23 +102,30 @@ _GAMMA_SCALE = 100
 _SEND_DELAY_SECS = 5
 _NOTE_IMAGE_MAX_EDGE = 1280
 _WORKER_WAIT_MS = 5000
-_WARN = "#f0c060"
+_HEADER_H = 36
 _VIDEO_FILTER = "영상 (*.mov *.mp4 *.mxf *.mkv *.m4v);;모든 파일 (*)"
 _CHANNELS: Tuple[Tuple[str, str], ...] = (
     ("RGB", CHANNEL_RGB),
     ("R", CHANNEL_R),
     ("G", CHANNEL_G),
     ("B", CHANNEL_B),
-    ("밝기", CHANNEL_LUMA),
+    ("A", CHANNEL_LUMA),
 )
-_TOOLS: Tuple[Tuple[str, str, str], ...] = (
-    (TOOL_SELECT, "선택", "V"),
-    (TOOL_RECT, "네모", "N"),
-    (TOOL_PEN, "펜", "P"),
-    (TOOL_ARROW, "화살표", "W"),
-    (TOOL_TEXT, "글씨", "T"),
+_CHANNEL_NAMES = {CHANNEL_R: "R", CHANNEL_G: "G", CHANNEL_B: "B", CHANNEL_LUMA: "밝기(A)"}
+_TOOLS: Tuple[Tuple[str, str, str, str], ...] = (
+    (TOOL_SELECT, "select", "선택", "V"),
+    (TOOL_RECT, "rect", "네모", "N"),
+    (TOOL_PEN, "pen", "펜", "P"),
+    (TOOL_ARROW, "arrow", "화살표", "W"),
+    (TOOL_TEXT, "text", "글씨", "T"),
 )
-_COLORS = ("#ff5a52", "#f2c94c", "#ffffff", "#4fc3f7")
+_TOOL_HINTS = {
+    TOOL_SELECT: "선택 · 옮기기",
+    TOOL_RECT: "끌어서 네모 → 글 쓰고 Enter",
+    TOOL_PEN: "펜 · 자유롭게 그리기",
+    TOOL_ARROW: "끌어서 화살표 → 글 쓰고 Enter",
+    TOOL_TEXT: "눌러서 글씨 쓰기",
+}
 
 
 class _Buffer:
@@ -131,38 +150,46 @@ class _Buffer:
         return (self.info.frame_count or 0) if self.info else 0
 
     def button_text(self) -> str:
-        return (
-            f"{self.number} {self.title}{(' ' + self.version_label) if self.version_label else ''}"
-        )
+        ver = f" {self.version_label}" if self.version_label else ""
+        return f"{self.number}  {self.title}{ver}"
 
 
-_BASE_BTN = (
-    f"QPushButton {{ min-width: 0px; padding: 4px 10px; border: 1px solid {theme.BORDER}; "
-    f"border-radius: 3px; background: {theme.INPUT_BG}; color: {theme.TEXT}; }}"
-    f"QPushButton:hover {{ border-color: {theme.TEXT_DIM}; }}"
-    f"QPushButton:disabled {{ color: {theme.TEXT_DIM}; }}"
-)
-
-
-def _btn(text: str, *, checkable: bool = False, tip: str = "") -> QPushButton:
+def _btn(text: str = "", *, checkable: bool = False, tip: str = "") -> QPushButton:
     b = QPushButton(text)
     b.setCheckable(checkable)
     b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
     b.setCursor(Qt.CursorShape.PointingHandCursor)
     if tip:
         b.setToolTip(tip)
-    b.setStyleSheet(_BASE_BTN)
     return b
 
 
-def _toggle_style(color: str = "") -> str:
-    on = color or theme.ACCENT
-    return (
-        f"{_BASE_BTN}"
-        f"QPushButton:checked {{ border-color: {on}; border-bottom: 3px solid {on}; "
-        f"color: #ffffff; }}"
-        f"QPushButton:disabled {{ color: {theme.TEXT_DIM}; }}"
-    )
+def _icon_btn(icon: str, tip: str, *, checkable: bool = False, size: int = 16) -> QPushButton:
+    b = _btn("", checkable=checkable, tip=tip)
+    style.set_icon(b, icon, size=size)
+    b.setStyleSheet("QPushButton { padding: 0px 7px; }")
+    return b
+
+
+def _divider() -> QWidget:
+    w = QWidget()
+    w.setFixedSize(1, 18)
+    w.setStyleSheet(f"background: {style.EDGE};")
+    return w
+
+
+def _dim_label(text: str, *, mono: bool = False) -> QLabel:
+    lbl = QLabel(text)
+    extra = style.mono(style.FONT_SMALL_PX) if mono else ""
+    lbl.setStyleSheet(f"color: {style.DIM}; {extra}")
+    return lbl
+
+
+def _bar_frame(name: str, bg: str, *, top: bool = False, bottom: bool = True) -> QFrame:
+    f = QFrame()
+    f.setObjectName(name)
+    f.setStyleSheet(f"QFrame#{name} {{ {style.bar_style(bg, bottom=bottom, top=top)} }}")
+    return f
 
 
 class ConfirmWindow(QWidget):
@@ -184,6 +211,7 @@ class ConfirmWindow(QWidget):
         self._shown = KEY_CUR
         self._last_shown = KEY_ORG
         self._diff = False
+        self._diff_note = ""
         self._channel = CHANNEL_RGB
         self._lut: Optional[CubeLut] = None
         self._lut_on = False
@@ -195,16 +223,17 @@ class ConfirmWindow(QWidget):
         self._playing = False
         self._loop = True
         self._movie = ""
+        self._shot_root: Optional[Path] = None
         self._task: Dict[str, Any] = {}
         self._checks: List[CheckResult] = []
         self._load_token = 0
         self._hover: Tuple[int, int] = (-1, -1)
+        self._color = style.DRAW_COLORS[0]
         self._pending_status = ""
         self._pending_left = 0
         self._sent_note_id: Optional[int] = None
-        self._submit_busy = False
-        self._diff_note = ""
         self._last_status_code = ""
+        self._submit_busy = False
         self._play_timer = QTimer(self)
         self._play_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._play_timer.timeout.connect(self._on_play_tick)
@@ -221,26 +250,11 @@ class ConfirmWindow(QWidget):
     # ── 화면 구성 ────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
+        style.apply_root(self)
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-
-        head = QHBoxLayout()
-        head.setContentsMargins(10, 6, 10, 6)
-        head.setSpacing(8)
-        self._btn_open = _btn("영상 열기…")
-        self._btn_open.clicked.connect(self._pick_file)
-        head.addWidget(self._btn_open)
-        self._title = QLabel("영상을 열어 주세요")
-        self._title.setStyleSheet("font-weight: bold;")
-        head.addWidget(self._title, 1)
-        self._btn_full = _btn("전체화면", checkable=True, tip="F11")
-        self._btn_full.clicked.connect(self._toggle_fullscreen)
-        head.addWidget(self._btn_full)
-        self._btn_help = _btn("단축키", tip="?")
-        self._btn_help.clicked.connect(self._toggle_help)
-        head.addWidget(self._btn_help)
-        root.addLayout(head)
+        root.addWidget(self._build_header())
 
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
@@ -248,8 +262,7 @@ class ConfirmWindow(QWidget):
         left = QVBoxLayout()
         left.setContentsMargins(0, 0, 0, 0)
         left.setSpacing(0)
-        left.addLayout(self._build_bar1())
-        left.addLayout(self._build_bar2())
+        left.addWidget(self._build_bar())
 
         self._view = ConfirmGLView()
         self._view.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
@@ -262,15 +275,15 @@ class ConfirmWindow(QWidget):
         self._info = QLabel("")
         self._info.setTextFormat(Qt.TextFormat.RichText)
         self._info.setStyleSheet(
-            f"background: {theme.SIDEBAR_BG}; color: {theme.TEXT_LABEL}; padding: 3px 10px; "
-            f"font-size: {theme.FONT_SIZE_SMALL}px;"
+            f"background: {style.INFO_BG}; color: {style.DIM}; padding: 3px 10px; "
+            f"border-top: 1px solid {style.EDGE}; {style.mono(style.FONT_SMALL_PX)}"
         )
         left.addWidget(self._info)
 
         self._timeline = ConfirmTimeline()
         self._timeline.frame_picked.connect(self._on_frame_picked)
         left.addWidget(self._timeline)
-        left.addLayout(self._build_transport())
+        left.addWidget(self._build_transport())
         body.addLayout(left, 1)
 
         self._panel = ConfirmSidePanel()
@@ -288,31 +301,105 @@ class ConfirmWindow(QWidget):
         body.addWidget(self._panel)
         root.addLayout(body, 1)
 
-    def _build_bar1(self) -> QHBoxLayout:
+        self._drawer = ShotDrawer(self)
+        self._drawer.task_picked.connect(self._open_task)
+        self._drawer.rows_changed.connect(self._sync_header)
+        self._drawer.hide()
+
+    def _build_header(self) -> QFrame:
+        head = _bar_frame("confirm_header", style.HEADER)
+        head.setFixedHeight(_HEADER_H)
+        row = QHBoxLayout(head)
+        row.setContentsMargins(8, 0, 8, 0)
+        row.setSpacing(10)
+        self._btn_list = _btn("목록", checkable=True, tip="샷 목록 열기 · 닫기")
+        style.set_icon(self._btn_list, "list", size=14)
+        self._btn_list.setStyleSheet(style.segment_style("only"))
+        self._btn_list.clicked.connect(self._toggle_drawer)
+        row.addWidget(self._btn_list)
+        self._crumb = QLabel("영상을 열어 주세요")
+        self._crumb.setTextFormat(Qt.TextFormat.RichText)
+        row.addWidget(self._crumb)
+        self._ver_chip = QLabel("")
+        self._ver_chip.setStyleSheet(style.field_style())
+        row.addWidget(self._ver_chip)
+        self._who = QLabel("")
+        self._who.setStyleSheet(f"color: {style.DIM};")
+        row.addWidget(self._who)
+        self._status_lbl = QLabel("")
+        self._status_lbl.setTextFormat(Qt.TextFormat.RichText)
+        row.addWidget(self._status_lbl)
+        row.addStretch(1)
+        self._pos = QLabel("")
+        self._pos.setStyleSheet(f"color: {style.DIM}; {style.mono()}")
+        row.addWidget(self._pos)
+        nav = QHBoxLayout()
+        nav.setSpacing(0)
+        self._btn_prev = _icon_btn("chev_left", "이전 샷", size=14)
+        self._btn_next = _icon_btn("chev_right", "다음 샷", size=14)
+        self._btn_prev.clicked.connect(lambda: self._nav_shot(-1))
+        self._btn_next.clicked.connect(lambda: self._nav_shot(1))
+        for b, pos in ((self._btn_prev, "first"), (self._btn_next, "last")):
+            b.setStyleSheet(style.segment_style(pos) + "QPushButton { padding: 0px 7px; }")
+            nav.addWidget(b)
+        row.addLayout(nav)
+        row.addWidget(_divider())
+        self._btn_open = _icon_btn("folder", "영상 파일 열기…")
+        self._btn_open.clicked.connect(self._pick_file)
+        row.addWidget(self._btn_open)
+        self._btn_full = _icon_btn("fullscreen", "전체화면 (F11)", checkable=True)
+        self._btn_full.clicked.connect(self._toggle_fullscreen)
+        row.addWidget(self._btn_full)
+        self._btn_help = _icon_btn("help", "단축키 (?)")
+        self._btn_help.clicked.connect(self._toggle_help)
+        row.addWidget(self._btn_help)
+        return head
+
+    def _build_bar(self) -> QFrame:
+        bar = _bar_frame("confirm_bar", style.PANEL)
+        col = QVBoxLayout(bar)
+        col.setContentsMargins(8, 5, 8, 5)
+        col.setSpacing(5)
+
         row = QHBoxLayout()
-        row.setContentsMargins(10, 4, 10, 2)
-        row.setSpacing(4)
+        row.setSpacing(10)
+        seg = QHBoxLayout()
+        seg.setSpacing(0)
         self._buf_btns: Dict[str, QPushButton] = {}
         for key, number, _title in _BUFFER_DEFS:
             b = _btn("", checkable=True, tip=f"숫자 키 {number}")
-            b.setStyleSheet(_toggle_style())
             b.clicked.connect(lambda _c=False, k=key: self._show_buffer(k))
             self._buf_btns[key] = b
-            row.addWidget(b)
-        row.addSpacing(10)
+            seg.addWidget(b)
+        style.make_segments(list(self._buf_btns.values()))
+        row.addLayout(seg)
+
         self._btn_diff = _btn("차이", checkable=True, tip="지금 보는 판 − 직전에 본 판 (D)")
-        self._btn_diff.setStyleSheet(_toggle_style(_WARN))
+        style.set_icon(self._btn_diff, "diff", size=14)
+        self._btn_diff.setStyleSheet(style.warn_toggle_style())
         self._btn_diff.clicked.connect(self._toggle_diff)
         row.addWidget(self._btn_diff)
-        row.addSpacing(10)
+
+        cseg = QHBoxLayout()
+        cseg.setSpacing(0)
         self._chan_btns: Dict[str, QPushButton] = {}
-        colors = {CHANNEL_R: "#ff7b7b", CHANNEL_G: "#7fcf7f", CHANNEL_B: "#7fb0ff"}
-        for label, ch in _CHANNELS:
-            b = _btn(label, checkable=True)
-            b.setStyleSheet(_toggle_style(colors.get(ch, "")))
+        for i, (label, ch) in enumerate(_CHANNELS):
+            tip = "밝기만 보기 (A)" if ch == CHANNEL_LUMA else f"{label} (한 번 더 누르면 RGB)"
+            b = _btn(label, checkable=True, tip=tip)
+            pos = "first" if i == 0 else "last" if i == len(_CHANNELS) - 1 else "mid"
+            warn = ch != CHANNEL_RGB
+            b.setStyleSheet(
+                style.segment_style(
+                    pos,
+                    on_color=style.WARN if warn else "",
+                    text_color=style.CHANNEL_COLORS.get(label, ""),
+                )
+                + f"QPushButton {{ {style.mono(bold=True)} padding: 0px 9px; }}"
+            )
             b.clicked.connect(lambda _c=False, c=ch: self._set_channel(c))
             self._chan_btns[ch] = b
-            row.addWidget(b)
+            cseg.addWidget(b)
+        row.addLayout(cseg)
         row.addStretch(1)
         self._btn_fit = _btn("화면 맞춤", tip="F")
         self._btn_fit.clicked.connect(self._view_fit)
@@ -320,155 +407,222 @@ class ConfirmWindow(QWidget):
         self._btn_fill = _btn("꽉 채움", tip="H")
         self._btn_fill.clicked.connect(self._view_fill)
         row.addWidget(self._btn_fill)
-        return row
+        col.addLayout(row)
 
-    def _build_bar2(self) -> QHBoxLayout:
-        row = QHBoxLayout()
-        row.setContentsMargins(10, 2, 10, 6)
-        row.setSpacing(6)
+        row2 = QHBoxLayout()
+        row2.setSpacing(8)
+        flat = (
+            f"QPushButton {{ border: none; background: transparent; color: {style.DIM}; "
+            f"padding: 0px 2px; }} "
+            f"QPushButton:hover {{ color: {style.TEXT}; background: transparent; }}"
+        )
         self._btn_gain = _btn("게인", tip="누르면 1.00 으로")
-        self._btn_gain.setFlat(True)
+        self._btn_gain.setStyleSheet(flat)
         self._btn_gain.clicked.connect(lambda: self._gain.setValue(0))
-        row.addWidget(self._btn_gain)
+        row2.addWidget(self._btn_gain)
         self._gain = QSlider(Qt.Orientation.Horizontal)
         self._gain.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._gain.setRange(-4 * _GAIN_STEPS_PER_STOP, 6 * _GAIN_STEPS_PER_STOP)
-        self._gain.setFixedWidth(160)
+        self._gain.setFixedWidth(130)
         self._gain.valueChanged.connect(self._sync_view)
-        row.addWidget(self._gain)
+        row2.addWidget(self._gain)
         self._gain_val = QLabel("1.00")
-        self._gain_val.setFixedWidth(46)
-        row.addWidget(self._gain_val)
+        self._gain_val.setFixedWidth(52)
+        self._gain_val.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        row2.addWidget(self._gain_val)
         self._btn_gamma = _btn("감마", tip="누르면 1.00 으로")
-        self._btn_gamma.setFlat(True)
+        self._btn_gamma.setStyleSheet(flat)
         self._btn_gamma.clicked.connect(lambda: self._gamma.setValue(_GAMMA_SCALE))
-        row.addWidget(self._btn_gamma)
+        row2.addWidget(self._btn_gamma)
         self._gamma = QSlider(Qt.Orientation.Horizontal)
         self._gamma.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._gamma.setRange(20, 400)
         self._gamma.setValue(_GAMMA_SCALE)
-        self._gamma.setFixedWidth(160)
+        self._gamma.setFixedWidth(130)
         self._gamma.valueChanged.connect(self._sync_view)
-        row.addWidget(self._gamma)
+        row2.addWidget(self._gamma)
         self._gamma_val = QLabel("1.00")
-        self._gamma_val.setFixedWidth(46)
-        row.addWidget(self._gamma_val)
-        row.addSpacing(10)
+        self._gamma_val.setFixedWidth(52)
+        self._gamma_val.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        row2.addWidget(self._gamma_val)
+        row2.addWidget(_divider())
+        lseg = QHBoxLayout()
+        lseg.setSpacing(0)
         self._btn_lut = _btn("LUT", checkable=True, tip="룩업 켜고 끄기 (L)")
-        self._btn_lut.setStyleSheet(_toggle_style())
-        self._btn_lut.clicked.connect(self._toggle_lut)
-        row.addWidget(self._btn_lut)
-        self._btn_lut_pick = _btn("룩업 고르기…")
-        self._btn_lut_pick.clicked.connect(self._pick_lut)
-        row.addWidget(self._btn_lut_pick)
-        self._btn_reset = _btn("보기 원래대로")
-        self._btn_reset.setStyleSheet(
-            f"min-width: 0px; color: {_WARN}; border: 1px solid {_WARN}; padding: 4px 10px;"
+        self._btn_lut.setStyleSheet(
+            style.segment_style("first") + "QPushButton { font-weight: bold; }"
         )
+        self._btn_lut.clicked.connect(self._toggle_lut)
+        lseg.addWidget(self._btn_lut)
+        self._btn_lut_pick = _btn("룩업 고르기…", tip=".cube 파일 고르기 — 프로젝트별로 기억합니다")
+        self._btn_lut_pick.setStyleSheet(
+            style.segment_style("last") + f"QPushButton {{ background: {style.FIELD}; }}"
+        )
+        self._btn_lut_pick.clicked.connect(self._pick_lut)
+        lseg.addWidget(self._btn_lut_pick)
+        row2.addLayout(lseg)
+        self._btn_reset = _btn("보기 원래대로")
+        self._btn_reset.setStyleSheet(style.warn_button_style())
         self._btn_reset.clicked.connect(self._reset_view)
-        row.addWidget(self._btn_reset)
-        row.addStretch(1)
-        return row
+        row2.addWidget(self._btn_reset)
+        row2.addStretch(1)
+        col.addLayout(row2)
+        return bar
 
     def _build_overlays(self) -> None:
         """뷰어 위에 뜨는 글자·도구 띠(그리기 층보다 위)."""
-        mono = "font-family: Consolas, monospace;"
         self._hud = QLabel("", self._view)
-        self._hud.setStyleSheet(f"background: #000000; color: #e6e6e6; padding: 2px 6px; {mono}")
+        self._hud.setStyleSheet(
+            f"background: #000000; color: #e6e6e6; padding: 2px 6px; "
+            f"{style.mono(style.FONT_SMALL_PX)}"
+        )
         self._hud.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._state = QLabel("", self._view)
-        self._state.setStyleSheet(f"background: #000000; color: {_WARN}; padding: 2px 6px;")
+        self._state.setStyleSheet(
+            f"background: #000000; color: {style.WARN}; padding: 2px 6px; "
+            f"font-size: {style.FONT_SMALL_PX}px;"
+        )
         self._state.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._banner = QLabel("", self._view)
         self._banner.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._banner.setStyleSheet(
-            f"background: {theme.ERROR}; color: #ffffff; font-weight: bold; padding: 6px 14px; "
-            f"font-size: {theme.FONT_SIZE + 2}px;"
+            "background: #a32d2d; color: #ffffff; font-weight: bold; padding: 6px 14px; "
+            f"font-size: {style.FONT_PX + 2}px;"
         )
         self._banner.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._banner.hide()
         self._help = QLabel(self._help_text(), self._view)
         self._help.setStyleSheet(
-            f"background: {theme.PANEL_BG}; color: {theme.TEXT}; padding: 14px 18px; "
-            f"border: 1px solid {theme.BORDER};"
+            f"background: {style.PANEL}; color: {style.TEXT}; padding: 14px 18px; "
+            f"border: 1px solid {style.EDGE};"
         )
         self._help.hide()
 
         self._pill = QFrame(self._view)
+        self._pill.setObjectName("confirm_pill")
         self._pill.setStyleSheet(
-            f"QFrame {{ background: {theme.PANEL_BG}; border: 1px solid {theme.BORDER}; "
+            f"QFrame#confirm_pill {{ background: {style.PANEL}; border: 1px solid {style.EDGE}; "
             f"border-radius: 6px; }}"
         )
         prow = QHBoxLayout(self._pill)
-        prow.setContentsMargins(8, 4, 8, 4)
-        prow.setSpacing(3)
+        prow.setContentsMargins(6, 4, 10, 4)
+        prow.setSpacing(2)
+        grip = QLabel("⋮⋮")
+        grip.setStyleSheet(f"color: {style.DIM}; font-size: 14px; padding: 0px 3px;")
+        prow.addWidget(grip)
         self._tool_btns: Dict[str, QPushButton] = {}
-        for tool, label, key in _TOOLS:
-            b = _btn(label, checkable=True, tip=f"{label} ({key})")
-            b.setStyleSheet(_toggle_style())
+        for tool, icon, label, key in _TOOLS:
+            b = _btn("", checkable=True, tip=f"{label} ({key})")
+            style.set_icon(b, icon, size=17)
+            b.setStyleSheet(style.icon_button_style(30))
             b.clicked.connect(lambda _c=False, t=tool: self._set_tool(t))
             self._tool_btns[tool] = b
             prow.addWidget(b)
+        self._btn_erase = _btn("", tip="고른 그림 지우기 (Delete)")
+        style.set_icon(self._btn_erase, "eraser", size=17)
+        self._btn_erase.setStyleSheet(style.icon_button_style(30))
+        self._btn_erase.clicked.connect(lambda: self._layer.delete_selected())
+        prow.addWidget(self._btn_erase)
+        prow.addSpacing(4)
+        prow.addWidget(_divider())
         prow.addSpacing(6)
         self._color_btns: Dict[str, QPushButton] = {}
-        for color in _COLORS:
-            b = _btn("")
-            b.setFixedSize(20, 20)
+        for color in style.DRAW_COLORS:
+            b = _btn("", tip="그리기 색")
             b.clicked.connect(lambda _c=False, c=color: self._set_color(c))
             self._color_btns[color] = b
             prow.addWidget(b)
-        prow.addSpacing(6)
-        for label, slot, tip in (
-            ("되돌리기", self._layer.undo, "Ctrl+Z"),
-            ("다시", self._layer.redo, "Ctrl+Y"),
-            ("지우기", self._layer.delete_selected, "Delete — 고른 그림 하나"),
-            ("여기까지", self._extend_selected, "고른 그림을 지금 프레임까지 이어지는 구간으로"),
-        ):
-            b = _btn(label, tip=tip)
+            prow.addSpacing(3)
+        prow.addSpacing(3)
+        prow.addWidget(_divider())
+        prow.addSpacing(4)
+        actions: Tuple[Tuple[str, str, Callable[[], Any]], ...] = (
+            ("undo", "되돌리기 (Ctrl+Z)", self._layer.undo),
+            ("redo", "다시 (Ctrl+Y)", self._layer.redo),
+            ("range", "고른 그림을 지금 프레임까지 이어지는 구간으로", self._extend_selected),
+        )
+        for icon, tip, slot in actions:
+            b = _btn("", tip=tip)
+            style.set_icon(b, icon, size=17)
+            b.setStyleSheet(style.icon_button_style(30))
             b.clicked.connect(lambda _c=False, f=slot: f())
             prow.addWidget(b)
-        self._color = _COLORS[0]
+        prow.addSpacing(6)
+        self._tool_hint = QLabel("")
+        self._tool_hint.setStyleSheet(f"color: {style.DIM};")
+        prow.addWidget(self._tool_hint)
         self._view.view_changed.connect(self._place_overlays)
 
-    def _build_transport(self) -> QHBoxLayout:
-        row = QHBoxLayout()
-        row.setContentsMargins(10, 2, 10, 8)
-        row.setSpacing(4)
-        self._range_lbl = QLabel("")
-        self._range_lbl.setStyleSheet(f"color: {theme.TEXT_LABEL};")
-        row.addWidget(self._range_lbl, 1)
-        for label, slot, tip in (
-            ("|◀", self._go_first, "Home"),
-            ("◀", lambda: self._step(-1), "←"),
-        ):
-            b = _btn(label, tip=tip)
+    def _build_transport(self) -> QFrame:
+        bar = _bar_frame("confirm_transport", style.PANEL, bottom=False)
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(10, 4, 10, 8)
+        row.setSpacing(6)
+        left = QHBoxLayout()
+        left.setSpacing(6)
+        self._fps_lbl = QLabel("")
+        self._fps_lbl.setStyleSheet(style.field_style())
+        left.addWidget(self._fps_lbl)
+        left.addWidget(_dim_label("fps", mono=True))
+        left.addSpacing(8)
+        self._start_lbl = QLabel("")
+        self._start_lbl.setStyleSheet(style.field_style())
+        left.addWidget(self._start_lbl)
+        left.addWidget(_dim_label("–", mono=True))
+        self._end_lbl = QLabel("")
+        self._end_lbl.setStyleSheet(style.field_style())
+        left.addWidget(self._end_lbl)
+        left.addStretch(1)
+        row.addLayout(left, 1)
+
+        seg = QHBoxLayout()
+        seg.setSpacing(0)
+        specs: Tuple[Tuple[str, str, Callable[[], Any]], ...] = (
+            ("first", "처음 프레임 (Home)", self._go_first),
+            ("step_back", "한 프레임 앞 (←)", lambda: self._step(-1)),
+            ("play", "재생 · 멈춤 (Space)", self._toggle_play),
+            ("step_fwd", "한 프레임 뒤 (→)", lambda: self._step(1)),
+            ("last", "마지막 프레임 (End)", self._go_last),
+        )
+        buttons: List[QPushButton] = []
+        for icon, tip, slot in specs:
+            b = _btn("", tip=tip)
+            style.set_icon(b, icon, size=14)
             b.clicked.connect(lambda _c=False, f=slot: f())
-            row.addWidget(b)
-        self._btn_play = _btn("재생", tip="Space")
-        self._btn_play.setMinimumWidth(70)
-        self._btn_play.clicked.connect(self._toggle_play)
-        row.addWidget(self._btn_play)
-        for label, slot, tip in (
-            ("▶", lambda: self._step(1), "→"),
-            ("▶|", self._go_last, "End"),
-        ):
-            b = _btn(label, tip=tip)
-            b.clicked.connect(lambda _c=False, f=slot: f())
-            row.addWidget(b)
-        self._btn_loop = _btn("반복", checkable=True)
+            buttons.append(b)
+            seg.addWidget(b)
+        style.make_segments(buttons)
+        self._btn_play = buttons[2]
+        self._btn_play.setStyleSheet(
+            self._btn_play.styleSheet()
+            + f"QPushButton {{ background: {style.ON}; padding: 0px 16px; }}"
+        )
+        row.addLayout(seg)
+        self._btn_loop = _btn("", checkable=True, tip="반복 재생")
+        style.set_icon(self._btn_loop, "loop", size=14)
         self._btn_loop.setChecked(True)
-        self._btn_loop.setStyleSheet(_toggle_style())
+        self._btn_loop.setStyleSheet(
+            style.segment_style("only") + "QPushButton { padding: 0px 8px; }"
+        )
         self._btn_loop.clicked.connect(lambda c: setattr(self, "_loop", bool(c)))
         row.addWidget(self._btn_loop)
-        row.addStretch(1)
+
+        right = QHBoxLayout()
+        right.setSpacing(6)
+        right.addStretch(1)
         self._frame_edit = QLineEdit()
-        self._frame_edit.setFixedWidth(76)
+        self._frame_edit.setFixedWidth(64)
         self._frame_edit.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
-        self._frame_edit.setStyleSheet("min-width: 0px; padding: 3px 4px; font-weight: bold;")
         self._frame_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._frame_edit.setStyleSheet(
+            f"QLineEdit {{ color: {style.TEXT_STRONG}; {style.mono(14, bold=True)} }}"
+        )
         self._frame_edit.returnPressed.connect(self._on_frame_typed)
-        row.addWidget(self._frame_edit)
-        return row
+        right.addWidget(self._frame_edit)
+        self._total_lbl = _dim_label("", mono=True)
+        right.addWidget(self._total_lbl)
+        row.addLayout(right, 1)
+        return bar
 
     @staticmethod
     def _help_text() -> str:
@@ -476,7 +630,7 @@ class ConfirmWindow(QWidget):
             "<b>단축키</b><br>"
             "1 · 2 · 3 · 4 — 원본 / 전 버전 / 지금 / 편집본<br>"
             "D — 차이 (지금 보는 판 − 직전에 본 판)<br>"
-            "R · G · B · Y — 채널 / 밝기만 (한 번 더 누르면 RGB)<br>"
+            "R · G · B · A — 채널 / 밝기만 (한 번 더 누르면 RGB)<br>"
             "L — 룩업 켜고 끄기<br>"
             "F — 화면 맞춤 &nbsp; H — 꽉 채움 &nbsp; 휠 — 확대 &nbsp; Alt+끌기 — 이동<br>"
             "Space — 재생/멈춤 &nbsp; ← → — 한 프레임 &nbsp; Home · End — 처음/끝<br>"
@@ -504,7 +658,9 @@ class ConfirmWindow(QWidget):
         self._load_token += 1
         token = self._load_token
         self._movie = movie
+        self._shot_root = None
         self._task = dict(task or {})
+        self._drawer.set_current_task(self._task.get("task_id"))
         self._sent_note_id = None
         for buf in self._bufs.values():
             buf.path, buf.info, buf.size, buf.frames = None, None, (0, 0), {}
@@ -515,8 +671,11 @@ class ConfirmWindow(QWidget):
         self._layer.set_doc(AnnotationDoc())
         self._layer.set_ghosts([])
         self._timeline.set_range(self._frame_start, 0)
-        self._title.setText(f"{Path(movie).name} — 재료 찾는 중…")
         self._panel.set_result("", True)
+        self._panel.set_checks([])
+        self._panel.set_past_notes([])
+        self._hud.setText(f"{Path(movie).name}  재료 찾는 중…")
+        self._hud.adjustSize()
         self._sync_all()
 
         def _prepare() -> Dict[str, Any]:
@@ -539,7 +698,8 @@ class ConfirmWindow(QWidget):
     def _on_prepare_failed(self, msg: str, token: int) -> None:
         if token != self._load_token or self._closed:
             return
-        self._title.setText(f"영상을 열지 못했습니다: {msg}")
+        self._hud.setText(f"영상을 열지 못했습니다: {msg}")
+        self._hud.adjustSize()
 
     def _on_prepared(self, result: object, token: int) -> None:
         if token != self._load_token or self._closed or not isinstance(result, dict):
@@ -549,8 +709,10 @@ class ConfirmWindow(QWidget):
         infos: Dict[str, Optional[VideoInfo]] = result["infos"]
         cur_info = infos.get(KEY_CUR)
         if cur_info is None:
-            self._title.setText(f"{Path(self._movie).name} — 영상 규격을 읽지 못했습니다")
+            self._hud.setText(f"{Path(self._movie).name}  영상 규격을 읽지 못했습니다")
+            self._hud.adjustSize()
             return
+        self._shot_root = media.shot_root
         cur_size = fit_decode_size(cur_info.width, cur_info.height, _MAX_W, _MAX_H)
         self._count = max(1, cur_info.frame_count or 1)
         self._fps = cur_info.fps or 24.0
@@ -595,6 +757,75 @@ class ConfirmWindow(QWidget):
         self._sync_all()
         self._load_sg_context()
 
+    # ── 목록에서 열기 ────────────────────────────────────────────
+
+    def _toggle_drawer(self) -> None:
+        show = not self._drawer.isVisible()
+        self._drawer.setVisible(show)
+        if show:
+            self._place_drawer()
+            self._drawer.raise_()
+            self._drawer.load_projects()
+        self._btn_list.setChecked(show)
+
+    def _place_drawer(self) -> None:
+        self._drawer.setGeometry(0, _HEADER_H, self._drawer.width(), self.height() - _HEADER_H)
+
+    def _open_task(self, task: Dict[str, Any]) -> None:
+        """목록에서 고른 샷 — 서버에서 작업본 영상을 찾아 연다."""
+        row = dict(task)
+        self._hud.setText(f"{row.get('shot_code') or ''}  영상 찾는 중…")
+        self._hud.adjustSize()
+        self._load_token += 1
+        token = self._load_token
+
+        def _resolve() -> str:
+            from bpe.core.feedback_project_paths import effective_project_for_paths
+            from bpe.core.nk_finder import (
+                find_server_root_auto,
+                resolve_local_comp_mov_for_feedback,
+            )
+            from bpe.core.nuke_render_paths import normalize_path_str
+
+            proj = effective_project_for_paths(row)
+            root = (os.environ.get("BPE_FEEDBACK_SERVER_ROOT") or "").strip()
+            if not root:
+                auto = find_server_root_auto(proj)
+                root = str(auto) if auto else (os.environ.get("BPE_SERVER_ROOT") or "").strip()
+            mov, _tried, _warn = resolve_local_comp_mov_for_feedback(
+                row.get("shot_code") or "",
+                proj,
+                normalize_path_str(root).strip() if root else "",
+                sg_movie_raw=row.get("latest_version_sg_path") or "",
+                version_code=(row.get("latest_version_code") or "").strip() or None,
+            )
+            return normalize_path_str(str(mov)) if mov is not None else ""
+
+        w = ShotGridWorker(_resolve)
+        w.finished.connect(lambda r, t=token, tk=row: self._on_task_resolved(r, t, tk))
+        w.error.connect(lambda e, t=token: self._on_prepare_failed(e, t))
+        w.start()
+        self._workers.append(w)
+
+    def _on_task_resolved(self, result: object, token: int, task: Dict[str, Any]) -> None:
+        if token != self._load_token or self._closed:
+            return
+        if not isinstance(result, str) or not result:
+            self._hud.setText(f"{task.get('shot_code') or ''}  영상 파일을 찾지 못했습니다")
+            self._hud.adjustSize()
+            return
+        self._drawer.hide()
+        self._btn_list.setChecked(False)
+        self.open_movie(result, task)
+
+    def _nav_shot(self, delta: int) -> None:
+        rows = self._drawer.shown_rows()
+        cur = self._task.get("task_id")
+        idx = next((i for i, r in enumerate(rows) if r.get("task_id") == cur), -1)
+        nxt = idx + delta
+        if rows and 0 <= nxt < len(rows):
+            self._open_task(rows[nxt])
+
     # ── 풀기(디코드) ─────────────────────────────────────────────
 
     def _start_next_decode(self) -> None:
@@ -620,9 +851,8 @@ class ConfirmWindow(QWidget):
         buf.frames[index] = data
         self._ondemand_pending.pop((key, index), None)
         if not buf.full and len(buf.frames) > _ONDEMAND_KEEP:
-            for old in sorted(buf.frames, key=lambda i: abs(i - self._index), reverse=True)[
-                : len(buf.frames) - _ONDEMAND_KEEP
-            ]:
+            far = sorted(buf.frames, key=lambda i: abs(i - self._index), reverse=True)
+            for old in far[: len(buf.frames) - _ONDEMAND_KEEP]:
                 buf.frames.pop(old, None)
         if key == KEY_CUR:
             self._timeline.add_cached(index)
@@ -726,17 +956,23 @@ class ConfirmWindow(QWidget):
         self._sync_labels()
 
     def _sync_view(self) -> None:
-        self._gain_val.setText(f"{self._gain_value():.2f}")
-        self._gamma_val.setText(f"{self._gamma_value():.2f}")
+        gain, gamma = self._gain_value(), self._gamma_value()
+        self._gain_val.setText(f"{gain:.2f}")
+        self._gamma_val.setText(f"{gamma:.2f}")
+        self._gain_val.setStyleSheet(style.field_style(changed=abs(gain - 1.0) > 1e-6))
+        self._gamma_val.setStyleSheet(style.field_style(changed=abs(gamma - 1.0) > 1e-6))
         self._refresh_view()
+
+    def _diff_label(self) -> str:
+        a, b = self._bufs[self._shown].number, self._bufs[self._last_shown].number
+        return f"차이 {a}−{b}"
 
     def _view_changes(self) -> List[str]:
         out: List[str] = []
         if self._diff:
-            a, b = self._bufs[self._shown].number, self._bufs[self._last_shown].number
-            out.append(f"차이 {a}−{b}")
+            out.append(self._diff_label())
         if self._channel != CHANNEL_RGB:
-            out.append(next(lbl for lbl, c in _CHANNELS if c == self._channel) + " 채널")
+            out.append(_CHANNEL_NAMES.get(self._channel, self._channel) + " 채널")
         if abs(self._gain_value() - 1.0) > 1e-6:
             out.append(f"게인 {self._gain_value():.2f}")
         if abs(self._gamma_value() - 1.0) > 1e-6:
@@ -745,10 +981,12 @@ class ConfirmWindow(QWidget):
 
     def _sync_labels(self) -> None:
         buf = self._bufs[self._shown]
-        name = buf.path.stem if buf.path else ""
-        loading = "" if buf.frames.get(self._buffer_index(buf)) is not None else "  올리는 중…"
-        self._hud.setText(f"{buf.number} {buf.title}  {name}  {self.frame_number()}{loading}")
-        self._hud.adjustSize()
+        if buf.available:
+            name = buf.path.stem if buf.path else ""
+            ready = buf.frames.get(self._buffer_index(buf)) is not None
+            loading = "" if ready else "  올리는 중…"
+            self._hud.setText(f"{buf.number} {buf.title}  {name}  {self.frame_number()}{loading}")
+            self._hud.adjustSize()
         changes = self._view_changes()
         notes = list(changes)
         if self._diff_note:
@@ -763,6 +1001,7 @@ class ConfirmWindow(QWidget):
         self._state.setVisible(bool(notes))
         self._state.adjustSize()
         self._btn_reset.setVisible(bool(changes))
+        self._btn_diff.setText(self._diff_label() if self._diff else "차이")
         self._timeline.set_current(self._index)
         if not self._frame_edit.hasFocus():
             self._frame_edit.setText(str(self.frame_number()))
@@ -770,34 +1009,80 @@ class ConfirmWindow(QWidget):
         self._sync_info()
 
     def _sync_info(self) -> None:
-        colors = {"pass": theme.SUCCESS, "fail": theme.ERROR}
-        parts = [
-            f'<span style="color:{colors.get(r.state, theme.TEXT_LABEL)}">{r.message}</span>'
+        colors = {STATE_PASS: style.OK, STATE_FAIL: style.FAIL}
+        left = [
+            f'<span style="color:{colors.get(r.state, style.DIM)}">{escape(r.message)}</span>'
             for r in self._checks
         ]
+        if self._checks:
+            ref = "편집본 기준" if self._bufs[KEY_EDIT].info else "원본 기준"
+            left.append(ref)
+        right: List[str] = []
         buf = self._bufs[self._shown]
         if buf.info:
             i = buf.info
             fps = f"{i.fps:.3f}" if i.fps else "?"
-            parts.append(f"{i.width}×{i.height} · {i.codec} {i.profile} · {fps} · {i.pix_fmt}")
+            codec = " ".join(x for x in (i.codec, i.profile) if x)
+            right.append(f"{i.width}×{i.height} · {escape(codec)} · {fps}")
         x, y = self._hover
         data = buf.frames.get(self._buffer_index(buf)) if buf.available else None
         if data is not None and x >= 0:
             off = (y * buf.size[0] + x) * 6
             if 0 <= off <= len(data) - 6:
                 r, g, b = struct.unpack_from("<HHH", data, off)
-                parts.append(
-                    f"x {x} y {y} &nbsp; "
-                    f'<span style="color:#ff7b7b">R</span> {r / 65535:.4f} '
-                    f'<span style="color:#7fcf7f">G</span> {g / 65535:.4f} '
-                    f'<span style="color:#7fb0ff">B</span> {b / 65535:.4f}'
+                cc = style.CHANNEL_COLORS
+                right.append(f"x {x} y {y}")
+                right.append(
+                    f'<span style="color:{cc["R"]}">R</span> {r / 65535:.4f} '
+                    f'<span style="color:{cc["G"]}">G</span> {g / 65535:.4f} '
+                    f'<span style="color:{cc["B"]}">B</span> {b / 65535:.4f}'
                 )
-        self._info.setText(" &nbsp;·&nbsp; ".join(parts))
+        gap = "&nbsp;&nbsp;&nbsp;"
+        self._info.setText(
+            f'<table width="100%" cellspacing="0" cellpadding="0"><tr>'
+            f"<td>{gap.join(left)}</td>"
+            f'<td align="right">{gap.join(right)}</td></tr></table>'
+        )
+
+    def _sync_header(self) -> None:
+        cur = self._bufs[KEY_CUR]
+        t = self._task
+        parts: List[str] = []
+        if self._shot_root is not None:
+            proj = (t.get("project_code") or t.get("project_name") or "").strip()
+            parts = [x for x in (proj, self._shot_root.parent.name, self._shot_root.name) if x]
+        elif cur.path is not None:
+            parts = [cur.path.parent.name, cur.path.stem]
+        if parts:
+            sep = f' <span style="color:{style.DIM}">/</span> '
+            head = [f'<span style="color:{style.DIM}">{escape(p)}</span>' for p in parts[:-1]]
+            last = f'<b style="color:{style.TEXT_STRONG}">{escape(parts[-1])}</b>'
+            self._crumb.setText(f'<span style="{style.mono()}">{sep.join(head + [last])}</span>')
+        else:
+            self._crumb.setText(f'<span style="color:{style.DIM}">영상을 열어 주세요</span>')
+        step = (t.get("task_content") or "comp").strip()
+        self._ver_chip.setText(f"{step} {cur.version_label}".strip() if cur.available else "")
+        self._ver_chip.setVisible(cur.available)
+        who = (t.get("uploader_name") or t.get("version_uploader_name") or "").strip()
+        self._who.setText(who)
+        status = (t.get("task_status") or "").strip()
+        self._status_lbl.setText(
+            f'<span style="color:{style.STATUS_DOT}">●</span> '
+            f'<span style="{style.mono()}">{escape(status)}</span>'
+            if status
+            else ""
+        )
+        rows = self._drawer.shown_rows()
+        idx = next((i for i, r in enumerate(rows) if r.get("task_id") == t.get("task_id")), -1)
+        self._pos.setText(f"{idx + 1} / {len(rows)}" if idx >= 0 else "")
+        self._btn_prev.setEnabled(idx > 0)
+        self._btn_next.setEnabled(0 <= idx < len(rows) - 1)
+        self._btn_list.setText(self._drawer.summary() or "목록")
 
     def _sync_all(self) -> None:
         for key, btn in self._buf_btns.items():
             buf = self._bufs[key]
-            btn.setText(buf.button_text() if buf.available else f"{buf.number} {buf.title} 없음")
+            btn.setText(buf.button_text() if buf.available else f"{buf.number}  {buf.title} 없음")
             btn.setEnabled(buf.available)
             btn.setChecked(key == self._shown and not self._diff)
         self._btn_diff.setChecked(self._diff)
@@ -806,44 +1091,38 @@ class ConfirmWindow(QWidget):
         self._btn_lut.setChecked(self._lut_on)
         self._btn_lut.setEnabled(self._lut is not None)
         self._btn_lut_pick.setText(
-            f"룩업: {Path(self._lut_path).name}" if self._lut_path else "룩업 고르기…"
+            f"{Path(self._lut_path).stem} ▾" if self._lut_path else "룩업 고르기…"
         )
         for tool, btn in self._tool_btns.items():
             btn.setChecked(tool == self._layer.tool())
         for color, btn in self._color_btns.items():
-            edge = "#ffffff" if color == self._color else theme.BORDER
-            btn.setStyleSheet(
-                f"min-width: 0px; padding: 0px; background: {color}; border: 2px solid {edge};"
-            )
+            btn.setStyleSheet(style.swatch_style(color, color == self._color))
+        self._tool_hint.setText(_TOOL_HINTS.get(self._layer.tool(), ""))
         cur = self._bufs[KEY_CUR]
-        if cur.available:
-            shot = (self._task.get("shot_code") or "").strip()
-            self._title.setText(
-                " · ".join(x for x in (shot, cur.path.name if cur.path else "") if x)
-            )
-            self._range_lbl.setText(
-                f"{self._fps:.3f} fps · {self._frame_start} – "
-                f"{self._frame_start + self._count - 1} · {self._count} 프레임"
-            )
+        self._fps_lbl.setText(f"{self._fps:.3f}" if cur.available else "–")
+        self._start_lbl.setText(str(self._frame_start) if cur.available else "–")
+        self._end_lbl.setText(str(self._frame_start + self._count - 1) if cur.available else "–")
+        self._total_lbl.setText(f"/ {self._count}f" if cur.available else "")
         fail = has_failure(self._checks)
         self._banner.setVisible(fail)
         if fail:
             self._banner.setText("  /  ".join(failure_lines(self._checks)))
             self._banner.adjustSize()
-        self._btn_play.setText("멈춤" if self._playing else "재생")
+        style.set_icon(self._btn_play, "pause" if self._playing else "play", size=14)
         ready = bool(self._task.get("shot_id")) and cur.available
         self._panel.set_sendable(
             ready and not self._submit_busy,
             "" if ready else "샷그리드 정보가 있는 샷에서만 보낼 수 있습니다",
         )
+        self._sync_header()
         self._sync_memo()
-        self._refresh_view()
+        self._sync_view()
 
     def _place_overlays(self) -> None:
         vw, vh = self._view.width(), self._view.height()
         self._hud.move(8, 8)
         self._state.move(max(8, vw - self._state.width() - 8), 8)
-        self._banner.move(max(0, (vw - self._banner.width()) // 2), 40)
+        self._banner.move(max(0, (vw - self._banner.width()) // 2), 36)
         self._pill.adjustSize()
         self._pill.move(
             max(0, (vw - self._pill.width()) // 2), max(0, vh - self._pill.height() - 12)
@@ -889,7 +1168,6 @@ class ConfirmWindow(QWidget):
         self._gamma.setValue(_GAMMA_SCALE)
         self._gain.blockSignals(False)
         self._gamma.blockSignals(False)
-        self._sync_view()
         self._sync_all()
 
     def _view_fit(self) -> None:
@@ -1005,13 +1283,13 @@ class ConfirmWindow(QWidget):
                 self._index = 0
             self._playing = True
             self._play_timer.start(max(1, int(round(1000.0 / (self._fps or 24.0)))))
-            self._btn_play.setText("멈춤")
+            style.set_icon(self._btn_play, "pause", size=14)
 
     def _pause(self) -> None:
         if self._playing:
             self._playing = False
             self._play_timer.stop()
-            self._btn_play.setText("재생")
+            style.set_icon(self._btn_play, "play", size=14)
 
     def _on_play_tick(self) -> None:
         nxt = self._index + 1
@@ -1133,22 +1411,14 @@ class ConfirmWindow(QWidget):
 
     def _fill_work_info(self) -> None:
         t = self._task
-        if not t:
-            self._panel.set_work_info("샷그리드 정보 없음 — 파일만 열었습니다")
-            return
-        lines = []
-        order = (t.get("vfx_work_order") or "").strip()
-        lines.append("<b>워크 오더</b><br>" + (order.replace("\n", "<br>") if order else "없음"))
-        desc = (t.get("shot_description") or "").strip()
-        if desc:
-            lines.append("<b>샷 설명</b><br>" + desc.replace("\n", "<br>"))
-        who = (t.get("version_uploader_name") or "").strip()
-        meta = " · ".join(
-            x for x in (who, t.get("latest_version_code") or "", t.get("task_status") or "") if x
+        cur = self._bufs[KEY_CUR]
+        who = (t.get("uploader_name") or t.get("version_uploader_name") or "").strip()
+        meta = " · ".join(x for x in (who, cur.version_label, t.get("task_status") or "") if x)
+        self._panel.set_work_info(
+            (t.get("vfx_work_order") or "").strip(),
+            (t.get("shot_description") or "").strip(),
+            meta if t else "샷그리드 정보 없음 — 파일만 열었습니다",
         )
-        if meta:
-            lines.append(meta)
-        self._panel.set_work_info("<br><br>".join(lines))
 
     def _load_sg_context(self) -> None:
         shot_id = self._task.get("shot_id")
@@ -1331,6 +1601,8 @@ class ConfirmWindow(QWidget):
                 self._toggle_help()
             elif self._send_timer.isActive():
                 self._cancel_pending()
+            elif self._drawer.isVisible():
+                self._toggle_drawer()
             elif self.isFullScreen():
                 self._toggle_fullscreen()
             else:
@@ -1372,7 +1644,7 @@ class ConfirmWindow(QWidget):
             self._toggle_diff()
         elif letter in ("R", "G", "B"):
             self._set_channel({"R": CHANNEL_R, "G": CHANNEL_G, "B": CHANNEL_B}[letter])
-        elif letter == "Y":
+        elif letter in ("A", "Y"):
             self._set_channel(CHANNEL_LUMA)
         elif letter == "L":
             self._toggle_lut()
@@ -1381,7 +1653,7 @@ class ConfirmWindow(QWidget):
         elif letter == "H":
             self._view_fill()
         elif letter in ("V", "N", "P", "W", "T"):
-            self._set_tool(next(t for t, _l, k in _TOOLS if k == letter))
+            self._set_tool(next(t for t, _i, _l, k in _TOOLS if k == letter))
         else:
             super().keyPressEvent(event)
 
@@ -1398,12 +1670,18 @@ class ConfirmWindow(QWidget):
             self.setFocus()
         self._place_overlays()
 
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if self._drawer.isVisible():
+            self._place_drawer()
+
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         self._closed = True
         self._pause()
         self._send_timer.stop()
         self._save_draft()
         self._stop_decoders()
+        self._drawer.shutdown()
         for buf in self._bufs.values():
             buf.frames = {}
         for w in self._workers:
