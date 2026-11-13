@@ -343,6 +343,17 @@ class ConfirmGLView(QOpenGLWidget):
         self._pan = QPointF(0.0, 0.0)
         self._after_view_change()
 
+    def fit_state(self) -> str:
+        """지금 보기가 ``"fit"``(화면 맞춤)인지 ``"fill"``(꽉 채움)인지. 둘 다 아니면 빈 글."""
+        if self._img_size is None or abs(self._pan.x()) > 0.5 or abs(self._pan.y()) > 0.5:
+            return ""
+        if abs(self._zoom - 1.0) < 1e-6:
+            return "fit"
+        _, _, w, h = fit_rect(self._img_size[0], self._img_size[1], self.width(), self.height())
+        if w > 0 and h > 0 and abs(self._zoom - max(self.width() / w, self.height() / h)) < 1e-6:
+            return "fill"
+        return ""
+
     def zoom_at(self, pos: QPointF, factor: float) -> None:
         rect = self.image_rect()
         new_zoom = max(_ZOOM_MIN, min(_ZOOM_MAX, self._zoom * factor))

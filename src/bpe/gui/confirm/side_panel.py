@@ -30,12 +30,41 @@ _NO_VERSION = "버전 없음"
 _KEY_COLUMN_W = 76
 _MEMO_FRAME = re.compile(r"^(\[[^\]]+\])\s*(.*)$", re.S)
 _MEMO_FRAME_ON = "#ff8a84"
+_HEADER_H = 28
+_FRAME_REF = re.compile(r"\[(\d+)((?:\s*[-–~]\s*\d+)?)\]")
+_FRAME_LINK = "frame:"
+_CODE_TOKEN = re.compile(r"^[A-Za-z0-9_.\-]*\d[A-Za-z0-9_.\-]*$|^[a-z]{2,6}$")
 
 
 def _header(text: str) -> QLabel:
     lbl = QLabel(text)
     lbl.setStyleSheet(style.section_header_style())
+    lbl.setFixedHeight(_HEADER_H)
+    lbl.setIndent(0)
     return lbl
+
+
+def _mono_codes(text: str) -> str:
+    """버전·상태 같은 영문·숫자 낱말만 폭 고른 글씨로(한글은 본문 글씨 그대로)."""
+    parts = [
+        f'<span style="{style.mono()}">{escape(tok)}</span>'
+        if _CODE_TOKEN.match(tok)
+        else escape(tok)
+        for tok in text.split(" ")
+    ]
+    return " ".join(parts)
+
+
+def _frame_links(text: str) -> str:
+    """지적 글 안의 ``[1040]`` 을 누를 수 있는 프레임 번호로 바꾼다(글은 먼저 escape)."""
+
+    def repl(m: "re.Match[str]") -> str:
+        return (
+            f'<a href="{_FRAME_LINK}{m.group(1)}" style="color:{style.PAST}; '
+            f'text-decoration:none; {style.mono()}">[{m.group(1)}{m.group(2)}]</a>'
+        )
+
+    return _FRAME_REF.sub(repl, escape(text)).replace("\n", "<br>")
 
 
 def _key(text: str) -> QLabel:
@@ -70,14 +99,23 @@ class _ClickRow(QLabel):
     """누를 수 있는 한 줄(지난 지적)."""
 
     clicked = Signal(object)
+    frame_clicked = Signal(int)
 
     def __init__(self, html: str, payload: Any) -> None:
         super().__init__(html)
         self._payload = payload
         self.setWordWrap(True)
+        self.setIndent(0)
         self.setTextFormat(Qt.TextFormat.RichText)
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.LinksAccessibleByMouse)
+        self.setOpenExternalLinks(False)
+        self.linkActivated.connect(self._on_link)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.set_selected(False)
+
+    def _on_link(self, href: str) -> None:
+        if href.startswith(_FRAME_LINK) and href[len(_FRAME_LINK) :].isdigit():
+            self.frame_clicked.emit(int(href[len(_FRAME_LINK) :]))
 
     def set_selected(self, on: bool) -> None:
         bg = style.RAISED if on else "transparent"
@@ -101,6 +139,7 @@ class ConfirmSidePanel(QWidget):
     cancel_requested = Signal()
     retry_requested = Signal()
     past_note_clicked = Signal(object)
+    past_frame_clicked = Signal(int)
     memo_toggled = Signal(int, bool)
     insert_failures_requested = Signal()
 
@@ -160,10 +199,12 @@ class ConfirmSidePanel(QWidget):
             f"QFrame {{ background: {style.HEADER}; border-top: 1px solid {style.EDGE}; "
             f"border-bottom: 1px solid {style.EDGE}; }}"
         )
+        past_head.setFixedHeight(_HEADER_H + 1)
         ph = QHBoxLayout(past_head)
-        ph.setContentsMargins(10, 3, 6, 3)
+        ph.setContentsMargins(10, 0, 10, 0)
         ph.setSpacing(6)
         title = QLabel("지난 지적")
+        title.setIndent(0)
         title.setStyleSheet(
             f"color: {style.LABEL}; font-size: {style.FONT_SMALL_PX}px; font-weight: bold; "
             f"border: none;"
@@ -171,7 +212,8 @@ class ConfirmSidePanel(QWidget):
         ph.addWidget(title, 1)
         self._past_versions = QComboBox()
         self._past_versions.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._past_versions.setMinimumWidth(110)
+        self._past_versions.setMinimumWidth(84)
+        self._past_versions.setStyleSheet(f"QComboBox {{ height: 20px; {style.mono()} }}")
         self._past_versions.currentIndexChanged.connect(self._fill_past)
         ph.addWidget(self._past_versions)
         col.addWidget(past_head)
@@ -196,6 +238,7 @@ class ConfirmSidePanel(QWidget):
         self._memo_head.setStyleSheet(
             style.section_header_style() + f"border-top: 1px solid {style.EDGE};"
         )
+        self._memo_head.setFixedHeight(_HEADER_H + 1)
         col.addWidget(self._memo_head)
         self._memo_box = _clear_block()
         self._memo_col = QVBoxLayout(self._memo_box)
@@ -209,6 +252,8 @@ class ConfirmSidePanel(QWidget):
         self._extra.setPlaceholderText("경로나 설명을 덧붙여 쓰기")
         self._extra.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self._extra.setMinimumHeight(64)
+        self._extra.document().setDocumentMargin(4)
+        self._extra.setStyleSheet("QPlainTextEdit { padding: 2px 4px; }")
         ex.addWidget(self._extra, 1)
         self._attach = QLabel("")
         self._attach.setStyleSheet(f"color: {style.DIM}; font-size: {style.FONT_SMALL_PX}px;")
@@ -253,14 +298,14 @@ class ConfirmSidePanel(QWidget):
         actions.setSpacing(6)
         self._btn_retake = QPushButton("retake")
         self._btn_retake.setStyleSheet(
-            f"QPushButton {{ height: 34px; background: {style.PANEL}; color: {style.RETAKE}; "
+            f"QPushButton {{ height: 32px; background: {style.PANEL}; color: {style.RETAKE}; "
             f"border: 1px solid {style.RETAKE_EDGE}; {style.mono(13, bold=True)} }}"
             f"QPushButton:hover {{ background: #3a2422; }}"
             f"QPushButton:disabled {{ color: #6a6a6a; border-color: {style.EDGE}; }}"
         )
         self._btn_cfrm = QPushButton("cfrm")
         self._btn_cfrm.setStyleSheet(
-            f"QPushButton {{ height: 34px; background: {style.ACCENT}; color: {style.ON_ACCENT}; "
+            f"QPushButton {{ height: 32px; background: {style.ACCENT}; color: {style.ON_ACCENT}; "
             f"border: 1px solid {style.EDGE}; {style.mono(13, bold=True)} }}"
             f"QPushButton:hover {{ background: #35a08c; }}"
             f"QPushButton:disabled {{ color: #6a6a6a; background: #2c2c2c; }}"
@@ -300,17 +345,28 @@ class ConfirmSidePanel(QWidget):
         self._k_desc.setVisible(has_desc)
         self._v_desc.setVisible(has_desc)
         self._v_desc.setText(escape(description).replace("\n", "<br>"))
-        self._v_who.setText(escape(who) if who.strip() else none)
+        self._v_who.setText(_mono_codes(who) if who.strip() else none)
 
     def work_order_text(self) -> str:
         return self._v_order.text()
 
     def set_checks(self, results: List[CheckResult]) -> None:
+        """전부 통과면 한 줄로 줄이고, 실패·모름이 있으면 줄마다 보여 준다."""
         colors = {STATE_PASS: style.OK, STATE_FAIL: style.FAIL}
-        lines = [
-            f'<span style="color:{colors.get(r.state, style.DIM)}">{escape(r.message)}</span>'
-            for r in results
-        ]
+        passed = sum(1 for r in results if r.state == STATE_PASS)
+        if results and passed == len(results):
+            lines = [
+                f'<span style="color:{style.OK}; {style.mono()}">'
+                f"{passed}/{len(results)} 통과</span>"
+            ]
+            self._v_checks.setToolTip("\n".join(r.message for r in results))
+        else:
+            lines = [
+                f'<span style="color:{colors.get(r.state, style.DIM)}; {style.mono()}">'
+                f"{escape(r.message)}</span>"
+                for r in results
+            ]
+            self._v_checks.setToolTip("")
         self._v_checks.setText("<br>".join(lines))
         self._btn_failures.setVisible(any(r.state == STATE_FAIL for r in results))
 
@@ -363,13 +419,13 @@ class ConfirmSidePanel(QWidget):
                 )
                 if x
             )
-            body = escape((n.get("content") or "").strip()).replace("\n", "<br>")
             html = (
-                f'<span style="color:{style.PAST}; {style.mono(style.FONT_SMALL_PX)}">'
-                f"{escape(head)}</span><br>{body}"
+                f'<span style="color:{style.DIM}; {style.mono(style.FONT_SMALL_PX)}">'
+                f"{escape(head)}</span><br>{_frame_links((n.get('content') or '').strip())}"
             )
             row = _ClickRow(html, n)
             row.clicked.connect(self._on_past_clicked)
+            row.frame_clicked.connect(self.past_frame_clicked)
             self._past_rows.append(row)
             self._past_col.addWidget(row)
         self._past_col.addStretch(1)
@@ -400,6 +456,7 @@ class ConfirmSidePanel(QWidget):
                 f"{escape(body)}"
             )
             label.setTextFormat(Qt.TextFormat.RichText)
+            label.setIndent(0)
             label.setWordWrap(True)
             label.setStyleSheet(f"color: {style.TEXT if on else style.DIM};")
             lay.addWidget(label, 1)

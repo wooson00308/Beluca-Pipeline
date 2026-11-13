@@ -39,6 +39,7 @@ DRAWER_WIDTH = 330
 _ROW_H = 46
 _ROLE = Qt.ItemDataRole.UserRole
 _ALL_VENDORS = "업체 전체"
+_PICK_PROJECT = "프로젝트 고르기"
 
 
 def _band(name: str, bg: str) -> QFrame:
@@ -67,6 +68,7 @@ class ShotDrawer(QWidget):
         self._rows: List[Dict[str, Any]] = []
         self._shown: List[Dict[str, Any]] = []
         self._loaded = False
+        self._projects_asked = False
         self._current_task: Any = None
         self._req = 0
         self._closed = False
@@ -110,6 +112,7 @@ class ShotDrawer(QWidget):
         prow.setContentsMargins(8, 6, 8, 6)
         prow.setSpacing(6)
         self._project = QComboBox()
+        self._project.addItem(_PICK_PROJECT, None)
         self._project.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self._project.currentIndexChanged.connect(self._reload)
         prow.addWidget(self._project, 1)
@@ -171,8 +174,9 @@ class ShotDrawer(QWidget):
 
     def load_projects(self) -> None:
         """서랍을 처음 열 때 프로젝트 목록을 읽는다."""
-        if self._project.count():
+        if self._projects_asked:
             return
+        self._projects_asked = True
         self._say("프로젝트 읽는 중…")
 
         def _fetch() -> List[Dict[str, Any]]:
@@ -183,16 +187,20 @@ class ShotDrawer(QWidget):
 
         w = ShotGridWorker(_fetch)
         w.finished.connect(self._on_projects)
-        w.error.connect(lambda e: self._say(f"프로젝트를 읽지 못했습니다: {e}"))
+        w.error.connect(self._on_projects_failed)
         w.start()
         self._workers.append(w)
+
+    def _on_projects_failed(self, msg: str) -> None:
+        self._projects_asked = False  # 서랍을 다시 열면 한 번 더 읽어 본다
+        self._say(f"프로젝트를 읽지 못했습니다: {msg}")
 
     def _on_projects(self, result: object) -> None:
         if self._closed or not isinstance(result, list):
             return
         self._project.blockSignals(True)
         self._project.clear()
-        self._project.addItem("프로젝트 고르기", None)
+        self._project.addItem(_PICK_PROJECT, None)
         for p in sorted(result, key=lambda r: str(r.get("code") or r.get("name") or "")):
             label = str(p.get("code") or p.get("name") or p.get("id"))
             self._project.addItem(label, p.get("id"))
@@ -293,6 +301,7 @@ class ShotDrawer(QWidget):
             self._list.addItem(item)
             label = QLabel(self._row_html(r))
             label.setTextFormat(Qt.TextFormat.RichText)
+            label.setIndent(0)
             label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
             current = self._is_current(r)
             label.setStyleSheet(
@@ -302,7 +311,7 @@ class ShotDrawer(QWidget):
             )
             self._list.setItemWidget(item, label)
         if self._loaded:
-            self._count.setText(f"{self._sort} · {len(self._shown)}컷")
+            self._count.setText(f"{len(self._shown)}컷")
             self._say("" if self._shown else "이 갈래에는 확인 대기 샷이 없습니다")
         self.rows_changed.emit()
 

@@ -48,15 +48,19 @@ MARK = "#ff5a52"
 CACHE = "#4f9f6a"
 CHECK = "#bdbdbd"
 TICK = "#5b5b5b"
+DISABLED = "#8c8c8c"
+GHOST = "#5b5b5b"
 CELL_EDGE = "#3a3a3a"
 CURRENT_CELL = "#303030"
 
 # ── 크기·글씨 ────────────────────────────────────────────────────
-CONTROL_H = 26
+CONTROL_H = 26  # 조작부 한 칸의 전체 높이(테두리 포함)
+_INNER_H = CONTROL_H - 2  # 스타일 글의 height 는 테두리를 뺀 안쪽 높이
+_CHECKED_H = _INNER_H - 2  # 눌린 칸: 아래 강조선 2px + 위 여백 1px 만큼 줄여 전체 높이를 같게
 FONT_PX = 12
 FONT_SMALL_PX = 11
-MONO = "Consolas, 'Cascadia Mono', 'D2Coding', monospace"
-MONO_FAMILIES: Tuple[str, ...] = ("Consolas", "Cascadia Mono", "D2Coding")
+MONO = "Consolas, 'Cascadia Mono', 'D2Coding', 'Malgun Gothic', monospace"
+MONO_FAMILIES: Tuple[str, ...] = ("Consolas", "Cascadia Mono", "D2Coding", "Malgun Gothic")
 RADIUS = 3
 PANEL_WIDTH = 340
 
@@ -102,24 +106,26 @@ def window_stylesheet() -> str:
         f"QWidget#confirm_root QLabel {{ color: {TEXT}; font-size: {FONT_PX}px; "
         f"background: transparent; }}"
         f"QWidget#confirm_root QPushButton {{ min-width: 0px; min-height: 0px; "
-        f"height: {CONTROL_H}px; padding: 0px 10px; border: 1px solid {EDGE}; "
+        f"height: {_INNER_H}px; padding: 0px 10px; border: 1px solid {EDGE}; "
         f"border-radius: {RADIUS}px; background: {RAISED}; color: {TEXT}; "
         f"font-size: {FONT_PX}px; }}"
         f"QWidget#confirm_root QPushButton:hover {{ background: #454545; }}"
-        f"QWidget#confirm_root QPushButton:disabled {{ color: #6a6a6a; background: #2c2c2c; }}"
+        f"QWidget#confirm_root QPushButton:disabled {{ color: {DISABLED}; background: #2c2c2c; }}"
         f"QWidget#confirm_root QLineEdit, QWidget#confirm_root QPlainTextEdit, "
         f"QWidget#confirm_root QListWidget {{ background: {FIELD}; color: {TEXT}; "
         f"border: 1px solid {EDGE}; border-radius: {RADIUS}px; font-size: {FONT_PX}px; "
         f"selection-background-color: {ON}; }}"
-        f"QWidget#confirm_root QLineEdit {{ min-width: 0px; height: {CONTROL_H - 2}px; "
+        f"QWidget#confirm_root QLineEdit {{ min-width: 0px; min-height: 0px; "
+        f"height: {_INNER_H}px; "
         f"padding: 0px 6px; }}"
-        f"QWidget#confirm_root QComboBox {{ min-width: 0px; height: {CONTROL_H - 2}px; "
+        f"QWidget#confirm_root QComboBox {{ min-width: 0px; min-height: 0px; "
+        f"height: {_INNER_H}px; "
         f"padding: 0px 6px; background: {FIELD}; color: {TEXT}; border: 1px solid {EDGE}; "
         f"border-radius: {RADIUS}px; font-size: {FONT_PX}px; }}"
         f"QWidget#confirm_root QComboBox::drop-down {{ border: none; width: 18px; }}"
         f"QWidget#confirm_root QComboBox::down-arrow {{ {_combo_arrow_rule()} "
         f"border: none; width: 9px; height: 6px; margin-right: 7px; }}"
-        f"QWidget#confirm_root QCheckBox {{ spacing: 7px; }}"
+        f"QWidget#confirm_root QCheckBox {{ spacing: 0px; }}"
         f"QWidget#confirm_root QCheckBox::indicator {{ width: 12px; height: 12px; "
         f"border: 1px solid {ON}; border-radius: 2px; background: {FIELD}; }}"
         f"QWidget#confirm_root QCheckBox::indicator:checked {{ background: {CHECK}; "
@@ -170,8 +176,13 @@ def field_style(*, changed: bool = False, pad: str = "3px 6px") -> str:
     )
 
 
-def segment_style(position: str, *, on_color: str = "", text_color: str = "") -> str:
-    """서로 붙은 버튼 묶음의 한 칸. *position*: first / mid / last / only."""
+def segment_style(
+    position: str, *, on_color: str = "", text_color: str = "", mark_color: str = ""
+) -> str:
+    """서로 붙은 버튼 묶음의 한 칸. *position*: first / mid / last / only.
+
+    *mark_color* 를 주면 안 눌린 상태에서도 그 색 밑줄을 긋는다(차이 보기에서 빼는 판).
+    """
     left = RADIUS if position in ("first", "only") else 0
     right = RADIUS if position in ("last", "only") else 0
     border_left = "" if position in ("first", "only") else "border-left: none;"
@@ -182,8 +193,13 @@ def segment_style(position: str, *, on_color: str = "", text_color: str = "") ->
         f"border-top-right-radius: {right}px; border-bottom-right-radius: {right}px; "
         f"{border_left} color: {color}; }}"
         f"QPushButton:checked {{ background: {ON}; color: {TEXT_STRONG}; "
-        f"border-bottom: 2px solid {line}; padding-top: 1px; }}"
-        f"QPushButton:disabled {{ color: #6a6a6a; }}"
+        f"border-bottom: 2px solid {line}; padding-top: 1px; height: {_CHECKED_H}px; }}"
+        f"QPushButton:disabled {{ color: {DISABLED}; }}"
+    ) + (
+        f"QPushButton:!checked {{ border-bottom: 2px solid {mark_color}; padding-top: 1px; "
+        f"height: {_CHECKED_H}px; }}"
+        if mark_color
+        else ""
     )
 
 
@@ -191,15 +207,8 @@ def warn_toggle_style() -> str:
     """켜면 「평소와 다른 보기」임을 알리는 버튼(차이)."""
     return (
         f"QPushButton:checked {{ background: {WARN_BG}; color: {WARN}; "
-        f"border: 1px solid {WARN_EDGE}; border-bottom: 2px solid {WARN}; padding-top: 1px; }}"
-    )
-
-
-def quiet_segment_style(position: str) -> str:
-    """눈에 덜 띄는 묶음 칸(화면 맞춤·꽉 채움) — 숫자 칸과 같은 어두운 바탕."""
-    return segment_style(position, text_color=DIM) + (
-        f"QPushButton {{ background: {FIELD}; }}"
-        f"QPushButton:hover {{ background: {PANEL}; color: {TEXT}; }}"
+        f"border: 1px solid {WARN_EDGE}; border-bottom: 2px solid {WARN}; padding-top: 1px; "
+        f"height: {_CHECKED_H}px; }}"
     )
 
 
@@ -210,7 +219,7 @@ def lut_toggle_style(*, loaded: bool) -> str:
         return base
     return base + (
         f"QPushButton:!checked {{ background: {WARN_BG}; color: {WARN}; "
-        f"border-bottom: 2px solid {WARN}; padding-top: 1px; }}"
+        f"border-bottom: 2px solid {WARN}; padding-top: 1px; height: {_CHECKED_H}px; }}"
     )
 
 
@@ -226,8 +235,15 @@ def icon_button_style(size: int = 30) -> str:
         f"QPushButton {{ min-width: {size}px; max-width: {size}px; height: {size}px; "
         f"padding: 0px; border: none; border-radius: {RADIUS}px; background: transparent; }}"
         f"QPushButton:hover {{ background: {RAISED}; }}"
-        f"QPushButton:checked {{ background: {ON}; border-bottom: 2px solid {ACCENT}; }}"
+        f"QPushButton:checked {{ background: {ON}; border-bottom: 2px solid {ACCENT}; "
+        f"height: {size - 4}px; padding-top: 2px; }}"
     )
+
+
+def fixed_width_style(width: int) -> str:
+    """버튼의 전체 폭을 못박는다(스타일 글의 폭이 위젯의 고정 폭보다 우선하므로 여기서 건다)."""
+    inner = width - 2
+    return f"QPushButton {{ min-width: {inner}px; max-width: {inner}px; padding: 0px; }}"
 
 
 def swatch_style(color: str, selected: bool) -> str:
@@ -260,9 +276,9 @@ _ICON_PATHS: Dict[str, Tuple[str, str]] = {
     "arrow": (_STROKE, "M5 19L19 5M11 5h8v8"),
     "text": (_STROKE, "M5 6h14M12 6v13"),
     "eraser": (_STROKE, "M8 20l-5-5L13 5l7 7-8 8zM9 10l7 7"),
-    "undo": (_STROKE, "M8 9h6.5c6 0 6 8 0 8H8M11 5.5L7.5 9l3.5 3.5"),
-    "redo": (_STROKE, "M16 9H9.5c-6 0-6 8 0 8H16M13 5.5L16.5 9 13 12.5"),
-    "range": (_STROKE, "M4 12h16M4 7v10M20 7v10"),
+    "undo": (_STROKE, "M7 8h8c6.6 0 6.6 10 0 10H7M10.5 4L6.5 8l4 4"),
+    "redo": (_STROKE, "M17 8H9c-6.6 0-6.6 10 0 10h8M13.5 4l4 4-4 4"),
+    "range": (_STROKE, "M8 5H5v14h3M16 5h3v14h-3M9.5 12h5"),
     "list": (_STROKE, "M4 6h16M4 12h16M4 18h16"),
     "diff": (_STROKE, "M12 4v16M5 8h4M5 16h4M15 16h4"),
     "chev_left": (_STROKE, "M15 5l-7 7 7 7"),
@@ -270,7 +286,11 @@ _ICON_PATHS: Dict[str, Tuple[str, str]] = {
     "loop": (_STROKE, "M17.5 8H8c-4.5 0-4.5 8 0 8h8c4.5 0 4.5-5 2.5-6.5M14.5 5l3.3 3-3.3 3"),
     "fullscreen": (_STROKE, "M4.5 9V4.5H9M15 4.5h4.5V9M19.5 15v4.5H15M9 19.5H4.5V15"),
     "folder": (_STROKE, "M3.5 6.5h6l2 2.5h9v9.5h-17z"),
-    "help": (_STROKE, "M9.5 9.8c0-3.3 5.3-3.3 5-0 -0.2 1.7-2.5 1.8-2.5 3.8M12 16.2v0.6"),
+    "help": (
+        _STROKE,
+        "M12 3.5c4.69 0 8.5 3.81 8.5 8.5s-3.81 8.5-8.5 8.5-8.5-3.81-8.5-8.5 3.81-8.5 8.5-8.5z"
+        "M9.7 9.8c0-3 4.8-3 4.6 0-0.15 1.6-2.3 1.7-2.3 3.5M12 16.3v0.4",
+    ),
     "play": (_FILL, "M7 4v16l13-8z"),
     "pause": (_FILL, "M6 5h4v14H6z M14 5h4v14h-4z"),
     "first": (_FILL, "M5 5h2v14H5z M19 5v14l-10-7z"),

@@ -109,7 +109,7 @@ def test_flip_diff_and_view_state_label(win: Any) -> None:
     win._show_buffer(KEY_CUR)
     win._toggle_diff()
     assert win._diff and "차이 3−1" in win._state.text()
-    win._gamma.setValue(220)
+    win._set_gamma(2.2)
     assert "감마 2.20" in win._state.text() and win._btn_reset.isVisible()
     win._set_channel(CHANNEL_R)
     assert win._channel == CHANNEL_R
@@ -403,3 +403,79 @@ def test_lut_file_is_applied_and_remembered(win: Any, tmp_path: Path) -> None:
     assert not win._lut_on
     QTest.keyClick(win, Qt.Key.Key_L)
     assert win._lut_on
+
+
+def test_diff_keeps_shown_buffer_lit_and_marks_the_subtracted_one(win: Any) -> None:
+    win._show_buffer(KEY_ORG)
+    win._show_buffer(KEY_CUR)
+    win._toggle_diff()
+    assert win._buf_btns[KEY_CUR].isChecked() and not win._buf_btns[KEY_ORG].isChecked()
+    assert win._buf_marks[KEY_ORG] and not win._buf_marks.get(KEY_PREV)
+    assert win._btn_diff.text() == "차이 3−1"
+    win._toggle_diff()
+    assert not win._buf_marks[KEY_ORG]
+
+
+def test_fit_and_fill_buttons_follow_the_view(win: Any) -> None:
+    win._view_fit()
+    assert win._btn_fit.isChecked() and not win._btn_fill.isChecked()
+    win._view.zoom_at(QPointF(50, 50), 2.0)
+    assert not win._btn_fit.isChecked() and not win._btn_fill.isChecked()
+    win._view_fill()
+    assert win._view.fit_state() in ("fill", "fit")
+    assert win._btn_fill.isChecked() == (win._view.fit_state() == "fill")
+
+
+def test_gain_and_gamma_sliders_rest_in_the_middle(win: Any) -> None:
+    for slider in (win._gain, win._gamma):
+        assert slider.value() == 0 and slider.minimum() == -slider.maximum()
+    assert win._gain_value() == 1.0 and win._gamma_value() == 1.0
+    win._set_gamma(2.2)
+    assert abs(win._gamma_value() - 2.2) < 0.03
+    win._set_gamma(0.5)
+    assert abs(win._gamma_value() - 0.5) < 0.01
+
+
+def test_pixel_readout_keeps_its_width(win: Any) -> None:
+    import re
+
+    def plain() -> str:
+        return re.sub(r"<[^>]+>", "", win._info.text()).replace("&nbsp;", " ")
+
+    win._on_hover(-1, -1)
+    empty = plain()
+    win._on_hover(10, 10)
+    filled = plain()
+    assert "x   10 y   10" in filled and "R " in filled
+    assert len(empty) == len(filled)  # 값이 생겨도 줄이 밀리지 않는다
+
+
+def test_note_is_not_sent_when_a_marked_frame_has_no_picture(win: Any, monkeypatch: Any) -> None:
+    from bpe.core.confirm_annotations import KIND_RECT, make_shape
+
+    doc = win._layer.doc()
+    doc.add(make_shape(KIND_RECT, win._frame_start, [(0.1, 0.1), (0.5, 0.5)], text="a"))
+    doc.add(make_shape(KIND_RECT, win._frame_start + 2, [(0.1, 0.1), (0.5, 0.5)], text="b"))
+    win._on_doc_changed()
+    win._bufs[KEY_CUR].frames.pop(2)  # 그 프레임이 아직 메모리에 없는 상황
+    started = []
+    monkeypatch.setattr(
+        "bpe.gui.confirm.confirm_window.ShotGridWorker", lambda *a, **k: started.append(1)
+    )
+    win._task = {"shot_id": 1, "project_id": 1}
+    win._submit("retake")
+    assert not started and not win._submit_busy
+    assert "2장 중 1장" in win._panel._result.text()
+
+
+def test_warns_when_file_version_differs_from_shotgrid_latest(
+    win: Any, shot: Path, qtbot: Any
+) -> None:
+    movie = str(shot / "comp" / "devl" / "renders" / "SHOT_A_comp_v002.mov")
+    win.open_movie(movie, {"latest_version_code": "SHOT_A_comp_v005"})
+    qtbot.waitUntil(lambda: win._count == 6 and bool(win._version_note), timeout=30000)
+    assert "v002" in win._version_note and "v005" in win._version_note
+    assert "v005" in win._panel._result.text()
+    win.open_movie(movie, {"latest_version_code": "SHOT_A_comp_v002"})
+    qtbot.waitUntil(lambda: win._count == 6 and len(win._bufs[KEY_CUR].frames) >= 6, timeout=30000)
+    assert win._version_note == ""
