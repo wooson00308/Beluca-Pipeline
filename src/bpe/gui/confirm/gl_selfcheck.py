@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from array import array
 from typing import List, NamedTuple, Tuple
 
 from PySide6.QtCore import QSize
@@ -22,6 +23,7 @@ from bpe.core.confirm_view_math import (
     view_pixel,
 )
 from bpe.core.logging import get_logger
+from bpe.core.lut_cube import CubeLut, identity_lut
 from bpe.gui.confirm.viewer_gl import (
     GL_COLOR_BUFFER_BIT,
     GL_RENDERER,
@@ -40,15 +42,28 @@ _W, _H = 64, 32
 _VAL_A, _VAL_B_RIGHT = 0.25, 0.5
 _TOLERANCE = 0.006
 
-_CASES: Tuple[Tuple[str, int, float, float, str], ...] = (
-    ("A 그대로", VIEW_MODE_A, 1.0, 1.0, CHANNEL_RGB),
-    ("B 그대로", VIEW_MODE_B, 1.0, 1.0, CHANNEL_RGB),
-    ("차이", VIEW_MODE_DIFF, 1.0, 1.0, CHANNEL_RGB),
-    ("차이 + 게인 4 + 감마 2.2", VIEW_MODE_DIFF, 4.0, 2.2, CHANNEL_RGB),
-    ("게인 2", VIEW_MODE_A, 2.0, 1.0, CHANNEL_RGB),
-    ("감마 2", VIEW_MODE_A, 1.0, 2.0, CHANNEL_RGB),
-    ("밝기만 보기", VIEW_MODE_B, 1.0, 1.0, CHANNEL_LUMA),
+_CASES: Tuple[Tuple[str, int, float, float, str, bool], ...] = (
+    ("A 그대로", VIEW_MODE_A, 1.0, 1.0, CHANNEL_RGB, False),
+    ("B 그대로", VIEW_MODE_B, 1.0, 1.0, CHANNEL_RGB, False),
+    ("차이", VIEW_MODE_DIFF, 1.0, 1.0, CHANNEL_RGB, False),
+    ("차이 + 게인 4 + 감마 2.2", VIEW_MODE_DIFF, 4.0, 2.2, CHANNEL_RGB, False),
+    ("게인 2", VIEW_MODE_A, 2.0, 1.0, CHANNEL_RGB, False),
+    ("감마 2", VIEW_MODE_A, 1.0, 2.0, CHANNEL_RGB, False),
+    ("밝기만 보기", VIEW_MODE_B, 1.0, 1.0, CHANNEL_LUMA, False),
+    ("룩업 + 게인 2", VIEW_MODE_B, 2.0, 1.0, CHANNEL_RGB, True),
 )
+
+
+def _half(c: Tuple[float, float, float]) -> Tuple[float, float, float]:
+    return (min(1.0, max(0.0, c[0])) * 0.5, min(1.0, max(0.0, c[1])) * 0.5, c[2] * 0.5)
+
+
+def _half_lut() -> CubeLut:
+    """값을 절반으로 만드는 시험용 룩업(선형이라 보간 오차가 없다)."""
+    base = identity_lut(2)
+    return CubeLut(
+        2, array("f", (v * 0.5 for v in base.data)), base.domain_min, base.domain_max, ""
+    )
 
 
 class GLSelfCheck(NamedTuple):
@@ -101,6 +116,7 @@ def run_gl_selfcheck() -> GLSelfCheck:
         ok = renderer.set_image(SLOT_B, (left + right) * _H, _W, _H) and ok
         if not ok:
             return _fail([f"16비트 그림을 올리지 못했습니다: {renderer.error}"], name, version)
+        renderer.set_lut(_half_lut())
 
         fbo_fmt = QOpenGLFramebufferObjectFormat()
         fbo_fmt.setInternalTextureFormat(_GL_RGBA16)
@@ -116,12 +132,12 @@ def run_gl_selfcheck() -> GLSelfCheck:
         all_ok = True
         a = (_VAL_A, _VAL_A, _VAL_A)
         b_right = (_VAL_B_RIGHT, _VAL_B_RIGHT, _VAL_B_RIGHT)
-        for label, mode, gain, gamma, channel in _CASES:
+        for label, mode, gain, gamma, channel, lut_on in _CASES:
             fbo.bind()
             f.glViewport(0, 0, _W, _H)
             f.glClearColor(0.0, 0.0, 0.0, 1.0)
             f.glClear(GL_COLOR_BUFFER_BIT)
-            renderer.draw(f, gain=gain, gamma=gamma, mode=mode, channel=channel)
+            renderer.draw(f, gain=gain, gamma=gamma, mode=mode, channel=channel, lut_on=lut_on)
             f.glFinish()
             fbo.release()
             img = fbo.toImage(False)
@@ -129,7 +145,15 @@ def run_gl_selfcheck() -> GLSelfCheck:
             for x, bval in ((_W // 4, a), (_W * 3 // 4, b_right)):
                 want = min(
                     1.0,
-                    view_pixel(a, bval, mode=mode, gain=gain, gamma=gamma, channel=channel)[0],
+                    view_pixel(
+                        a,
+                        bval,
+                        mode=mode,
+                        gain=gain,
+                        gamma=gamma,
+                        channel=channel,
+                        lut=_half if lut_on else None,
+                    )[0],
                 )
                 have = img.pixelColor(x, _H // 2).redF()
                 if abs(have - want) > _TOLERANCE:

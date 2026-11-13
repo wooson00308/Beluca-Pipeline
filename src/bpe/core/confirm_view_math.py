@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Callable, Optional, Tuple
 
 RGB = Tuple[float, float, float]
 
@@ -69,15 +69,22 @@ def view_pixel(
     gain: float = 1.0,
     gamma: float = 1.0,
     channel: str = CHANNEL_RGB,
+    lut: Optional[Callable[[RGB], RGB]] = None,
 ) -> RGB:
-    """한 픽셀의 화면 값: 보기 판 고르기 → 게인·감마 → 채널."""
+    """한 픽셀의 화면 값: 보기 판 고르기 → 게인 → 룩업 → 감마 → 채널.
+
+    차이 보기에서는 룩업을 씌우지 않는다(값 차이 그대로 본다).
+    """
     if mode == VIEW_MODE_DIFF:
         c = difference(a, b)
     elif mode == VIEW_MODE_B:
         c = b
     else:
         c = a
-    return select_channel(apply_gain_gamma(c, gain, gamma), channel)
+    c = (c[0] * gain, c[1] * gain, c[2] * gain)
+    if lut is not None and mode != VIEW_MODE_DIFF:
+        c = lut(c)
+    return select_channel(apply_gain_gamma(c, 1.0, gamma), channel)
 
 
 def fit_rect(src_w: int, src_h: int, dst_w: int, dst_h: int) -> Tuple[int, int, int, int]:

@@ -90,6 +90,16 @@ class MainWindow(QMainWindow):
             sb.addWidget(btn)
             self._tab_buttons[tab_def["key"]] = btn
 
+        # 시험판에서만: 잠금 없이 새 컨펌 창을 여는 버튼
+        from bpe.gui.confirm.launch import confirm_unlocked_build
+
+        if confirm_unlocked_build():
+            confirm_btn = QPushButton("Confirm (시험)")
+            confirm_btn.setProperty("selected", False)
+            confirm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            confirm_btn.clicked.connect(self._open_confirm_window)
+            sb.addWidget(confirm_btn)
+
         sb.addStretch()
 
         # Version at bottom
@@ -404,6 +414,14 @@ Remove-Item -LiteralPath $Ps1Path -Force -ErrorAction SilentlyContinue
         super().resizeEvent(event)
         if hasattr(self, "_toast"):
             self._toast.reposition()
+
+    def _open_confirm_window(self) -> None:
+        try:
+            from bpe.gui.confirm.launch import open_confirm_window
+
+            open_confirm_window()
+        except Exception:
+            logger.exception("confirm window open failed")
 
     def _build_tabs(self) -> None:
         from bpe.gui.tabs.manager_tab import ManagerTab

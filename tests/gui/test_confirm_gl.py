@@ -42,7 +42,7 @@ def gl_ok(qapp: Any) -> Any:
 def test_selfcheck_matches_reference_math(gl_ok: Any) -> None:
     assert gl_ok.ok, "\n".join(gl_ok.lines)
     assert gl_ok.renderer
-    assert sum(1 for ln in gl_ok.lines if "✓" in ln) == 7
+    assert sum(1 for ln in gl_ok.lines if "✓" in ln) == 8
 
 
 def test_probe_window_opens_reports_and_closes(qtbot: Any, gl_ok: Any) -> None:

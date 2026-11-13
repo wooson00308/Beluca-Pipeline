@@ -255,3 +255,47 @@ def save_source_library_settings(
     existing.update({k: v for k, v in data.items() if k in _DEFAULT_SOURCE_LIBRARY})
     settings["source_library"] = existing
     save_settings(settings, settings_file)
+
+
+_DEFAULT_CONFIRM: Dict[str, Any] = {
+    # 프로젝트 코드 → 룩업(.cube) 파일 경로
+    "luts": {},
+    # 프레임을 메모리에 올리는 한도(MB)
+    "cache_mb": 4096,
+    # 목록에서 마지막에 쓴 갈래·정렬
+    "list_group": "",
+    "list_sort": "",
+}
+
+
+def get_confirm_settings(settings_file: Optional[Path] = None) -> Dict[str, Any]:
+    """Return the 'confirm' section (컨펌 창), filling missing keys with defaults.
+
+    기존 settings.json 키에는 영향 없음.
+    """
+    settings = load_settings(settings_file)
+    stored = settings.get("confirm")
+    if not isinstance(stored, dict):
+        stored = {}
+    merged: Dict[str, Any] = dict(_DEFAULT_CONFIRM)
+    for k, v in stored.items():
+        if k in merged:
+            merged[k] = v
+    if not isinstance(merged.get("luts"), dict):
+        merged["luts"] = {}
+    try:
+        merged["cache_mb"] = max(256, int(merged.get("cache_mb") or 0))
+    except (TypeError, ValueError):
+        merged["cache_mb"] = _DEFAULT_CONFIRM["cache_mb"]
+    return merged
+
+
+def save_confirm_settings(data: Dict[str, Any], settings_file: Optional[Path] = None) -> None:
+    """Update only the 'confirm' key in settings.json. Preserves other keys."""
+    settings = load_settings(settings_file)
+    existing = settings.get("confirm")
+    if not isinstance(existing, dict):
+        existing = {}
+    existing.update({k: v for k, v in data.items() if k in _DEFAULT_CONFIRM})
+    settings["confirm"] = existing
+    save_settings(settings, settings_file)

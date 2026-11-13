@@ -454,6 +454,15 @@ class FeedbackTab(QWidget):
         )
         self._btn_ai_qc.clicked.connect(self._on_ai_qc_clicked)
         ann_actions.addWidget(self._btn_ai_qc)
+        # 새 컨펌 창(누크식 뷰어) — 지금 고른 샷을 그대로 넘긴다. 이 탭의 나머지는 그대로.
+        self._btn_confirm_window = QToolButton()
+        self._btn_confirm_window.setText("새 창으로 열기")
+        self._btn_confirm_window.setToolTip("원본·전 버전과 번갈아 보는 새 컨펌 창으로 엽니다")
+        self._btn_confirm_window.setAutoRaise(False)
+        self._btn_confirm_window.setFixedHeight(_ann_act_h)
+        self._btn_confirm_window.setEnabled(False)
+        self._btn_confirm_window.clicked.connect(self._open_confirm_window)
+        ann_actions.addWidget(self._btn_confirm_window)
         ann_actions.addStretch(1)
         self._btn_feedback_undo = QToolButton()
         self._btn_feedback_undo.setIcon(
@@ -1935,11 +1944,30 @@ class FeedbackTab(QWidget):
         p = self._video.current_media_path().strip()
         return p if p and Path(p).is_file() else ""
 
+    def _open_confirm_window(self) -> None:
+        """지금 고른 샷을 새 컨펌 창으로 연다."""
+        mov = self._ai_qc_resolved_mov_path()
+        if not mov:
+            return
+        task = dict(self._selected_task or {})
+        if self._selected_version_id is not None:
+            task["latest_version_id"] = self._selected_version_id
+        if self._selected_version_code:
+            task["latest_version_code"] = self._selected_version_code
+        try:
+            from bpe.gui.confirm.launch import open_confirm_window
+
+            open_confirm_window(mov, task)
+        except Exception as e:
+            logger.exception("confirm window open failed")
+            QMessageBox.warning(self, "새 창으로 열기", f"컨펌 창을 열지 못했습니다.\n{e}")
+
     def _update_ai_qc_btn_state(self) -> None:
         """AI QC 버튼: 플레이어가 실재 파일 경로를 잡았을 때만 활성화."""
         resolved = self._ai_qc_resolved_mov_path()
         enabled = bool(resolved)
         self._btn_ai_qc.setEnabled(enabled)
+        self._btn_confirm_window.setEnabled(enabled)
 
     def _prefetch_notes_for_ai_qc_banner(self, shot_id: Optional[int]) -> List[Dict[str, Any]]:
         """AI QC 설정 화면 배너용 — SG 노트 몇 줄만 동기 조회."""
