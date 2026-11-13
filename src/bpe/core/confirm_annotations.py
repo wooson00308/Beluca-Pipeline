@@ -9,10 +9,12 @@ import copy
 from typing import Any, Dict, List, Optional, Tuple
 
 KIND_RECT = "rect"
+KIND_ELLIPSE = "ellipse"
 KIND_PEN = "pen"
 KIND_ARROW = "arrow"
 KIND_TEXT = "text"
-KINDS = (KIND_RECT, KIND_PEN, KIND_ARROW, KIND_TEXT)
+KINDS = (KIND_RECT, KIND_ELLIPSE, KIND_PEN, KIND_ARROW, KIND_TEXT)
+BOX_KINDS = (KIND_RECT, KIND_ELLIPSE)  # 두 점이 감싸는 네모로 정해지는 도형
 
 DEFAULT_COLOR = "#ff5a52"
 DEFAULT_WIDTH = 3
@@ -62,9 +64,9 @@ def shape_bounds(shape: Shape) -> Tuple[float, float, float, float]:
 
 
 def text_anchor(shape: Shape) -> Point:
-    """도형에 붙는 글의 기준점(왼쪽 위) — 네모는 아래쪽, 그 밖은 끝점."""
+    """도형에 붙는 글의 기준점(왼쪽 위) — 네모·원은 아래쪽, 그 밖은 끝점."""
     x0, _y0, _x1, y1 = shape_bounds(shape)
-    if shape.get("kind") == KIND_RECT:
+    if shape.get("kind") in BOX_KINDS:
         return (x0, y1)
     pts: List[Point] = shape.get("points") or [(0.0, 0.0)]
     return pts[-1] if shape.get("kind") in (KIND_ARROW, KIND_PEN) else pts[0]

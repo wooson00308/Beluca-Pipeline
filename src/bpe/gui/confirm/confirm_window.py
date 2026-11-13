@@ -81,6 +81,7 @@ from bpe.core.settings import (
 from bpe.gui.confirm import style
 from bpe.gui.confirm.annotation_layer import (
     TOOL_ARROW,
+    TOOL_ELLIPSE,
     TOOL_PEN,
     TOOL_RECT,
     TOOL_SELECT,
@@ -131,6 +132,7 @@ _CHANNEL_NAMES = {CHANNEL_R: "R", CHANNEL_G: "G", CHANNEL_B: "B", CHANNEL_LUMA: 
 _TOOLS: Tuple[Tuple[str, str, str, str], ...] = (
     (TOOL_SELECT, "select", "선택", "V"),
     (TOOL_RECT, "rect", "네모", "N"),
+    (TOOL_ELLIPSE, "ellipse", "원", "O"),
     (TOOL_PEN, "pen", "펜", "P"),
     (TOOL_ARROW, "arrow", "화살표", "W"),
     (TOOL_TEXT, "text", "글씨", "T"),
@@ -158,7 +160,7 @@ _SHORTCUTS: Tuple[Tuple[str, Tuple[Tuple[Tuple[str, ...], str], ...]], ...] = (
     (
         "그리기",
         (
-            (("V", "N", "P", "W", "T"), "선택 / 네모 / 펜 / 화살표 / 글씨"),
+            (("V", "N", "O", "P", "W", "T"), "선택 / 네모 / 원 / 펜 / 화살표 / 글씨"),
             (("Ctrl+Z", "Ctrl+Y"), "되돌리기 / 다시"),
             (("Delete",), "고른 그림 지우기"),
         ),
@@ -175,6 +177,7 @@ _SHORTCUTS: Tuple[Tuple[str, Tuple[Tuple[Tuple[str, ...], str], ...]], ...] = (
 _TOOL_HINTS = {
     TOOL_SELECT: "선택 · 옮기기",
     TOOL_RECT: "끌어서 네모 → 글 쓰고 Enter",
+    TOOL_ELLIPSE: "끌어서 원 → 글 쓰고 Enter",
     TOOL_PEN: "펜 · 자유롭게 그리기",
     TOOL_ARROW: "끌어서 화살표 → 글 쓰고 Enter",
     TOOL_TEXT: "눌러서 글씨 쓰기",
@@ -283,6 +286,7 @@ class ConfirmWindow(QWidget):
         self._load_token = 0
         self._hover: Tuple[int, int] = (-1, -1)
         self._color = style.DRAW_COLORS[0]
+        self._recent_colors: List[str] = list(style.DRAW_COLORS)  # 띠에 보이는 세 색
         self._pending_status = ""
         self._pending_left = 0
         self._sent_note_id: Optional[int] = None
@@ -630,13 +634,18 @@ class ConfirmWindow(QWidget):
         prow.addSpacing(4)
         prow.addWidget(_divider())
         prow.addSpacing(6)
-        self._color_btns: Dict[str, QPushButton] = {}
-        for color in style.DRAW_COLORS:
-            b = _btn("", tip="그리기 색")
-            b.clicked.connect(lambda _c=False, c=color: self._set_color(c))
-            self._color_btns[color] = b
+        self._swatch_btns: List[QPushButton] = []
+        for i in range(len(self._recent_colors)):
+            b = _btn("", tip="그리기 색 (최근에 쓴 색)")
+            b.clicked.connect(lambda _c=False, n=i: self._set_color(self._recent_colors[n]))
+            self._swatch_btns.append(b)
             prow.addWidget(b)
             prow.addSpacing(3)
+        self._btn_palette = _btn("", checkable=True, tip="색 더 고르기")
+        style.set_icon(self._btn_palette, "palette", size=16)
+        self._btn_palette.setStyleSheet(style.icon_button_style(30))
+        self._btn_palette.clicked.connect(self._toggle_palette)
+        prow.addWidget(self._btn_palette)
         prow.addSpacing(3)
         prow.addWidget(_divider())
         prow.addSpacing(4)
@@ -657,6 +666,22 @@ class ConfirmWindow(QWidget):
         self._tool_hint.setFixedWidth(_HINT_W)
         prow.addWidget(self._tool_hint)
         prow.addSpacing(6)
+        self._palette = QFrame(self._view)
+        self._palette.setObjectName("confirm_palette")
+        self._palette.setStyleSheet(
+            f"QFrame#confirm_palette {{ background: {style.PANEL}; "
+            f"border: 1px solid {style.EDGE}; border-radius: 6px; }}"
+        )
+        grid = QGridLayout(self._palette)
+        grid.setContentsMargins(8, 8, 8, 8)
+        grid.setSpacing(6)
+        self._palette_btns: Dict[str, QPushButton] = {}
+        for i, color in enumerate(style.PALETTE):
+            b = _btn("", tip=color)
+            b.clicked.connect(lambda _c=False, c=color: self._set_color(c))
+            self._palette_btns[color] = b
+            grid.addWidget(b, i // style.PALETTE_COLUMNS, i % style.PALETTE_COLUMNS)
+        self._palette.hide()
         self._view.view_changed.connect(self._place_overlays)
 
     def _build_transport(self) -> QFrame:
@@ -1354,8 +1379,11 @@ class ConfirmWindow(QWidget):
         self._sync_fit()
         for tool, btn in self._tool_btns.items():
             btn.setChecked(tool == self._layer.tool())
-        for color, btn in self._color_btns.items():
+        for btn, color in zip(self._swatch_btns, self._recent_colors):
             btn.setStyleSheet(style.swatch_style(color, color == self._color))
+        for color, btn in self._palette_btns.items():
+            btn.setStyleSheet(style.swatch_style(color, color == self._color))
+        self._btn_palette.setChecked(self._palette.isVisible())
         self._tool_hint.setText(_TOOL_HINTS.get(self._layer.tool(), ""))
         cur = self._bufs[KEY_CUR]
         self._fps_lbl.setText(f"{self._fps:.3f}" if cur.available else "–")
@@ -1390,11 +1418,25 @@ class ConfirmWindow(QWidget):
         self._help.move(
             max(0, (vw - self._help.width()) // 2), max(0, (vh - self._help.height()) // 2)
         )
+        self._palette.adjustSize()
+        bx = self._pill.x() + self._btn_palette.x() + self._btn_palette.width() // 2
+        self._palette.move(
+            max(0, min(vw - self._palette.width(), bx - self._palette.width() // 2)),
+            max(0, self._pill.y() - self._palette.height() - 6),
+        )
         self._busy.adjustSize()
         self._busy.move(
             max(0, (vw - self._busy.width()) // 2), max(0, (vh - self._busy.height()) // 2)
         )
-        for wdg in (self._hud, self._state, self._banner, self._pill, self._busy, self._help):
+        for wdg in (
+            self._hud,
+            self._state,
+            self._banner,
+            self._pill,
+            self._palette,
+            self._busy,
+            self._help,
+        ):
             wdg.raise_()
 
     def _set_busy(self, title: str, detail: str = "", *, error: bool = False) -> None:
@@ -1489,12 +1531,26 @@ class ConfirmWindow(QWidget):
         self._place_overlays()
 
     def _set_tool(self, tool: str) -> None:
+        self._palette.hide()
         self._layer.set_tool(tool)
         self._sync_all()
 
     def _set_color(self, color: str) -> None:
+        """그리기 색을 바꾼다. 고른 그림이 있으면 그 그림의 색도 바꾼다."""
         self._color = color
+        if color not in self._recent_colors:  # 팔레트에서 고른 새 색 — 띠의 맨 앞 칸으로
+            self._recent_colors = [color] + self._recent_colors[:-1]
         self._layer.set_color(color)
+        selected = self._layer.selected_id()
+        if selected is not None and self._layer.doc().update(selected, color=color):
+            self._layer.update()
+            self._on_doc_changed()
+        self._palette.hide()
+        self._sync_all()
+
+    def _toggle_palette(self) -> None:
+        self._palette.setVisible(not self._palette.isVisible())
+        self._place_overlays()
         self._sync_all()
 
     def _extend_selected(self) -> None:
@@ -1912,6 +1968,8 @@ class ConfirmWindow(QWidget):
                 self._layer.cancel_text_edit()
             elif self._help.isVisible():
                 self._toggle_help()
+            elif self._palette.isVisible():
+                self._toggle_palette()
             elif self._send_timer.isActive():
                 self._cancel_pending()
             elif self._drawer.isVisible():
@@ -1965,7 +2023,7 @@ class ConfirmWindow(QWidget):
             self._view_fit()
         elif letter == "H":
             self._view_fill()
-        elif letter in ("V", "N", "P", "W", "T"):
+        elif letter in ("V", "N", "O", "P", "W", "T"):
             self._set_tool(next(t for t, _i, _l, k in _TOOLS if k == letter))
         else:
             super().keyPressEvent(event)

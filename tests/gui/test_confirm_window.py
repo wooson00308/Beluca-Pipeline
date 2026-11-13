@@ -244,7 +244,7 @@ def test_timeline_maps_x_to_frame(qapp: Any) -> None:
 def test_drawing_tools_are_icons_not_words(win: Any) -> None:
     # 그리기 도구는 글자 버튼이 아니라 아이콘 띠다(시안 2판 기준)
     tools = list(win._tool_btns.values()) + [win._btn_erase]
-    assert len(tools) == 6
+    assert len(tools) == 7
     assert all(b.text() == "" and not b.icon().isNull() for b in tools)
     win._set_tool("pen")
     assert win._tool_btns["pen"].isChecked() and not win._tool_btns["select"].isChecked()
@@ -300,6 +300,7 @@ def test_keyboard_shortcuts(win: Any, qtbot: Any) -> None:
     assert win._index == 4
     for key, tool in (
         (Qt.Key.Key_N, "rect"),
+        (Qt.Key.Key_O, "ellipse"),
         (Qt.Key.Key_P, "pen"),
         (Qt.Key.Key_W, "arrow"),
         (Qt.Key.Key_T, "text"),
@@ -527,3 +528,49 @@ def test_empty_labels_are_hidden_before_any_movie(qtbot: Any, tmp_app_dir: Path,
     assert not w._hud.isVisible() and not w._state.isVisible()
     assert not w._btn_reset.isVisible() and not w._busy.isVisible()
     w.close()
+
+
+def test_ellipse_tool_draws_a_circle_and_asks_for_text(win: Any) -> None:
+    layer = win._layer
+    r = win._view.image_rect()
+    assert r is not None
+    win._set_tool("ellipse")
+    p0 = QPointF(r[0] + r[2] * 0.6, r[1] + r[3] * 0.7).toPoint()  # 오른쪽 아래에서 왼쪽 위로 끈다
+    p1 = QPointF(r[0] + r[2] * 0.3, r[1] + r[3] * 0.2).toPoint()
+    _drag(layer, [p0, p1])
+    assert layer.is_editing_text()  # 원을 그리면 바로 글 칸
+    QTest.keyClicks(layer._edit, "halo")
+    QTest.keyClick(layer._edit, Qt.Key.Key_Return)
+    shape = layer.doc().shapes()[-1]
+    assert shape["kind"] == "ellipse" and shape["text"] == "halo"
+    (x0, y0), (x1, y1) = shape["points"]
+    assert x0 < x1 and y0 < y1  # 어느 쪽으로 끌어도 왼쪽 위 → 오른쪽 아래로 정리된다
+    assert win._panel.memo_texts() == [f"[{win.frame_number()}] halo"]
+    paths = win._render_note_images()
+    try:
+        assert len(paths) == 1  # 원도 노트 그림에 그려진다
+    finally:
+        win._remove_files(paths)
+
+
+def test_palette_offers_more_colours_and_recolours_the_selected_shape(win: Any) -> None:
+    from bpe.core.confirm_annotations import KIND_RECT, make_shape
+    from bpe.gui.confirm import style as st
+
+    assert len(win._palette_btns) == len(st.PALETTE) >= 12
+    assert not win._palette.isVisible()
+    win._toggle_palette()
+    assert win._palette.isVisible() and win._btn_palette.isChecked()
+    blue = "#4a90e2"
+    assert blue in st.PALETTE and blue not in win._recent_colors
+    win._palette_btns[blue].click()
+    assert win._color == blue and win._recent_colors[0] == blue and len(win._recent_colors) == 3
+    assert not win._palette.isVisible()  # 고르면 닫힌다
+    assert win._swatch_btns[0].styleSheet().count(blue) >= 1
+
+    doc = win._layer.doc()
+    sid = doc.add(make_shape(KIND_RECT, win.frame_number(), [(0.1, 0.1), (0.4, 0.4)], text="a"))
+    win._on_doc_changed()
+    win._layer._selected = sid
+    win._swatch_btns[1].click()  # 띠의 다른 색을 누르면 고른 그림 색이 바뀐다
+    assert doc.get(sid)["color"] == win._recent_colors[1] == win._color

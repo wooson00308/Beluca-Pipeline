@@ -24,10 +24,12 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QLineEdit, QWidget
 
 from bpe.core.confirm_annotations import (
+    BOX_KINDS,
     DEFAULT_COLOR,
     DEFAULT_TEXT_SIZE,
     DEFAULT_WIDTH,
     KIND_ARROW,
+    KIND_ELLIPSE,
     KIND_PEN,
     KIND_RECT,
     KIND_TEXT,
@@ -42,10 +44,11 @@ from bpe.gui.confirm.viewer_gl import ConfirmGLView
 
 TOOL_SELECT = "select"
 TOOL_RECT = KIND_RECT
+TOOL_ELLIPSE = KIND_ELLIPSE
 TOOL_PEN = KIND_PEN
 TOOL_ARROW = KIND_ARROW
 TOOL_TEXT = KIND_TEXT
-TOOLS = (TOOL_SELECT, TOOL_RECT, TOOL_PEN, TOOL_ARROW, TOOL_TEXT)
+TOOLS = (TOOL_SELECT, TOOL_RECT, TOOL_ELLIPSE, TOOL_PEN, TOOL_ARROW, TOOL_TEXT)
 
 _MIN_DRAG = 0.008
 _PEN_STEP = 0.003
@@ -83,6 +86,8 @@ def paint_shapes(
         kind = s.get("kind")
         if kind == KIND_RECT and len(pts) >= 2:
             p.drawRect(QRectF(pts[0], pts[1]).normalized())
+        elif kind == KIND_ELLIPSE and len(pts) >= 2:
+            p.drawEllipse(QRectF(pts[0], pts[1]).normalized())
         elif kind == KIND_PEN and len(pts) >= 2:
             path = QPainterPath(pts[0])
             for q in pts[1:]:
@@ -374,13 +379,13 @@ class AnnotationLayer(QWidget):
         if (x1 - x0) + (y1 - y0) < _MIN_DRAG:
             self.update()
             return
-        if draft["kind"] == KIND_RECT:
+        if draft["kind"] in BOX_KINDS:
             draft["points"] = [(x0, y0), (x1, y1)]
         new_id = self._doc.add(draft)
         self._selected = new_id
         self.selection_changed.emit()
         self._changed()
-        if draft["kind"] in (KIND_RECT, KIND_ARROW):
+        if draft["kind"] in BOX_KINDS or draft["kind"] == KIND_ARROW:
             self._begin_edit(new_id, is_new=False)
         event.accept()
 

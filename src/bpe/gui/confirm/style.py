@@ -40,7 +40,13 @@ OK = "#7fcf9a"
 FAIL = "#ff7b7b"
 STATUS_DOT = "#e8a33d"
 CHANNEL_COLORS: Dict[str, str] = {"R": "#ff7b7b", "G": "#7fcf7f", "B": "#7fb0ff"}
-DRAW_COLORS: Tuple[str, ...] = ("#ff5a52", "#f2c94c", "#ffffff")
+DRAW_COLORS: Tuple[str, ...] = ("#ff5a52", "#f2c94c", "#ffffff")  # 처음 보이는 세 색
+# 더 고를 수 있는 색(두 줄) — 따뜻한 색에서 찬 색으로, 끝은 무채색
+PALETTE: Tuple[str, ...] = (
+    "#ff5a52", "#ff9f40", "#f2c94c", "#a6d94a", "#4cc38a", "#3ec6e0", "#4a90e2", "#6f74e8",
+    "#a66be0", "#f06ac0", "#a9744f", "#ffffff", "#bdbdbd", "#808080", "#404040", "#000000",
+)  # fmt: skip
+PALETTE_COLUMNS = 8
 RETAKE = "#ff9a90"
 RETAKE_EDGE = "#a8483f"
 PAST = WARN
@@ -269,11 +275,16 @@ def make_segments(buttons: List[QPushButton], **kwargs: str) -> None:
 _ICON_BOX = 24.0
 _STROKE = "stroke"
 _FILL = "fill"
+_BOTH = "both"  # 선도 긋고 속도 채운다(화살표 머리)
 _ICON_PATHS: Dict[str, Tuple[str, str]] = {
     "select": (_STROKE, "M5 3v16l4.5-4 3 6 2.5-1-3-6h6z"),
     "rect": (_STROKE, "M4 6h16v12H4z"),
-    "pen": (_STROKE, "M3 17c4-12 6 2 10-6s6-4 8-6"),
-    "arrow": (_STROKE, "M5 19L19 5M11 5h8v8"),
+    "ellipse": (
+        _STROKE,
+        "M12 5.5c4.4 0 8 2.9 8 6.5s-3.6 6.5-8 6.5-8-2.9-8-6.5 3.6-6.5 8-6.5z",
+    ),
+    "pen": (_STROKE, "M4 20l1.2-4.8L16.5 3.9l3.6 3.6L8.8 18.8zM14 6.4l3.6 3.6"),
+    "arrow": (_BOTH, "M5 19L15 9M19.5 4.5l-2 9-7-7z"),
     "text": (_STROKE, "M5 6h14M12 6v13"),
     "eraser": (_STROKE, "M8 20l-5-5L13 5l7 7-8 8zM9 10l7 7"),
     "undo": (_STROKE, "M7 8h8c6.6 0 6.6 10 0 10H7M10.5 4L6.5 8l4 4"),
@@ -290,6 +301,12 @@ _ICON_PATHS: Dict[str, Tuple[str, str]] = {
         _STROKE,
         "M12 3.5c4.69 0 8.5 3.81 8.5 8.5s-3.81 8.5-8.5 8.5-8.5-3.81-8.5-8.5 3.81-8.5 8.5-8.5z"
         "M9.7 9.8c0-3 4.8-3 4.6 0-0.15 1.6-2.3 1.7-2.3 3.5M12 16.3v0.4",
+    ),
+    "palette": (
+        _FILL,
+        "M5 5h3.5v3.5H5zM10.25 5h3.5v3.5h-3.5zM15.5 5H19v3.5h-3.5z"
+        "M5 10.25h3.5v3.5H5zM10.25 10.25h3.5v3.5h-3.5zM15.5 10.25H19v3.5h-3.5z"
+        "M5 15.5h3.5V19H5zM10.25 15.5h3.5V19h-3.5zM15.5 15.5H19V19h-3.5z",
     ),
     "play": (_FILL, "M7 4v16l13-8z"),
     "pause": (_FILL, "M6 5h4v14H6z M14 5h4v14h-4z"),
@@ -364,7 +381,7 @@ def _draw_icon(p: QPainter, name: str, color: str) -> None:
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         p.setPen(pen)
-        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setBrush(QColor(color) if mode == _BOTH else Qt.BrushStyle.NoBrush)
     p.drawPath(svg_path(d))
 
 
