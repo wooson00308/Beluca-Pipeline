@@ -23,7 +23,7 @@ def test_plate_colour_and_ai_tag_pick_one_preset() -> None:
 
 def test_missing_information_leaves_it_undecided() -> None:
     name, decided = pick_preset(_NAMES, plate_color="REC709", is_ai=None)
-    assert not decided and "REC709" in name  # 색은 맞추고, AI 여부는 못 정함
+    assert not decided and name == "PROJ_001_REC709"  # 색은 맞추고, AI 는 몰라 일반을 먼저
     name, decided = pick_preset(_NAMES, plate_color=None, is_ai=True)
     assert not decided and "_AI_" in name
     assert pick_preset(_NAMES)[1] is False

@@ -144,6 +144,8 @@ def pick_preset(
     if is_ai is not None:
         hit = [n for n in cand if (_AI_TOKEN in tokens(n)) == is_ai]
         cand = hit or cand
+    else:  # AI 샷인지 모르면 더 흔한 일반 프리셋을 먼저 내민다
+        cand.sort(key=lambda n: _AI_TOKEN in tokens(n))
     return cand[0], len(cand) == 1
 
 
