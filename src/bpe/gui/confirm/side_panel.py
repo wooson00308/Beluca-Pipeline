@@ -44,6 +44,14 @@ def _header(text: str) -> QLabel:
     return lbl
 
 
+def _note_body(note: Dict[str, Any]) -> str:
+    """노트 본문. 내용이 비어 있으면 제목을, 그것도 없으면 그림만 있는 노트라고 알린다."""
+    text = (note.get("content") or "").strip() or (note.get("subject") or "").strip()
+    if not text:
+        return f'<span style="color:{style.DIM}">글 없음 (그림만 있는 Note)</span>'
+    return _frame_links(text)
+
+
 def _mono_codes(text: str) -> str:
     """버전·상태 같은 영문·숫자 낱말만 폭 고른 글씨로(한글은 본문 글씨 그대로)."""
     parts = [
@@ -140,6 +148,7 @@ class ConfirmSidePanel(QWidget):
     retry_requested = Signal()
     past_note_clicked = Signal(object)
     past_frame_clicked = Signal(int)
+    preset_picked = Signal(str)
     memo_toggled = Signal(int, bool)
     insert_failures_requested = Signal()
 
@@ -173,11 +182,21 @@ class ConfirmSidePanel(QWidget):
         grid.setColumnStretch(1, 1)
         self._v_order, self._v_desc = _value(), _value()
         self._v_who, self._v_checks = _value(), _value()
+        self._v_basis, self._v_look = _value(), _value()
         self._k_desc = _key("샷 설명")
+        self._k_basis, self._k_look = _key("기준"), _key("룩")
+        self._k_preset = _key("프리셋")
+        self._preset_box = QComboBox()
+        self._preset_box.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._preset_box.setToolTip("이 프로젝트의 프리셋이 여러 개입니다 — 검사 기준으로 쓸 것")
+        self._preset_box.activated.connect(self._on_preset)
         rows = (
             (_key("워크 오더"), self._v_order),
             (self._k_desc, self._v_desc),
             (_key("작업"), self._v_who),
+            (self._k_basis, self._v_basis),
+            (self._k_preset, self._preset_box),
+            (self._k_look, self._v_look),
             (_key("검사"), self._v_checks),
         )
         for r, (k, v) in enumerate(rows):
@@ -203,7 +222,7 @@ class ConfirmSidePanel(QWidget):
         ph = QHBoxLayout(past_head)
         ph.setContentsMargins(10, 0, 10, 0)
         ph.setSpacing(6)
-        title = QLabel("지난 지적")
+        title = QLabel("Note")
         title.setIndent(0)
         title.setStyleSheet(
             f"color: {style.LABEL}; font-size: {style.FONT_SMALL_PX}px; font-weight: bold; "
@@ -320,12 +339,13 @@ class ConfirmSidePanel(QWidget):
         self._other.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._other.setFixedWidth(84)
         self._other.setStyleSheet("QComboBox { height: 32px; }")
-        self._other.addItem("그 밖", "")
+        self._other.addItem("Status", "")
         self._other.activated.connect(self._on_other)
         actions.addWidget(self._other)
         fcol.addLayout(actions)
         col.addWidget(foot)
         self.set_work_info("", "", "")
+        self.set_standard("", "", [], "")
         self._fill_past()
         self.set_memo([])
 
@@ -333,7 +353,7 @@ class ConfirmSidePanel(QWidget):
 
     def set_other_statuses(self, items: List[Tuple[str, str]]) -> None:
         self._other.clear()
-        self._other.addItem("그 밖", "")
+        self._other.addItem("Status", "")
         for code, label in items:
             self._other.addItem(f"{code} · {label}", code)
 
@@ -369,6 +389,31 @@ class ConfirmSidePanel(QWidget):
             self._v_checks.setToolTip("")
         self._v_checks.setText("<br>".join(lines))
         self._btn_failures.setVisible(any(r.state == STATE_FAIL for r in results))
+
+    def set_standard(self, basis: str, look: str, names: List[str], current: str) -> None:
+        """무엇을 기준으로 검사했는지, MOV 의 룩, (여러 개일 때) 프리셋 고르기."""
+        for key, value, text in (
+            (self._k_basis, self._v_basis, basis),
+            (self._k_look, self._v_look, look),
+        ):
+            key.setVisible(bool(text))
+            value.setVisible(bool(text))
+            value.setText(_mono_codes(text) if text else "")
+        many = len(names) > 1
+        self._k_preset.setVisible(many)
+        self._preset_box.setVisible(many)
+        self._preset_box.blockSignals(True)
+        self._preset_box.clear()
+        self._preset_box.addItems(list(names))
+        if current in names:
+            self._preset_box.setCurrentText(current)
+        self._preset_box.blockSignals(False)
+
+    def basis_text(self) -> str:
+        return self._v_basis.text()
+
+    def _on_preset(self, _index: int) -> None:
+        self.preset_picked.emit(self._preset_box.currentText())
 
     def set_past_notes(self, notes: List[Dict[str, Any]], current_version: str = "") -> None:
         """*notes*: ``version_code``·``timestamp``·``author``·``content`` 를 가진 dict 들."""
@@ -406,7 +451,7 @@ class ConfirmSidePanel(QWidget):
             if not version or str(n.get("version_code") or _NO_VERSION) == version
         ]
         if not rows:
-            empty = QLabel("지적이 없습니다")
+            empty = QLabel("Note 가 없습니다")
             empty.setStyleSheet(f"color: {style.DIM}; padding: 8px 10px;")
             self._past_col.addWidget(empty)
         for n in rows:
@@ -421,7 +466,7 @@ class ConfirmSidePanel(QWidget):
             )
             html = (
                 f'<span style="color:{style.DIM}; {style.mono(style.FONT_SMALL_PX)}">'
-                f"{escape(head)}</span><br>{_frame_links((n.get('content') or '').strip())}"
+                f"{escape(head)}</span><br>{_note_body(n)}"
             )
             row = _ClickRow(html, n)
             row.clicked.connect(self._on_past_clicked)

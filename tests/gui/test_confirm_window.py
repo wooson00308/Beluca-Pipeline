@@ -108,7 +108,7 @@ def test_flip_diff_and_view_state_label(win: Any) -> None:
     assert win._hud.text().startswith("1 원본")
     win._show_buffer(KEY_CUR)
     win._toggle_diff()
-    assert win._diff and "차이 3−1" in win._state.text()
+    assert win._diff and "Difference 3−1" in win._state.text()
     win._set_gamma(2.2)
     assert "감마 2.20" in win._state.text() and win._btn_reset.isVisible()
     win._set_channel(CHANNEL_R)
@@ -411,7 +411,7 @@ def test_diff_keeps_shown_buffer_lit_and_marks_the_subtracted_one(win: Any) -> N
     win._toggle_diff()
     assert win._buf_btns[KEY_CUR].isChecked() and not win._buf_btns[KEY_ORG].isChecked()
     assert win._buf_marks[KEY_ORG] and not win._buf_marks.get(KEY_PREV)
-    assert win._btn_diff.text() == "차이 3−1"
+    assert win._btn_diff.text() == "Difference 3−1"
     win._toggle_diff()
     assert not win._buf_marks[KEY_ORG]
 
@@ -479,3 +479,51 @@ def test_warns_when_file_version_differs_from_shotgrid_latest(
     win.open_movie(movie, {"latest_version_code": "SHOT_A_comp_v002"})
     qtbot.waitUntil(lambda: win._count == 6 and len(win._bufs[KEY_CUR].frames) >= 6, timeout=30000)
     assert win._version_note == ""
+
+
+def test_busy_notice_shows_and_hides(win: Any) -> None:
+    assert not win._busy.isVisible()  # 그림이 올라온 뒤에는 감춰져 있다
+    win._set_busy("SHOT_A 여는 중…", "서버에서 영상 파일 찾는 중")
+    assert win._busy.isVisible() and "SHOT_A" in win._busy.text()
+    win._set_busy("")
+    assert not win._busy.isVisible()
+
+
+def test_picking_a_shot_reacts_at_once(win: Any, monkeypatch: Any) -> None:
+    class _NoWorker:
+        def __init__(self, *_a: Any, **_k: Any) -> None:
+            self.finished = self.error = self
+
+        def connect(self, *_a: Any) -> None:
+            pass
+
+        def start(self) -> None:
+            pass
+
+        def isRunning(self) -> bool:  # noqa: N802
+            return False
+
+    monkeypatch.setattr("bpe.gui.confirm.confirm_window.ShotGridWorker", _NoWorker)
+    win._toggle_drawer()
+    assert win._drawer.isVisible()
+    win._open_task({"task_id": 7, "shot_code": "S_0070", "project_code": "PROJ"})
+    # 영상을 찾기도 전에: 서랍이 닫히고, 위 막대가 바뀌고, 가운데에 진행 알림이 뜬다
+    assert not win._drawer.isVisible() and not win._scrim.isVisible()
+    assert win._busy.isVisible() and "S_0070" in win._busy.text()
+    assert "S_0070" in win._crumb.text()
+    win._on_task_resolved("", win._load_token, {"shot_code": "S_0070"})
+    assert "찾지 못했습니다" in win._busy.text()
+
+
+def test_empty_labels_are_hidden_before_any_movie(qtbot: Any, tmp_app_dir: Path, qapp: Any) -> None:
+    _ = (tmp_app_dir, qapp)
+    try:
+        w = ConfirmWindow()
+    except Exception as exc:  # pragma: no cover - GL 없는 환경
+        pytest.skip(str(exc))
+    qtbot.addWidget(w)
+    w.show()
+    qtbot.waitExposed(w)
+    assert not w._hud.isVisible() and not w._state.isVisible()
+    assert not w._btn_reset.isVisible() and not w._busy.isVisible()
+    w.close()

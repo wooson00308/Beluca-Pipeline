@@ -69,3 +69,30 @@ def test_summary_is_empty_before_first_load(qtbot: Any, tmp_app_dir: Path) -> No
     d = ShotDrawer()
     qtbot.addWidget(d)
     assert d.summary() == ""
+
+
+def test_rows_show_thumbnails_as_they_arrive(drawer: Any, qapp: Any) -> None:
+    from PySide6.QtCore import QBuffer, QIODevice
+    from PySide6.QtGui import QColor, QPixmap
+
+    _ = qapp
+    pm = QPixmap(160, 90)
+    pm.fill(QColor("#336699"))
+    buf = QBuffer()
+    buf.open(QIODevice.OpenModeFlag.WriteOnly)
+    pm.save(buf, "PNG")
+    row = drawer.shown_rows()[0]
+    key = drawer._thumb_key(row)
+    assert key in drawer._thumb_labels and key not in drawer._thumbs
+    drawer._on_thumb(key, bytes(buf.data()))
+    assert key in drawer._thumbs and key not in drawer._thumb_labels
+    assert (drawer._thumbs[key].width(), drawer._thumbs[key].height()) == (80, 45)
+    drawer._on_thumb(("nope", None), b"not an image")  # 깨진 그림은 조용히 버린다
+    drawer._refill()  # 다시 그려도 받은 그림은 그대로 쓴다
+    assert key in drawer._thumbs and key not in drawer._thumb_labels
+
+
+def test_no_thumbnail_download_without_an_address(drawer: Any) -> None:
+    assert drawer._thumb_workers == []  # 시험 줄에는 그림 주소가 없다 — 내려받기를 시작하지 않는다
+    assert drawer._thumb_url({"latest_version_image": "a", "shot_image": "b"}) == "a"
+    assert drawer._thumb_url({"shot_image": "b"}) == "b"

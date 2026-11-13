@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import queue
 from html import escape
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtCore import QRect, QSize, Qt, Signal
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -31,12 +33,15 @@ from bpe.core.confirm_list import (
 from bpe.core.logging import get_logger
 from bpe.core.settings import get_confirm_settings, save_confirm_settings
 from bpe.gui.confirm import style
+from bpe.gui.workers.confirm_thumb_worker import ThumbFetchWorker
 from bpe.gui.workers.sg_worker import ShotGridWorker
 
 logger = get_logger("gui.confirm.shot_drawer")
 
 DRAWER_WIDTH = 330
-_ROW_H = 46
+_THUMB_W, _THUMB_H = 80, 45
+_ROW_H = _THUMB_H + 12
+_THUMB_THREADS = 4
 _ROLE = Qt.ItemDataRole.UserRole
 _ALL_VENDORS = "업체 전체"
 _PICK_PROJECT = "프로젝트 고르기"
@@ -69,6 +74,11 @@ class ShotDrawer(QWidget):
         self._shown: List[Dict[str, Any]] = []
         self._loaded = False
         self._projects_asked = False
+        self._thumbs: Dict[Any, QPixmap] = {}
+        self._thumb_labels: Dict[Any, QLabel] = {}
+        self._thumb_jobs: "queue.Queue[Tuple[Any, str]]" = queue.Queue()
+        self._thumb_workers: List[ThumbFetchWorker] = []
+        self._thumb_asked: set = set()
         self._current_task: Any = None
         self._req = 0
         self._closed = False
@@ -235,6 +245,7 @@ class ShotDrawer(QWidget):
     def set_rows(self, rows: List[Dict[str, Any]]) -> None:
         self._rows = list(rows)
         self._loaded = True
+        self._thumb_asked = set(self._thumbs)
         self._vendor.blockSignals(True)
         self._vendor.clear()
         self._vendor.addItem(_ALL_VENDORS, "")
@@ -289,31 +300,104 @@ class ShotDrawer(QWidget):
             f'<span style="color:{style.DIM}">{escape(row_subtitle(r))}</span>'
         )
 
+    @staticmethod
+    def _thumb_key(r: Dict[str, Any]) -> Any:
+        """썸네일을 기억하는 열쇠 — 버전이 바뀌면 새 그림을 받는다."""
+        return (r.get("task_id"), r.get("latest_version_id"))
+
+    @staticmethod
+    def _thumb_url(r: Dict[str, Any]) -> str:
+        url = r.get("latest_version_image") or r.get("shot_image") or ""
+        return url if isinstance(url, str) else ""
+
+    def _make_row(self, r: Dict[str, Any]) -> QWidget:
+        current = self._is_current(r)
+        row = QWidget()
+        row.setObjectName("drawer_row")
+        row.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        row.setStyleSheet(
+            f"QWidget#drawer_row {{ border-left: 2px solid "
+            f"{style.ACCENT if current else 'transparent'}; "
+            f"background: {style.RAISED if current else 'transparent'}; }}"
+        )
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(6, 6, 8, 6)
+        lay.setSpacing(10)
+        thumb = QLabel()
+        thumb.setFixedSize(_THUMB_W, _THUMB_H)
+        thumb.setStyleSheet(f"background: {style.FIELD}; border: 1px solid {style.EDGE};")
+        key = self._thumb_key(r)
+        if key in self._thumbs:
+            thumb.setPixmap(self._thumbs[key])
+        else:
+            self._thumb_labels[key] = thumb
+        lay.addWidget(thumb)
+        text = QLabel(self._row_html(r))
+        text.setTextFormat(Qt.TextFormat.RichText)
+        text.setIndent(0)
+        lay.addWidget(text, 1)
+        return row
+
     def _refill(self) -> None:
         vendor = str(self._vendor.currentData() or "") if self._group == GROUPS[0] else ""
         rows = filter_rows(self._rows, self._group, vendor=vendor, search=self._search.text())
         self._shown = sort_rows(rows, self._sort)
         self._list.clear()
+        self._thumb_labels = {}
         for r in self._shown:
             item = QListWidgetItem()
             item.setData(_ROLE, r)
             item.setSizeHint(QSize(0, _ROW_H))
             self._list.addItem(item)
-            label = QLabel(self._row_html(r))
-            label.setTextFormat(Qt.TextFormat.RichText)
-            label.setIndent(0)
-            label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-            current = self._is_current(r)
-            label.setStyleSheet(
-                f"padding: 4px 8px 4px 6px; "
-                f"border-left: 2px solid {style.ACCENT if current else 'transparent'}; "
-                f"background: {style.RAISED if current else 'transparent'};"
-            )
-            self._list.setItemWidget(item, label)
+            self._list.setItemWidget(item, self._make_row(r))
         if self._loaded:
             self._count.setText(f"{len(self._shown)}컷")
             self._say("" if self._shown else "이 갈래에는 확인 대기 샷이 없습니다")
+        self._fetch_thumbs()
         self.rows_changed.emit()
+
+    # ── 썸네일 ───────────────────────────────────────────────────
+
+    def _fetch_thumbs(self) -> None:
+        """보이는 줄 중 아직 그림이 없는 것을 줄 세워 받는다(한 번 청한 것은 다시 안 청한다)."""
+        added = False
+        for r in self._shown:
+            key, url = self._thumb_key(r), self._thumb_url(r)
+            if not url or key in self._thumbs or key in self._thumb_asked:
+                continue
+            self._thumb_asked.add(key)
+            self._thumb_jobs.put((key, url))
+            added = True
+        if not added or self._closed:
+            return
+        self._thumb_workers = [w for w in self._thumb_workers if w.isRunning()]
+        while len(self._thumb_workers) < _THUMB_THREADS:
+            w = ThumbFetchWorker(self._thumb_jobs)
+            w.thumb_ready.connect(self._on_thumb)
+            w.start()
+            self._thumb_workers.append(w)
+
+    def _on_thumb(self, key: object, data: object) -> None:
+        if self._closed or not isinstance(data, bytes):
+            return
+        pm = QPixmap()
+        if not pm.loadFromData(data):
+            return
+        scaled = pm.scaled(
+            _THUMB_W,
+            _THUMB_H,
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        x = max(0, (scaled.width() - _THUMB_W) // 2)
+        y = max(0, (scaled.height() - _THUMB_H) // 2)
+        self._thumbs[key] = scaled.copy(QRect(x, y, _THUMB_W, _THUMB_H))
+        label = self._thumb_labels.pop(key, None)
+        if label is not None:
+            try:
+                label.setPixmap(self._thumbs[key])
+            except RuntimeError:  # 목록이 다시 그려져 그 줄이 사라진 경우
+                pass
 
     def _on_clicked(self, item: QListWidgetItem) -> None:
         row = item.data(_ROLE)
@@ -322,6 +406,11 @@ class ShotDrawer(QWidget):
 
     def shutdown(self) -> None:
         self._closed = True
+        for t in self._thumb_workers:
+            t.stop()
+        for t in self._thumb_workers:
+            t.wait(3000)
+        self._thumb_workers = []
         for w in self._workers:
             try:
                 if w.isRunning():

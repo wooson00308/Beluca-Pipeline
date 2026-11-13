@@ -11,6 +11,7 @@ import os
 import struct
 import sys
 import tempfile
+import time
 from html import escape
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -47,6 +48,7 @@ from bpe.core.confirm_checks import (
     STATE_FAIL,
     STATE_PASS,
     CheckResult,
+    basis_text,
     check_work_against_reference,
     failure_lines,
     has_failure,
@@ -54,6 +56,12 @@ from bpe.core.confirm_checks import (
 from bpe.core.confirm_decode import fit_decode_size, frame_byte_size
 from bpe.core.confirm_media import find_shot_media, parse_version
 from bpe.core.confirm_probe import VideoInfo, codec_label, probe_video
+from bpe.core.confirm_standard import (
+    ProjectStandard,
+    load_standard,
+    preset_names_for,
+    read_presets,
+)
 from bpe.core.confirm_view_math import (
     CHANNEL_B,
     CHANNEL_G,
@@ -132,7 +140,7 @@ _SHORTCUTS: Tuple[Tuple[str, Tuple[Tuple[Tuple[str, ...], str], ...]], ...] = (
         "보기",
         (
             (("1", "2", "3", "4"), "원본 / 전 버전 / 지금 / 편집본"),
-            (("D",), "차이 보기 (지금 보는 판 − 직전에 본 판)"),
+            (("D",), "Difference (지금 보는 판 − 직전에 본 판)"),
             (("R", "G", "B", "A"), "채널 / 밝기만 — 한 번 더 누르면 RGB"),
             (("L",), "룩업 켜고 끄기"),
             (("F", "H"), "화면 맞춤 / 꽉 채움"),
@@ -281,6 +289,10 @@ class ConfirmWindow(QWidget):
         self._last_status_code = ""
         self._submit_busy = False
         self._version_note = ""
+        self._open_started = 0.0
+        self._standard: Optional[ProjectStandard] = None
+        self._preset_names: List[str] = []
+        self._basis = ""
         self._play_timer = QTimer(self)
         self._play_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._play_timer.timeout.connect(self._on_play_tick)
@@ -361,6 +373,7 @@ class ConfirmWindow(QWidget):
         self._drawer.rows_changed.connect(self._sync_header)
         self._drawer.hide()
         self._panel.past_frame_clicked.connect(self._on_past_frame)
+        self._panel.preset_picked.connect(self._on_preset_picked)
         self._view.view_changed.connect(self._sync_fit)
         for lbl in self.findChildren(QLabel):
             lbl.setIndent(0)  # 테두리 있는 글 칸이 스스로 넣는 들여쓰기를 없애 줄을 맞춘다
@@ -446,8 +459,10 @@ class ConfirmWindow(QWidget):
             seg.addWidget(b)
         style.make_segments(list(self._buf_btns.values()))
         pick.addLayout(seg)
-        self._btn_diff = _btn("차이", checkable=True, tip="지금 보는 판 − 직전에 본 판 (D)")
-        self._btn_diff.setMinimumWidth(84)
+        self._btn_diff = _btn(
+            "Difference", checkable=True, tip="Difference: 지금 보는 판 − 직전에 본 판 (D)"
+        )
+        self._btn_diff.setMinimumWidth(122)
         style.set_icon(self._btn_diff, "diff", size=14)
         self._btn_diff.setStyleSheet(style.warn_toggle_style())
         self._btn_diff.clicked.connect(self._toggle_diff)
@@ -547,6 +562,7 @@ class ConfirmWindow(QWidget):
         self._btn_reset = _btn("보기 원래대로")
         self._btn_reset.setStyleSheet(style.warn_button_style())
         self._btn_reset.clicked.connect(self._reset_view)
+        self._btn_reset.hide()
         look.addWidget(self._btn_reset)
         look.addStretch(1)
         grid.addLayout(look, 1, 1)
@@ -574,6 +590,13 @@ class ConfirmWindow(QWidget):
         )
         self._banner.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._banner.hide()
+        self._hud.hide()  # 글이 생길 때만 보인다(빈 검은 칸이 뜨지 않게)
+        self._state.hide()
+        self._busy = QLabel("", self._view)
+        self._busy.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._busy.setTextFormat(Qt.TextFormat.RichText)
+        self._busy.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._busy.hide()
         self._help = QLabel(self._help_text(), self._view)
         self._help.setStyleSheet(
             f"background: {style.PANEL}; color: {style.TEXT}; padding: 12px 16px; "
@@ -765,19 +788,35 @@ class ConfirmWindow(QWidget):
             buf.full, buf.lut_baked, buf.version_label, buf.error = False, False, "", ""
         self._index, self._count = 0, 0
         self._checks = []
+        self._standard, self._preset_names, self._basis = None, [], ""
         self._shown, self._last_shown, self._diff = KEY_CUR, KEY_ORG, False
         self._layer.set_doc(AnnotationDoc())
         self._layer.set_ghosts([])
         self._timeline.set_range(self._frame_start, 0)
         self._panel.set_result("", True)
         self._panel.set_checks([])
+        self._panel.set_standard("", "", [], "")
         self._panel.set_past_notes([])
-        self._hud.setText(f"{Path(movie).name}  재료 찾는 중…")
+        self._hud.setText(Path(movie).stem)
         self._hud.adjustSize()
+        self._hud.show()
+        self._set_busy(f"{Path(movie).stem} 여는 중…", "원본 · 전 버전 · 편집본 찾는 중")
+        if self._open_started <= 0:
+            self._open_started = time.perf_counter()
+        logger.info("confirm open: movie resolved +%.2fs", time.perf_counter() - self._open_started)
         self._sync_all()
+
+        project = self._project_key()
+        picked = dict(get_confirm_settings()["presets"])
 
         def _prepare() -> Dict[str, Any]:
             media = find_shot_media(Path(movie))
+            # 검사 기준: 이 프로젝트의 프리셋(여러 개면 전에 고른 것, 없으면 첫째)
+            names = preset_names_for(read_presets(), project, Path(movie).parts)
+            name = picked.get(names[0], "") if names else ""
+            if name not in names:
+                name = names[0] if names else ""
+            standard = load_standard(name) if name else None
             paths = {
                 KEY_CUR: media.current.path if media.current else None,
                 KEY_PREV: media.previous.path if media.previous else None,
@@ -785,7 +824,13 @@ class ConfirmWindow(QWidget):
                 KEY_EDIT: media.edit,
             }
             infos = {k: (probe_video(str(p)) if p else None) for k, p in paths.items()}
-            return {"media": media, "paths": paths, "infos": infos}
+            return {
+                "media": media,
+                "paths": paths,
+                "infos": infos,
+                "standard": standard,
+                "preset_names": names,
+            }
 
         w = ShotGridWorker(_prepare)
         w.finished.connect(lambda r, t=token: self._on_prepared(r, t))
@@ -796,8 +841,7 @@ class ConfirmWindow(QWidget):
     def _on_prepare_failed(self, msg: str, token: int) -> None:
         if token != self._load_token or self._closed:
             return
-        self._hud.setText(f"영상을 열지 못했습니다: {msg}")
-        self._hud.adjustSize()
+        self._set_busy("영상을 열지 못했습니다", msg, error=True)
 
     def _on_prepared(self, result: object, token: int) -> None:
         if token != self._load_token or self._closed or not isinstance(result, dict):
@@ -807,8 +851,7 @@ class ConfirmWindow(QWidget):
         infos: Dict[str, Optional[VideoInfo]] = result["infos"]
         cur_info = infos.get(KEY_CUR)
         if cur_info is None:
-            self._hud.setText(f"{Path(self._movie).name}  영상 규격을 읽지 못했습니다")
-            self._hud.adjustSize()
+            self._set_busy("영상 규격을 읽지 못했습니다", Path(self._movie).name, error=True)
             return
         self._shot_root = media.shot_root
         cur_size = fit_decode_size(cur_info.width, cur_info.height, _MAX_W, _MAX_H)
@@ -843,14 +886,10 @@ class ConfirmWindow(QWidget):
             )
             self._panel.set_result(self._version_note, False)
 
-        ref_key = KEY_EDIT if self._bufs[KEY_EDIT].info else KEY_ORG
-        self._checks = check_work_against_reference(
-            cur_info,
-            self._bufs[ref_key].info,
-            self._bufs[ref_key].title,
-            compare_resolution=ref_key == KEY_EDIT,
-        )
-        self._panel.set_checks(self._checks)
+        standard = result.get("standard")
+        self._standard = standard if isinstance(standard, ProjectStandard) else None
+        self._preset_names = list(result.get("preset_names") or [])
+        self._run_checks()
         self._timeline.set_range(self._frame_start, self._count)
         self._last_shown = KEY_ORG if self._bufs[KEY_ORG].available else KEY_PREV
         self._load_draft()
@@ -859,9 +898,67 @@ class ConfirmWindow(QWidget):
         self._decode_queue = [
             k for k in _DECODE_ORDER if self._bufs[k].available and self._bufs[k].full
         ]
+        self._set_busy(f"{Path(self._movie).stem} 올리는 중…", f"0 / {self._count} 프레임")
+        logger.info("confirm open: media ready +%.2fs", time.perf_counter() - self._open_started)
         self._start_next_decode()
         self._sync_all()
         self._load_sg_context()
+
+    # ── 검사 기준(프리셋) ────────────────────────────────────────
+
+    def _run_checks(self) -> None:
+        """프리셋(있으면)과 편집본·원본을 기준으로 지금 버전을 판정하고 패널에 알린다."""
+        ref_key = KEY_EDIT if self._bufs[KEY_EDIT].info else KEY_ORG
+        ref = self._bufs[ref_key]
+        self._checks = check_work_against_reference(
+            self._bufs[KEY_CUR].info,
+            ref.info,
+            ref.title,
+            compare_resolution=ref_key == KEY_EDIT,
+            standard=self._standard,
+        )
+        self._basis = basis_text(ref.title, ref.info is not None, self._standard)
+        self._panel.set_checks(self._checks)
+        s = self._standard
+        if s is None:
+            look = ""
+        elif s.look:
+            look = f"{s.look} 입혀진 MOV — 룩업 안 씌움"
+        elif s.viewer:
+            look = f"MOV 에 룩 없음 · 프리셋 뷰어 {s.viewer} — 룩업 파일을 골라 주세요"
+        else:
+            look = ""
+        self._panel.set_standard(
+            self._basis if s is not None else f"프리셋 없음 · {self._basis}",
+            look,
+            self._preset_names,
+            s.preset if s is not None else "",
+        )
+
+    def _look_baked(self, buf: _Buffer) -> bool:
+        """이 판에 룩이 이미 입혀져 있나 — 파일 이름(_lut) 또는 프리셋이 그렇게 내보내는 작업본."""
+        by_preset = bool(self._standard and self._standard.look)
+        return buf.lut_baked or (by_preset and buf.key in (KEY_CUR, KEY_PREV))
+
+    def _on_preset_picked(self, name: str) -> None:
+        if not self._preset_names or name not in self._preset_names:
+            return
+        picked = dict(get_confirm_settings()["presets"])
+        picked[self._preset_names[0]] = name
+        save_confirm_settings({"presets": picked})
+        token = self._load_token
+        w = ShotGridWorker(lambda: load_standard(name))
+        w.finished.connect(lambda r, t=token: self._on_standard_loaded(r, t))
+        w.error.connect(lambda e: logger.warning("confirm: preset load failed: %s", e))
+        w.start()
+        self._workers.append(w)
+
+    def _on_standard_loaded(self, result: object, token: int) -> None:
+        if token != self._load_token or self._closed:
+            return
+        self._standard = result if isinstance(result, ProjectStandard) else None
+        self._run_checks()
+        self._sync_all()
 
     # ── 목록에서 열기 ────────────────────────────────────────────
 
@@ -884,10 +981,18 @@ class ConfirmWindow(QWidget):
         )
 
     def _open_task(self, task: Dict[str, Any]) -> None:
-        """목록에서 고른 샷 — 서버에서 작업본 영상을 찾아 연다."""
+        """목록에서 고른 샷 — 바로 반응을 보이고, 서버에서 작업본 영상을 찾아 연다."""
         row = dict(task)
-        self._hud.setText(f"{row.get('shot_code') or ''}  영상 찾는 중…")
-        self._hud.adjustSize()
+        shot = str(row.get("shot_code") or "")
+        if self._drawer.isVisible():
+            self._toggle_drawer()
+        self._pause()
+        self._task = row  # 위 막대가 바로 고른 샷으로 바뀐다
+        self._shot_root = None
+        self._drawer.set_current_task(row.get("task_id"))
+        self._sync_header()
+        self._set_busy(f"{shot} 여는 중…", "서버에서 영상 파일 찾는 중")
+        self._open_started = time.perf_counter()
         self._load_token += 1
         token = self._load_token
 
@@ -923,11 +1028,13 @@ class ConfirmWindow(QWidget):
         if token != self._load_token or self._closed:
             return
         if not isinstance(result, str) or not result:
-            self._hud.setText(f"{task.get('shot_code') or ''}  영상 파일을 찾지 못했습니다")
-            self._hud.adjustSize()
+            ver = str(task.get("latest_version_code") or task.get("shot_code") or "")
+            self._set_busy(
+                "영상 파일을 찾지 못했습니다",
+                f"{ver} — 서버에 MOV 가 아직 없거나 폴더 모양이 다릅니다",
+                error=True,
+            )
             return
-        if self._drawer.isVisible():
-            self._toggle_drawer()
         self.open_movie(result, task)
 
     def _nav_shot(self, delta: int) -> None:
@@ -968,6 +1075,19 @@ class ConfirmWindow(QWidget):
                 buf.frames.pop(old, None)
         if key == KEY_CUR:
             self._timeline.add_cached(index)
+            if self._busy.isVisible():
+                if self._buffer_index(buf) in buf.frames:
+                    self._set_busy("")  # 지금 프레임이 올라왔다 — 그림이 보인다
+                    logger.info(
+                        "confirm open: first picture +%.2fs",
+                        time.perf_counter() - self._open_started,
+                    )
+                    self._open_started = 0.0
+                else:
+                    name = Path(self._movie).stem
+                    self._set_busy(
+                        f"{name} 올리는 중…", f"{len(buf.frames)} / {self._count} 프레임"
+                    )
         if index == self._buffer_index(buf) and key in (self._shown, self._diff_base()):
             self._refresh_view()
 
@@ -1056,7 +1176,7 @@ class ConfirmWindow(QWidget):
             if other is None or other_data is None:
                 self._diff_note = "비교할 판을 올리는 중"
             elif other.size != buf.size:
-                self._diff_note = "화면 크기가 달라 차이를 볼 수 없음"
+                self._diff_note = "화면 크기가 달라 Difference 를 볼 수 없음"
             else:
                 self._view.set_image(SLOT_B, other_data, other.size[0], other.size[1])
                 mode = VIEW_MODE_DIFF
@@ -1066,7 +1186,7 @@ class ConfirmWindow(QWidget):
             gamma=self._gamma_value(),
             mode=mode,
             channel=self._channel,
-            lut_on=self._lut_on and self._lut is not None and not buf.lut_baked,
+            lut_on=self._lut_on and self._lut is not None and not self._look_baked(buf),
         )
         self._layer.set_frame(self.frame_number())
         self._sync_labels()
@@ -1081,7 +1201,7 @@ class ConfirmWindow(QWidget):
 
     def _diff_label(self) -> str:
         a, b = self._bufs[self._shown].number, self._bufs[self._last_shown].number
-        return f"차이 {a}−{b}"
+        return f"Difference {a}−{b}"
 
     def _view_changes(self) -> List[str]:
         out: List[str] = []
@@ -1103,11 +1223,12 @@ class ConfirmWindow(QWidget):
             loading = "" if ready else "  올리는 중…"
             self._hud.setText(f"{buf.number} {buf.title}  {name}  {self.frame_number()}{loading}")
             self._hud.adjustSize()
+            self._hud.show()
         changes = self._view_changes()
         notes = list(changes)
         if self._diff_note:
             notes.append(self._diff_note)
-        if self._lut_on and buf.lut_baked:
+        if self._lut_on and self._look_baked(buf):
             notes.append("룩업이 이미 입혀진 파일 — 룩업 안 씌움")
         cur = self._bufs[KEY_CUR]
         if buf.key != KEY_CUR and buf.info and cur.info:
@@ -1125,14 +1246,21 @@ class ConfirmWindow(QWidget):
         self._sync_info()
 
     def _sync_info(self) -> None:
-        colors = {STATE_PASS: style.OK, STATE_FAIL: style.FAIL}
-        left = [
+        # 통과한 항목은 개수로 줄이고, 실패·모름만 글로 보여 준다(줄이 넘치지 않게)
+        colors = {STATE_FAIL: style.FAIL}
+        passed = sum(1 for r in self._checks if r.state == STATE_PASS)
+        left: List[str] = []
+        if passed:
+            left.append(
+                f'<span style="color:{style.OK}">검사 {passed}/{len(self._checks)} 통과</span>'
+            )
+        left += [
             f'<span style="color:{colors.get(r.state, style.DIM)}">{escape(r.message)}</span>'
             for r in self._checks
+            if r.state != STATE_PASS
         ]
         if self._checks:
-            ref = "편집본 기준" if self._bufs[KEY_EDIT].info else "원본 기준"
-            left.append(ref)
+            left.append(escape(self._basis))
         right: List[str] = []
         buf = self._bufs[self._shown]
         if buf.info:
@@ -1177,6 +1305,9 @@ class ConfirmWindow(QWidget):
         if self._shot_root is not None:
             proj = (t.get("project_code") or t.get("project_name") or "").strip()
             parts = [x for x in (proj, self._shot_root.parent.name, self._shot_root.name) if x]
+        elif (t.get("shot_code") or "").strip():  # 목록에서 막 고른 샷 — 아직 여는 중
+            proj = (t.get("project_code") or t.get("project_name") or "").strip()
+            parts = [x for x in (proj, str(t["shot_code"]).strip()) if x]
         elif cur.path is not None:
             parts = [cur.path.parent.name, cur.path.stem]
         if parts:
@@ -1259,8 +1390,36 @@ class ConfirmWindow(QWidget):
         self._help.move(
             max(0, (vw - self._help.width()) // 2), max(0, (vh - self._help.height()) // 2)
         )
-        for wdg in (self._hud, self._state, self._banner, self._pill, self._help):
+        self._busy.adjustSize()
+        self._busy.move(
+            max(0, (vw - self._busy.width()) // 2), max(0, (vh - self._busy.height()) // 2)
+        )
+        for wdg in (self._hud, self._state, self._banner, self._pill, self._busy, self._help):
             wdg.raise_()
+
+    def _set_busy(self, title: str, detail: str = "", *, error: bool = False) -> None:
+        """뷰어 한가운데의 진행 알림. 빈 글이면 감춘다."""
+        if not title:
+            self._busy.hide()
+            return
+        edge = style.FAIL if error else style.EDGE
+        self._busy.setStyleSheet(
+            f"background: {style.PANEL}; border: 1px solid {edge}; border-radius: 6px; "
+            f"padding: 14px 22px;"
+        )
+        color = style.FAIL if error else style.TEXT_STRONG
+        sub_line = (
+            f'<br><span style="color:{style.DIM}; font-size:{style.FONT_PX}px">'
+            f"{escape(detail)}</span>"
+            if detail
+            else ""
+        )
+        self._busy.setText(
+            f'<span style="color:{color}; font-size:{style.FONT_PX + 2}px; font-weight:bold">'
+            f"{escape(title)}</span>{sub_line}"
+        )
+        self._busy.show()
+        self._place_overlays()
 
     def _on_hover(self, x: int, y: int) -> None:
         if (x, y) != self._hover:
@@ -1514,7 +1673,10 @@ class ConfirmWindow(QWidget):
             if data is None:
                 continue
             img = self._view.render_frame_image(
-                data, cur.size[0], cur.size[1], lut_on=self._lut is not None and not cur.lut_baked
+                data,
+                cur.size[0],
+                cur.size[1],
+                lut_on=self._lut is not None and not self._look_baked(cur),
             )
             if img is None:
                 continue

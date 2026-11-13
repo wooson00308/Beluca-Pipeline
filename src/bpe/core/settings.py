@@ -260,6 +260,8 @@ def save_source_library_settings(
 _DEFAULT_CONFIRM: Dict[str, Any] = {
     # 프로젝트 코드 → 룩업(.cube) 파일 경로
     "luts": {},
+    # 프로젝트 → 검사 기준으로 고른 프리셋 이름(프리셋이 여러 개인 프로젝트)
+    "presets": {},
     # 프레임을 메모리에 올리는 한도(MB)
     "cache_mb": 4096,
     # 목록에서 마지막에 쓴 갈래·정렬
@@ -281,8 +283,9 @@ def get_confirm_settings(settings_file: Optional[Path] = None) -> Dict[str, Any]
     for k, v in stored.items():
         if k in merged:
             merged[k] = v
-    if not isinstance(merged.get("luts"), dict):
-        merged["luts"] = {}
+    for key in ("luts", "presets"):
+        if not isinstance(merged.get(key), dict):
+            merged[key] = {}
     try:
         merged["cache_mb"] = max(256, int(merged.get("cache_mb") or 0))
     except (TypeError, ValueError):
