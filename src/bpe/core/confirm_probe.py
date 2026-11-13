@@ -36,6 +36,33 @@ class VideoInfo(NamedTuple):
         return self.pix_fmt.lower().startswith(_ALPHA_PIX_FMT_PREFIXES)
 
 
+_CODEC_NAMES = {
+    "h264": "H.264",
+    "hevc": "H.265",
+    "dnxhd": "DNxHD",
+    "mjpeg": "MJPEG",
+    "mpeg4": "MPEG-4",
+}
+_PRORES_PROFILES = {
+    "proxy": "ProRes 422 Proxy",
+    "lt": "ProRes 422 LT",
+    "standard": "ProRes 422",
+    "hq": "ProRes 422 HQ",
+    "4444": "ProRes 4444",
+    "xq": "ProRes 4444 XQ",
+}
+
+
+def codec_label(info: VideoInfo) -> str:
+    """화면에 적을 코덱 이름 — ``prores`` + ``HQ`` → ``ProRes 422 HQ``."""
+    codec = (info.codec or "").strip()
+    profile = (info.profile or "").strip()
+    if codec.lower() == "prores":
+        return _PRORES_PROFILES.get(profile.lower(), f"ProRes {profile}".strip())
+    name = _CODEC_NAMES.get(codec.lower(), codec)
+    return " ".join(x for x in (name, profile) if x)
+
+
 def parse_rate(text: Any) -> Optional[float]:
     """``"24000/1001"`` / ``"24"`` → float. 못 읽으면 ``None``."""
     s = str(text or "").strip()

@@ -458,6 +458,9 @@ class ConfirmGLView(QOpenGLWidget):
         self.makeCurrent()
         try:
             f = self.context().functions()
+            if self._pending_lut is not None:  # 방금 고른 룩업이 아직 화면에 안 그려졌어도 쓴다
+                self._renderer.set_lut(self._pending_lut[0])
+                self._pending_lut = None
             if not self._renderer.set_image(SLOT_A, data, width, height):
                 return None
             fbo = QOpenGLFramebufferObject(QSize(width, height))

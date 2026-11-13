@@ -133,6 +133,7 @@ hiddenimports = [
     "bpe.gui.confirm.timeline",
     "bpe.gui.confirm.launch",
     "bpe.gui.confirm.style",
+    "bpe.gui.confirm.parts",
     "bpe.gui.confirm.shot_drawer",
     "bpe.gui.workers.confirm_decode_worker",
     "bpe.gui.workers.confirm_stream_worker",

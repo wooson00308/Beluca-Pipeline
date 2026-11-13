@@ -10,17 +10,18 @@ from PySide6.QtWidgets import QWidget
 
 from bpe.gui.confirm import style
 
-_MARGIN = 26
+_MARGIN = 10
+_FLAG_W = 42
+_MARK_R = 4
 _HEIGHT = 46
 _BASE_Y = 30
 _LABEL_MIN_GAP = 46
 _TICK_STEPS = (1, 2, 5, 10, 20, 25, 50, 100, 200, 500, 1000)
-_MONO_FAMILIES = ["Consolas", "Cascadia Mono", "D2Coding"]
 
 
 def _mono_font(px: int, bold: bool = False) -> QFont:
     f = QFont()
-    f.setFamilies(_MONO_FAMILIES)
+    f.setFamilies(list(style.MONO_FAMILIES))
     f.setStyleHint(QFont.StyleHint.Monospace)
     f.setPixelSize(px)
     f.setBold(bold)
@@ -99,11 +100,15 @@ class ConfirmTimeline(QWidget):
         per = (self.width() - 2 * _MARGIN) / self._count
 
         p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(style.CURRENT_CELL))
+        p.drawRect(QRectF(_MARGIN + per * self._current, 2, max(per, 2.0), _HEIGHT - 2))
+        p.setBrush(QColor(style.CELL_EDGE))
+        p.drawRect(QRectF(_MARGIN, 0, self.width() - 2 * _MARGIN, 2))
         p.setBrush(QColor(style.CACHE))
         for i in self._cached:
             p.drawRect(QRectF(_MARGIN + per * i, 0, per + 0.6, 2))
 
-        dim = QColor("#5b5b5b")
+        dim = QColor(style.TICK)
         p.setPen(QPen(dim, 1))
         p.drawLine(QPointF(_MARGIN, _BASE_Y), QPointF(self.width() - _MARGIN, _BASE_Y))
         step = self._label_step()
@@ -126,7 +131,8 @@ class ConfirmTimeline(QWidget):
         accent = QColor(style.ACCENT)
         p.setPen(QPen(accent, 2))
         p.drawLine(QPointF(x, 6), QPointF(x, _BASE_Y + 1))
-        flag = QRectF(x - 21, 5, 42, 14)
+        flag_x = max(0.0, min(self.width() - _FLAG_W, x - _FLAG_W / 2))
+        flag = QRectF(flag_x, 5, _FLAG_W, 14)
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(accent)
         p.drawRect(flag)
@@ -134,7 +140,7 @@ class ConfirmTimeline(QWidget):
         p.setPen(QColor(style.ON_ACCENT))
         p.drawText(flag, Qt.AlignmentFlag.AlignCenter, str(self._start + self._current))
 
-        p.setPen(QPen(QColor("#000000"), 1))
+        p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QColor(style.MARK))
         for frame in self._marks:
             i = frame - self._start
@@ -143,10 +149,10 @@ class ConfirmTimeline(QWidget):
                 p.drawPolygon(
                     QPolygonF(
                         [
-                            QPointF(mx, _BASE_Y - 11),
-                            QPointF(mx + 5, _BASE_Y - 6),
-                            QPointF(mx, _BASE_Y - 1),
-                            QPointF(mx - 5, _BASE_Y - 6),
+                            QPointF(mx, _BASE_Y - 5 - _MARK_R),
+                            QPointF(mx + _MARK_R, _BASE_Y - 5),
+                            QPointF(mx, _BASE_Y - 5 + _MARK_R),
+                            QPointF(mx - _MARK_R, _BASE_Y - 5),
                         ]
                     )
                 )

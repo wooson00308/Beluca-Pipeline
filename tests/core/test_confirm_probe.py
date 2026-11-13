@@ -95,3 +95,18 @@ def test_probe_success_parses_stdout(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     info = probe_video(str(tmp_path / "a.mov"), ffprobe="ffprobe")
     assert info is not None and info.frame_count == 74
     assert seen["cmd"][0] == "ffprobe" and seen["cmd"][-1].endswith("a.mov")
+
+
+def test_codec_label_reads_like_a_person_would_say_it() -> None:
+    from bpe.core.confirm_probe import VideoInfo, codec_label
+
+    def info(codec: str, profile: str) -> VideoInfo:
+        return VideoInfo(1920, 1080, 24.0, 10, codec, profile, "yuv422p10le", "", "")
+
+    assert codec_label(info("prores", "HQ")) == "ProRes 422 HQ"
+    assert codec_label(info("prores", "Standard")) == "ProRes 422"
+    assert codec_label(info("prores", "4444")) == "ProRes 4444"
+    assert codec_label(info("prores", "")) == "ProRes"
+    assert codec_label(info("h264", "High")) == "H.264 High"
+    assert codec_label(info("dnxhd", "")) == "DNxHD"
+    assert codec_label(info("", "")) == ""

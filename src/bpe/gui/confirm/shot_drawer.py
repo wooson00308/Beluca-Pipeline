@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -34,10 +35,17 @@ from bpe.gui.workers.sg_worker import ShotGridWorker
 
 logger = get_logger("gui.confirm.shot_drawer")
 
-DRAWER_WIDTH = 340
-_ROW_H = 44
+DRAWER_WIDTH = 330
+_ROW_H = 46
 _ROLE = Qt.ItemDataRole.UserRole
 _ALL_VENDORS = "업체 전체"
+
+
+def _band(name: str, bg: str) -> QFrame:
+    f = QFrame()
+    f.setObjectName(name)
+    f.setStyleSheet(f"QFrame#{name} {{ background: {bg}; border-bottom: 1px solid {style.EDGE}; }}")
+    return f
 
 
 class ShotDrawer(QWidget):
@@ -53,7 +61,7 @@ class ShotDrawer(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setStyleSheet(
             f"QWidget#confirm_drawer {{ background: {style.PANEL}; "
-            f"border-right: 1px solid {style.EDGE}; }}"
+            f"border-right: 1px solid #000000; }}"
         )
         self._workers: List[Any] = []
         self._rows: List[Dict[str, Any]] = []
@@ -71,26 +79,11 @@ class ShotDrawer(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 1, 0)
         outer.setSpacing(0)
-        head = QLabel("샷 목록")
-        head.setStyleSheet(style.section_header_style())
-        outer.addWidget(head)
 
-        col = QVBoxLayout()
-        col.setContentsMargins(10, 8, 10, 8)
-        col.setSpacing(6)
-
-        row = QHBoxLayout()
-        row.setSpacing(6)
-        self._project = QComboBox()
-        self._project.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
-        self._project.currentIndexChanged.connect(self._reload)
-        row.addWidget(self._project, 1)
-        self._refresh = QPushButton("조회")
-        self._refresh.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._refresh.clicked.connect(self._reload)
-        row.addWidget(self._refresh)
-        col.addLayout(row)
-
+        head = _band("drawer_head", style.HEADER)
+        hrow = QHBoxLayout(head)
+        hrow.setContentsMargins(8, 6, 8, 6)
+        hrow.setSpacing(8)
         groups = QHBoxLayout()
         groups.setSpacing(0)
         self._group_btns: Dict[str, QPushButton] = {}
@@ -101,46 +94,78 @@ class ShotDrawer(QWidget):
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.clicked.connect(lambda _c=False, name=g: self._set_group(name))
             self._group_btns[g] = b
-            groups.addWidget(b, 1)
+            groups.addWidget(b)
         style.make_segments(list(self._group_btns.values()))
-        col.addLayout(groups)
+        for b in self._group_btns.values():
+            b.setStyleSheet(b.styleSheet() + "QPushButton { padding: 0px 12px; }")
+        hrow.addLayout(groups)
+        hrow.addStretch(1)
+        self._count = QLabel("")
+        self._count.setStyleSheet(f"color: {style.DIM};")
+        hrow.addWidget(self._count)
+        outer.addWidget(head)
 
+        proj = _band("drawer_project", style.PANEL)
+        prow = QHBoxLayout(proj)
+        prow.setContentsMargins(8, 6, 8, 6)
+        prow.setSpacing(6)
+        self._project = QComboBox()
+        self._project.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        self._project.currentIndexChanged.connect(self._reload)
+        prow.addWidget(self._project, 1)
+        self._refresh = QPushButton("조회")
+        self._refresh.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._refresh.clicked.connect(self._reload)
+        prow.addWidget(self._refresh)
+        outer.addWidget(proj)
+
+        filt = _band("drawer_filter", style.PANEL)
+        frow = QHBoxLayout(filt)
+        frow.setContentsMargins(8, 6, 8, 6)
+        frow.setSpacing(6)
         self._search = QLineEdit()
-        self._search.setPlaceholderText("샷 이름 · 작업자 찾기")
+        self._search.setPlaceholderText("찾기")
+        self._search.setToolTip("샷 이름이나 작업자 찾기")
         self._search.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self._search.textChanged.connect(self._refill)
-        col.addWidget(self._search)
-
-        row2 = QHBoxLayout()
-        row2.setSpacing(6)
+        frow.addWidget(self._search, 2)
         self._vendor = QComboBox()
         self._vendor.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._vendor.currentIndexChanged.connect(self._refill)
-        row2.addWidget(self._vendor, 1)
+        frow.addWidget(self._vendor, 2)
         self._sort_box = QComboBox()
         self._sort_box.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._sort_box.addItems(list(SORTS))
         self._sort_box.setCurrentText(self._sort)
         self._sort_box.currentTextChanged.connect(self._set_sort)
-        row2.addWidget(self._sort_box, 1)
-        col.addLayout(row2)
+        frow.addWidget(self._sort_box, 2)
+        outer.addWidget(filt)
 
-        self._count = QLabel("")
-        self._count.setStyleSheet(f"color: {style.DIM}; font-size: {style.FONT_SMALL_PX}px;")
-        col.addWidget(self._count)
-        outer.addLayout(col)
+        self._note = QLabel("")
+        self._note.setWordWrap(True)
+        self._note.setStyleSheet(
+            f"color: {style.DIM}; padding: 8px 10px; border-bottom: 1px solid {style.EDGE};"
+        )
+        self._note.hide()
+        outer.addWidget(self._note)
 
         self._list = QListWidget()
         self._list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._list.setStyleSheet(
-            f"QListWidget {{ border: none; border-top: 1px solid {style.EDGE}; "
-            f"border-radius: 0px; background: {style.BG}; }}"
-            f"QListWidget::item {{ padding: 0px; border-bottom: 1px solid {style.EDGE}; }}"
-            f"QListWidget::item:hover {{ background: {style.PANEL}; }}"
+            f"QListWidget {{ border: none; border-radius: 0px; padding: 0px; "
+            f"background: {style.PANEL}; }}"
+            f"QListWidget::item {{ padding: 0px; margin: 0px; border: none; border-radius: 0px; "
+            f"border-bottom: 1px solid {style.EDGE}; }}"
+            f"QListWidget::item:hover {{ background: {style.HEADER}; }}"
+            f"QListWidget::item:selected {{ background: transparent; }}"
         )
         self._list.itemClicked.connect(self._on_clicked)
         outer.addWidget(self._list, 1)
         self._sync_groups()
+
+    def _say(self, text: str) -> None:
+        self._note.setText(text)
+        self._note.setVisible(bool(text))
 
     # ── 조회 ────────────────────────────────────────────────────
 
@@ -148,7 +173,7 @@ class ShotDrawer(QWidget):
         """서랍을 처음 열 때 프로젝트 목록을 읽는다."""
         if self._project.count():
             return
-        self._count.setText("프로젝트 읽는 중…")
+        self._say("프로젝트 읽는 중…")
 
         def _fetch() -> List[Dict[str, Any]]:
             from bpe.shotgrid.client import get_default_sg
@@ -158,7 +183,7 @@ class ShotDrawer(QWidget):
 
         w = ShotGridWorker(_fetch)
         w.finished.connect(self._on_projects)
-        w.error.connect(lambda e: self._count.setText(f"프로젝트를 읽지 못했습니다: {e}"))
+        w.error.connect(lambda e: self._say(f"프로젝트를 읽지 못했습니다: {e}"))
         w.start()
         self._workers.append(w)
 
@@ -172,7 +197,7 @@ class ShotDrawer(QWidget):
             label = str(p.get("code") or p.get("name") or p.get("id"))
             self._project.addItem(label, p.get("id"))
         self._project.blockSignals(False)
-        self._count.setText("프로젝트를 고르세요")
+        self._say("프로젝트를 고르면 확인 대기 샷이 나옵니다")
 
     def _reload(self) -> None:
         pid = self._project.currentData()
@@ -180,7 +205,7 @@ class ShotDrawer(QWidget):
             return
         self._req += 1
         req = self._req
-        self._count.setText("목록 읽는 중…")
+        self._say("목록 읽는 중…")
 
         def _fetch() -> List[Dict[str, Any]]:
             from bpe.shotgrid.client import get_default_sg
@@ -190,7 +215,7 @@ class ShotDrawer(QWidget):
 
         w = ShotGridWorker(_fetch)
         w.finished.connect(lambda r, q=req: self._on_rows(r, q))
-        w.error.connect(lambda e: self._count.setText(f"목록을 읽지 못했습니다: {e}"))
+        w.error.connect(lambda e: self._say(f"목록을 읽지 못했습니다: {e}"))
         w.start()
         self._workers.append(w)
 
@@ -241,20 +266,19 @@ class ShotDrawer(QWidget):
             self._current_task = task_id
             self._refill()
 
-    def _row_html(self, r: Dict[str, Any]) -> str:
-        current = self._current_task is not None and r.get("task_id") == self._current_task
-        name_color = style.TEXT_STRONG if current else style.TEXT
-        mark = f'<span style="color:{style.ACCENT}">▸</span> ' if current else ""
+    def _is_current(self, r: Dict[str, Any]) -> bool:
+        return self._current_task is not None and r.get("task_id") == self._current_task
+
+    @staticmethod
+    def _row_html(r: Dict[str, Any]) -> str:
         status = escape(str(r.get("task_status") or ""))
         return (
             f'<table width="100%" cellspacing="0" cellpadding="0"><tr>'
-            f'<td>{mark}<b style="color:{name_color}; {style.mono()}">'
+            f'<td><b style="color:{style.TEXT_STRONG}; {style.mono()}">'
             f"{escape(str(r.get('shot_code') or ''))}</b></td>"
-            f'<td align="right"><span style="color:{style.STATUS_DOT}">●</span> '
-            f'<span style="color:{style.LABEL}; {style.mono(style.FONT_SMALL_PX)}">{status}</span>'
-            f"</td></tr></table>"
-            f'<span style="color:{style.DIM}; font-size:{style.FONT_SMALL_PX}px">'
-            f"{escape(row_subtitle(r))}</span>"
+            f'<td align="right"><span style="color:{style.STATUS_DOT}; {style.mono()}">'
+            f"{status}</span></td></tr></table>"
+            f'<span style="color:{style.DIM}">{escape(row_subtitle(r))}</span>'
         )
 
     def _refill(self) -> None:
@@ -269,11 +293,17 @@ class ShotDrawer(QWidget):
             self._list.addItem(item)
             label = QLabel(self._row_html(r))
             label.setTextFormat(Qt.TextFormat.RichText)
-            label.setContentsMargins(10, 4, 10, 4)
             label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            current = self._is_current(r)
+            label.setStyleSheet(
+                f"padding: 4px 8px 4px 6px; "
+                f"border-left: 2px solid {style.ACCENT if current else 'transparent'}; "
+                f"background: {style.RAISED if current else 'transparent'};"
+            )
             self._list.setItemWidget(item, label)
         if self._loaded:
-            self._count.setText(f"{self._group} · 확인 대기 {len(self._shown)}컷 · {self._sort}")
+            self._count.setText(f"{self._sort} · {len(self._shown)}컷")
+            self._say("" if self._shown else "이 갈래에는 확인 대기 샷이 없습니다")
         self.rows_changed.emit()
 
     def _on_clicked(self, item: QListWidgetItem) -> None:

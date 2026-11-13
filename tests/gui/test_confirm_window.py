@@ -263,9 +263,143 @@ def test_header_follows_list_and_moves_between_shots(win: Any, monkeypatch: Any)
     ]
     win._task = dict(rows[1])
     win._drawer.set_rows(rows)
-    assert win._btn_list.text() == "외주 3" and win._pos.text() == "2 / 3"
+    assert win._btn_list.text().strip() == "외주 3" and win._pos.text() == "2 / 3"
     assert win._btn_prev.isEnabled() and win._btn_next.isEnabled()
     opened = []
     monkeypatch.setattr(win, "_open_task", opened.append)
     win._nav_shot(1)
     assert opened and opened[0]["task_id"] == 3
+
+
+def test_keyboard_shortcuts(win: Any, qtbot: Any) -> None:
+    from bpe.core.confirm_view_math import CHANNEL_LUMA
+
+    def press(key: Any) -> None:
+        QTest.keyClick(win, key)
+
+    press(Qt.Key.Key_1)
+    assert win._shown == KEY_ORG
+    press(Qt.Key.Key_3)
+    assert win._shown == KEY_CUR and win._last_shown == KEY_ORG
+    press(Qt.Key.Key_D)
+    assert win._diff
+    press(Qt.Key.Key_D)
+    assert not win._diff
+    press(Qt.Key.Key_R)
+    assert win._channel == CHANNEL_R
+    press(Qt.Key.Key_A)
+    assert win._channel == CHANNEL_LUMA
+    press(Qt.Key.Key_A)
+    assert win._channel == CHANNEL_RGB
+    press(Qt.Key.Key_Home)
+    press(Qt.Key.Key_Right)
+    assert win._index == 1
+    press(Qt.Key.Key_End)
+    assert win._index == 5
+    press(Qt.Key.Key_Left)
+    assert win._index == 4
+    for key, tool in (
+        (Qt.Key.Key_N, "rect"),
+        (Qt.Key.Key_P, "pen"),
+        (Qt.Key.Key_W, "arrow"),
+        (Qt.Key.Key_T, "text"),
+        (Qt.Key.Key_V, "select"),
+    ):
+        press(key)
+        assert win._layer.tool() == tool
+    press(Qt.Key.Key_Home)
+    press(Qt.Key.Key_Space)
+    assert win._playing
+    qtbot.waitUntil(lambda: win._index > 0, timeout=5000)
+    press(Qt.Key.Key_Space)
+    assert not win._playing
+    press(Qt.Key.Key_Question)
+    assert win._help.isVisible()
+    press(Qt.Key.Key_Escape)
+    assert not win._help.isVisible()
+
+
+def test_typing_in_a_text_box_does_not_trigger_shortcuts(win: Any) -> None:
+    win._frame_edit.setFocus()
+    QTest.keyClick(win._frame_edit, Qt.Key.Key_D)
+    assert not win._diff
+    QTest.keyClick(win, Qt.Key.Key_Escape)  # Esc 는 글 칸에서 빠져나온다
+
+
+def _drag(layer: Any, points: Any) -> None:
+    none = Qt.KeyboardModifier.NoModifier
+    QTest.mousePress(layer, Qt.MouseButton.LeftButton, none, points[0])
+    for p in points[1:]:
+        QTest.mouseMove(layer, p)
+    QTest.mouseRelease(layer, Qt.MouseButton.LeftButton, none, points[-1])
+
+
+def test_pen_arrow_and_text_tools(win: Any) -> None:
+    layer = win._layer
+    r = win._view.image_rect()
+    assert r is not None
+
+    def at(fx: float, fy: float) -> Any:
+        return QPointF(r[0] + r[2] * fx, r[1] + r[3] * fy).toPoint()
+
+    frame = win.frame_number()
+    win._set_tool("pen")
+    _drag(layer, [at(0.1, 0.1), at(0.2, 0.3), at(0.3, 0.2), at(0.4, 0.4)])
+    assert not layer.is_editing_text()  # 펜은 글 칸이 안 뜬다
+    pen = layer.doc().shapes()[-1]
+    assert pen["kind"] == "pen" and len(pen["points"]) >= 3
+
+    win._set_tool("arrow")
+    _drag(layer, [at(0.5, 0.5), at(0.7, 0.3)])
+    assert layer.is_editing_text()  # 화살표를 그으면 바로 글 칸
+    QTest.keyClicks(layer._edit, "go")
+    QTest.keyClick(layer._edit, Qt.Key.Key_Return)
+    arrow = layer.doc().shapes()[-1]
+    assert arrow["kind"] == "arrow" and arrow["text"] == "go"
+
+    win._set_tool("text")
+    none = Qt.KeyboardModifier.NoModifier
+    QTest.mouseClick(layer, Qt.MouseButton.LeftButton, none, at(0.2, 0.8))
+    assert layer.is_editing_text()
+    QTest.keyClicks(layer._edit, "hi")
+    QTest.keyClick(layer._edit, Qt.Key.Key_Return)
+    text = layer.doc().shapes()[-1]
+    assert text["kind"] == "text" and text["text"] == "hi"
+
+    assert win._panel.memo_texts() == [f"[{frame}] go", f"[{frame}] hi"]
+    assert win._timeline.marks() == [frame]
+
+    # 고른 그림만 지우개로 지운다
+    win._set_tool("select")
+    layer._selected = arrow["id"]
+    win._btn_erase.click()
+    assert [s["kind"] for s in layer.doc().shapes()] == ["pen", "text"]
+
+
+def test_lut_file_is_applied_and_remembered(win: Any, tmp_path: Path) -> None:
+    from bpe.core.settings import get_confirm_settings
+
+    # 빨강을 없애는 2칸짜리 룩업
+    rows = [f"0.0 {g}.0 {b}.0" for b in (0, 1) for g in (0, 1) for _r in (0, 1)]
+    cube = tmp_path / "no_red.cube"
+    cube.write_text("LUT_3D_SIZE 2\n" + "\n".join(rows) + "\n", encoding="utf-8")
+    assert not win._btn_lut.isEnabled()  # 룩업을 고르기 전에는 꺼져 있다
+    win._apply_lut_file(str(cube), remember=True)
+    assert win._lut is not None and win._lut_on and win._btn_lut.isChecked()
+    assert get_confirm_settings()["luts"]["_default"] == str(cube)
+
+    cur = win._bufs[KEY_CUR]
+    data = cur.frames[0]
+    plain = win._view.render_frame_image(data, _W, _H, lut_on=False)
+    lut = win._view.render_frame_image(data, _W, _H, lut_on=True)
+    assert plain is not None and lut is not None
+    reds = [(plain.pixelColor(x, y).red(), x, y) for x in range(0, _W, 4) for y in range(0, _H, 4)]
+    top, x, y = max(reds)
+    assert top > 100  # 시험 영상에 빨간 곳이 있다
+    assert lut.pixelColor(x, y).red() <= 3
+    assert abs(lut.pixelColor(x, y).green() - plain.pixelColor(x, y).green()) <= 3
+
+    QTest.keyClick(win, Qt.Key.Key_L)
+    assert not win._lut_on
+    QTest.keyClick(win, Qt.Key.Key_L)
+    assert win._lut_on

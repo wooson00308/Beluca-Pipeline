@@ -37,7 +37,7 @@ from bpe.core.confirm_annotations import (
     shape_bounds,
     text_anchor,
 )
-from bpe.gui import theme
+from bpe.gui.confirm import style
 from bpe.gui.confirm.viewer_gl import ConfirmGLView
 
 TOOL_SELECT = "select"
@@ -427,8 +427,9 @@ class AnnotationLayer(QWidget):
         y = max(4.0, min(self.height() - h - 4.0, origin.y()))
         self._edit.setGeometry(int(x), int(y), int(w), int(h))
         self._edit.setStyleSheet(
-            f"background: {theme.BG}; color: {s.get('color') or DEFAULT_COLOR}; "
-            f"border: 1px solid {s.get('color') or DEFAULT_COLOR}; padding: 0 6px;"
+            f"background: {style.FIELD}; color: {s.get('color') or DEFAULT_COLOR}; "
+            f"border: 1px solid {s.get('color') or DEFAULT_COLOR}; "
+            f"border-radius: {style.RADIUS}px; padding: 0 6px;"
         )
 
     def _commit_edit(self) -> None:

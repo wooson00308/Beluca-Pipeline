@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from html import escape
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -26,6 +27,9 @@ from bpe.gui.confirm import style
 
 PANEL_WIDTH = style.PANEL_WIDTH
 _NO_VERSION = "버전 없음"
+_KEY_COLUMN_W = 76
+_MEMO_FRAME = re.compile(r"^(\[[^\]]+\])\s*(.*)$", re.S)
+_MEMO_FRAME_ON = "#ff8a84"
 
 
 def _header(text: str) -> QLabel:
@@ -47,6 +51,14 @@ def _value() -> QLabel:
     lbl.setTextFormat(Qt.TextFormat.RichText)
     lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
     return lbl
+
+
+def _clear_block() -> QWidget:
+    """바탕을 칠하지 않는 묶음 칸(앱 전역 스타일의 바탕색이 덮이지 않게)."""
+    w = QWidget()
+    w.setObjectName("confirm_block")
+    w.setStyleSheet("QWidget#confirm_block { background: transparent; }")
+    return w
 
 
 def _short_version(code: str) -> str:
@@ -96,14 +108,15 @@ class ConfirmSidePanel(QWidget):
         super().__init__(parent)
         self.setFixedWidth(PANEL_WIDTH)
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setObjectName("confirm_panel")
         self.setStyleSheet(
-            f"ConfirmSidePanel {{ background: {style.PANEL}; "
+            f"QWidget#confirm_panel {{ background: {style.PANEL}; "
             f"border-left: 1px solid {style.EDGE}; }}"
         )
         self._past: List[Dict[str, Any]] = []
         self._past_rows: List[_ClickRow] = []
         self._memo: List[Tuple[int, str, bool]] = []
-        self._memo_boxes: List[QCheckBox] = []
+        self._memo_rows: List[QWidget] = []
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -112,12 +125,12 @@ class ConfirmSidePanel(QWidget):
         col.setSpacing(0)
 
         col.addWidget(_header("작업 내용"))
-        info = QWidget()
+        info = _clear_block()
         grid = QGridLayout(info)
         grid.setContentsMargins(10, 8, 10, 8)
         grid.setHorizontalSpacing(10)
         grid.setVerticalSpacing(6)
-        grid.setColumnMinimumWidth(0, 62)
+        grid.setColumnMinimumWidth(0, _KEY_COLUMN_W)
         grid.setColumnStretch(1, 1)
         self._v_order, self._v_desc = _value(), _value()
         self._v_who, self._v_checks = _value(), _value()
@@ -179,11 +192,12 @@ class ConfirmSidePanel(QWidget):
         col.addWidget(past_scroll, 2)
 
         self._memo_head = _header("메모")
+        self._memo_head.setTextFormat(Qt.TextFormat.RichText)
         self._memo_head.setStyleSheet(
             style.section_header_style() + f"border-top: 1px solid {style.EDGE};"
         )
         col.addWidget(self._memo_head)
-        self._memo_box = QWidget()
+        self._memo_box = _clear_block()
         self._memo_col = QVBoxLayout(self._memo_box)
         self._memo_col.setContentsMargins(10, 8, 10, 2)
         self._memo_col.setSpacing(6)
@@ -209,7 +223,7 @@ class ConfirmSidePanel(QWidget):
         fcol.setContentsMargins(10, 8, 10, 8)
         fcol.setSpacing(6)
 
-        self._pending = QWidget()
+        self._pending = _clear_block()
         prow = QHBoxLayout(self._pending)
         prow.setContentsMargins(0, 0, 0, 0)
         prow.setSpacing(6)
@@ -365,21 +379,40 @@ class ConfirmSidePanel(QWidget):
 
     def set_memo(self, lines: List[Tuple[int, str, bool]]) -> None:
         self._memo = list(lines)
-        for b in self._memo_boxes:
-            b.deleteLater()
-        self._memo_boxes = []
+        for row in self._memo_rows:
+            row.deleteLater()
+        self._memo_rows = []
         for shape_id, text, on in lines:
-            box = QCheckBox(text)
+            row = _clear_block()
+            lay = QHBoxLayout(row)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(8)
+            box = QCheckBox()
             box.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             box.setChecked(on)
-            color = style.TEXT if on else style.DIM
-            box.setStyleSheet(f"QCheckBox {{ color: {color}; font-size: {style.FONT_PX}px; }}")
             box.toggled.connect(lambda checked, sid=shape_id: self.memo_toggled.emit(sid, checked))
-            self._memo_boxes.append(box)
-            self._memo_col.addWidget(box)
+            lay.addWidget(box, 0, Qt.AlignmentFlag.AlignTop)
+            m = _MEMO_FRAME.match(text)
+            frame, body = (m.group(1), m.group(2)) if m else ("", text)
+            frame_color = _MEMO_FRAME_ON if on else style.DIM
+            label = QLabel(
+                f'<span style="color:{frame_color}; {style.mono()}">{escape(frame)}</span> '
+                f"{escape(body)}"
+            )
+            label.setTextFormat(Qt.TextFormat.RichText)
+            label.setWordWrap(True)
+            label.setStyleSheet(f"color: {style.TEXT if on else style.DIM};")
+            lay.addWidget(label, 1)
+            self._memo_rows.append(row)
+            self._memo_col.addWidget(row)
         self._memo_box.setVisible(bool(lines))
         n = sum(1 for _i, _t, on in lines if on)
-        self._memo_head.setText(f"메모 · 보낼 줄 {n}" if lines else "메모")
+        count = (
+            f' <span style="font-weight:normal; color:{style.DIM}">보낼 줄 {n}</span>'
+            if lines
+            else ""
+        )
+        self._memo_head.setText("메모" + count)
 
     def memo_texts(self) -> List[str]:
         return [text for _i, text, _on in self._memo]
