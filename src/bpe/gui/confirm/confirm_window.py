@@ -956,15 +956,20 @@ class ConfirmWindow(QWidget):
     # ── 검사 기준(프리셋) ────────────────────────────────────────
 
     def _run_checks(self) -> None:
-        """프리셋(있으면)과 편집본·원본을 기준으로 지금 버전을 판정하고 패널에 알린다."""
+        """현재버전을 판정하고 패널에 알린다. 프레임 수는 edit(없으면 ORG plate),
+
+        나머지는 프리셋 기준이다(edit 은 길이만 참고한다).
+        """
         ref_key = KEY_EDIT if self._bufs[KEY_EDIT].info else KEY_ORG
         ref = self._bufs[ref_key]
+        plate = self._bufs[KEY_ORG]
         self._checks = check_work_against_reference(
             self._bufs[KEY_CUR].info,
             ref.info,
             ref.title,
-            compare_resolution=ref_key == KEY_EDIT,
             standard=self._standard,
+            plate=plate.info,
+            plate_label=plate.title,
         )
         self._basis = basis_text(ref.title, ref.info is not None, self._standard)
         self._panel.set_checks(self._checks)
@@ -978,7 +983,7 @@ class ConfirmWindow(QWidget):
         else:
             look = ""
         self._panel.set_standard(
-            self._basis if s is not None else f"프리셋 없음 · {self._basis}",
+            self._basis,
             look,
             self._preset_names,
             s.preset if s is not None else "",

@@ -23,8 +23,9 @@ def _info(
 
 
 def test_all_pass() -> None:
-    res = check_work_against_reference(_info(), _info(), "편집본")
-    assert [r.state for r in res] == [STATE_PASS] * 3
+    res = check_work_against_reference(_info(), _info(), "편집본", plate=_info())
+    # 프리셋이 없으면 해상도는 판정하지 않는다(값만)
+    assert [r.state for r in res] == [STATE_PASS, STATE_PASS, STATE_UNKNOWN]
     assert res[0].message == "프레임 74/74 통과"
     assert not has_failure(res)
 
@@ -36,25 +37,21 @@ def test_frame_count_mismatch_is_fail_with_both_numbers() -> None:
     assert failure_lines(res) == ["프레임 수 다름: 편집본 74 / 현재버전 73"]
 
 
-def test_fps_tolerance() -> None:
-    ok = check_work_against_reference(_info(fps=23.976), _info(fps=23.9760239), "편집본")
-    assert ok[1].state == STATE_PASS
-    bad = check_work_against_reference(_info(fps=24.0), _info(fps=23.976), "편집본")
-    assert bad[1].state == STATE_FAIL and "23.976" in bad[1].message
-
-
-def test_resolution_mismatch() -> None:
-    res = check_work_against_reference(_info(1920, 1080), _info(3840, 2160), "편집본")
-    assert res[2].state == STATE_FAIL
-    assert "3840×2160" in res[2].message and "1920×1080" in res[2].message
-
-
-def test_resolution_not_judged_against_plate() -> None:
-    res = check_work_against_reference(
-        _info(1920, 1080), _info(3840, 2076), "원본", compare_resolution=False
+def test_fps_is_checked_against_the_plate_when_there_is_no_preset() -> None:
+    ok = check_work_against_reference(
+        _info(fps=23.976), _info(), "edit", plate=_info(fps=23.9760239)
     )
-    assert res[2].state == STATE_UNKNOWN
-    assert "원본 3840×2076" in res[2].message
+    assert ok[1].state == STATE_PASS
+    bad = check_work_against_reference(_info(fps=24.0), _info(), "edit", plate=_info(fps=23.976))
+    assert bad[1].message == "fps 다름: ORG plate 23.976 / 현재버전 24.000"
+
+
+def test_edit_is_only_used_for_frame_count() -> None:
+    # edit 이 4K·24fps 여도 해상도·fps 는 edit 과 맞추지 않는다
+    res = check_work_against_reference(_info(), _info(3840, 2160, fps=24.0), "edit")
+    assert res[0].state == STATE_PASS
+    assert res[1].state == STATE_UNKNOWN and res[1].message == "fps 23.976 · 기준 없음"
+    assert res[2].state == STATE_UNKNOWN and res[2].message == "해상도 1920×1080 · 기준 없음"
     assert not has_failure(res)
 
 
@@ -112,9 +109,9 @@ def test_preset_fps_and_size_win_over_the_edit() -> None:
     assert bad[2].message == "해상도 다름: 프리셋 1920×1080 / 현재버전 2048×1080"
 
 
-def test_preset_judges_size_even_when_only_the_plate_exists() -> None:
+def test_preset_judges_size_whatever_the_reference_is() -> None:
     res = check_work_against_reference(
-        _info(), _info(3840, 2076), "원본", compare_resolution=False, standard=_standard()
+        _info(), _info(3840, 2076), "ORG plate", standard=_standard()
     )
     assert res[2].state == STATE_PASS
 
@@ -141,14 +138,16 @@ def test_missing_color_tag_is_unknown_not_fail() -> None:
 
 def test_preset_without_values_falls_back_to_the_reference() -> None:
     empty = _standard(fps=None, mov_size=None, codec="", color_tags=())
-    res = check_work_against_reference(_info(fps=24.0), _info(), "편집본", standard=empty)
+    res = check_work_against_reference(
+        _info(fps=24.0), _info(), "편집본", standard=empty, plate=_info()
+    )
     assert len(res) == 3
-    assert res[1].message == "fps 다름: 편집본 23.976 / 현재버전 24.000"
+    assert res[1].message == "fps 다름: ORG plate 23.976 / 현재버전 24.000"
 
 
 def test_basis_text() -> None:
     from bpe.core.confirm_checks import basis_text
 
-    assert basis_text("편집본", True, None) == "편집본 기준"
+    assert basis_text("편집본", True, None) == "프리셋 없음 · 프레임 수는 편집본"
     assert basis_text("편집본", True, _standard()) == "프리셋 PROJ_001 · 프레임 수는 편집본"
     assert basis_text("원본", False, _standard()) == "프리셋 PROJ_001 · 프레임 수는 원본 없음"

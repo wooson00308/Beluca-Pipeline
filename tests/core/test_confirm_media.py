@@ -114,3 +114,23 @@ def test_movie_outside_shot_folder(tmp_path: Path) -> None:
     assert media.shot_root is None
     assert media.current is not None and media.current.version == 3
     assert media.versions == [media.current]
+
+
+def test_plate_movie_is_found_in_hi_or_any_other_subfolder(tmp_path: Path) -> None:
+    shot = tmp_path / "ep06_s043_0150"
+    org = shot / "plate" / "org"
+    (org / "v001" / "mov").mkdir(parents=True)
+    (org / "v002" / "mov").mkdir(parents=True)
+    (org / "v002" / "lo").mkdir(parents=True)
+    _touch(org / "v001" / "hi" / "ep06_s043_0150_org_v001.mov")
+    hi = _touch(org / "v002" / "hi" / "ep06_s043_0150_org_v002.mov")
+    assert find_org(shot) == hi  # mov 폴더가 비어 있으면 hi 를 본다, 최신 버전 우선
+
+    other = tmp_path / "s2"
+    odd = _touch(other / "plate" / "org" / "v001" / "prores" / "s2_org_v001.mov")
+    assert find_org(other) == odd  # 처음 보는 이름의 폴더도 찾아본다
+
+    both = tmp_path / "s3"
+    _touch(both / "plate" / "org" / "v001" / "hi" / "s3_org_v001.mov")
+    mov = _touch(both / "plate" / "org" / "v001" / "mov" / "s3_org_v001.mov")
+    assert find_org(both) == mov  # 둘 다 있으면 mov 가 먼저

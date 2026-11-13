@@ -97,7 +97,8 @@ def test_opens_all_four_buffers_and_checks_against_edit(win: Any) -> None:
     assert b[KEY_PREV].version_label == "v001" and b[KEY_CUR].version_label == "v002"
     assert b[KEY_CUR].size == (_W, _H)
     # 편집본이 7프레임, 작업본이 6프레임 → 실패가 크게 떠야 한다
-    assert [c.state for c in win._checks] == ["fail", "pass", "pass"]
+    # 프레임 수는 edit 기준(실패), fps 는 ORG plate 기준(통과), 해상도는 프리셋이 없어 판정 안 함
+    assert [c.state for c in win._checks] == ["fail", "pass", "unknown"]
     assert win._banner.isVisible() and "edit 7 / 현재버전 6" in win._banner.text()
     assert win._timeline.count() == 6
 

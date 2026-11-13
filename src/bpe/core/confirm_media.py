@@ -99,10 +99,27 @@ def find_versions(shot_root: Path) -> List[VersionMovie]:
     return [best[k] for k in sorted(best)]
 
 
-def _latest_in_versioned(folder: Path, subdirs: tuple) -> Optional[Path]:
-    """``folder/v###[/sub]`` 에서 가장 최신 버전의 첫 영상. 없으면 ``folder`` 바로 아래."""
+def _subdirs(folder: Path) -> List[str]:
+    try:
+        return sorted(d.name for d in folder.iterdir() if d.is_dir())
+    except OSError:
+        return []
+
+
+def _latest_in_versioned(
+    folder: Path, subdirs: tuple, *, any_subdir: bool = False
+) -> Optional[Path]:
+    """``folder/v###[/sub]`` 에서 가장 최신 버전의 첫 영상. 없으면 ``folder`` 바로 아래.
+
+    *subdirs* 는 먼저 볼 하위 폴더 이름(빈 글 = 버전 폴더 바로 아래). *any_subdir* 면
+    거기에 없을 때 버전 폴더의 다른 하위 폴더도 이름순으로 찾아본다 — 프로젝트마다
+    영상을 두는 폴더 이름(mov / hi / lo …)이 달라서다.
+    """
     for vdir in _version_dirs(folder):
-        for sub in subdirs:
+        names = list(subdirs)
+        if any_subdir:
+            names += [n for n in _subdirs(vdir) if n not in names]
+        for sub in names:
             vids = _videos_in(vdir / sub) if sub else _videos_in(vdir)
             vids = [v for v in vids if not is_lut_baked(v.name)] or vids
             if vids:
@@ -113,8 +130,13 @@ def _latest_in_versioned(folder: Path, subdirs: tuple) -> Optional[Path]:
 
 
 def find_org(shot_root: Path) -> Optional[Path]:
-    """원본 플레이트 영상: ``plate/org/v###/mov`` → ``plate/org/v###`` → ``plate/org``."""
-    return _latest_in_versioned(shot_root / "plate" / "org", ("mov", ""))
+    """원본 플레이트 영상. 최신 버전 폴더에서 ``mov`` → ``hi`` → 바로 아래 → ``lo`` → 그 밖의
+
+    하위 폴더 순으로 찾고, 없으면 이전 버전, 그래도 없으면 ``plate/org`` 바로 아래.
+    """
+    return _latest_in_versioned(
+        shot_root / "plate" / "org", ("mov", "hi", "", "lo"), any_subdir=True
+    )
 
 
 def find_edit(shot_root: Path) -> Optional[Path]:
