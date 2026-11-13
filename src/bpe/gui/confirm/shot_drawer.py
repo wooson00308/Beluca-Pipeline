@@ -33,7 +33,7 @@ from bpe.core.confirm_list import (
 )
 from bpe.core.logging import get_logger
 from bpe.core.settings import get_confirm_settings, save_confirm_settings
-from bpe.gui.confirm import style
+from bpe.gui.confirm import status_style, style
 from bpe.gui.workers.confirm_thumb_worker import ThumbFetchWorker
 from bpe.gui.workers.sg_worker import ShotGridWorker
 
@@ -284,13 +284,14 @@ class ShotDrawer(QWidget):
 
     @staticmethod
     def _row_html(r: Dict[str, Any]) -> str:
-        status = escape(str(r.get("task_status") or ""))
+        code = str(r.get("task_status") or "")
+        status = escape(code)
         return (
             f'<table width="100%" cellspacing="0" cellpadding="0"><tr>'
             f'<td><b style="color:{style.TEXT_STRONG}; {style.mono()}">'
             f"{escape(str(r.get('shot_code') or ''))}</b></td>"
-            f'<td align="right"><span style="color:{style.STATUS_DOT}; {style.mono()}">'
-            f"{status}</span></td></tr></table>"
+            f'<td align="right"><span style="color:{status_style.text_color(code)}; '
+            f'{style.mono()}">{status}</span></td></tr></table>'
             f'<span style="color:{style.DIM}">{escape(row_subtitle(r))}</span>'
         )
 
@@ -330,6 +331,12 @@ class ShotDrawer(QWidget):
         text.setTextFormat(Qt.TextFormat.RichText)
         text.setIndent(0)
         lay.addWidget(text, 1)
+        chip = QLabel()  # 상태 색 네모 + 아이콘
+        chip.setFixedSize(16, 16)
+        code = str(r.get("task_status") or "")
+        if code:
+            chip.setPixmap(status_style.chip(code, 16))
+        lay.addWidget(chip, 0, Qt.AlignmentFlag.AlignTop)
         return row
 
     def _refill(self) -> None:
@@ -392,6 +399,10 @@ class ShotDrawer(QWidget):
                 label.setPixmap(self._thumbs[key])
             except RuntimeError:  # 목록이 다시 그려져 그 줄이 사라진 경우
                 pass
+
+    def refresh_rows(self) -> None:
+        """줄 모양만 다시 그린다(상태 색·아이콘이 바뀌었을 때)."""
+        self._refill()
 
     def _on_clicked(self, item: QListWidgetItem) -> None:
         row = item.data(_ROLE)

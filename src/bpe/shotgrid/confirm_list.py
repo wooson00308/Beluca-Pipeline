@@ -102,6 +102,20 @@ def _apply_version(row: Dict[str, Any], v: Dict[str, Any]) -> None:
     row["version_uploader_name"] = row["uploader_name"]
 
 
+def shot_tags(sg: Any, shot_ids: Sequence[Any]) -> Dict[int, List[str]]:
+    """샷 id → 그 샷의 태그 이름들(예: ``["ai"]``)."""
+    out: Dict[int, List[str]] = {}
+    ids = sorted({int(s) for s in shot_ids if s is not None})
+    for i in range(0, len(ids), _CHUNK):
+        rows = sg.find("Shot", [["id", "in", ids[i : i + _CHUNK]]], ["id", "tags"])
+        for r in rows or []:
+            tags = r.get("tags") or []
+            out[int(r["id"])] = [
+                str(t.get("name") or "").strip() for t in tags if isinstance(t, dict)
+            ]
+    return out
+
+
 def list_confirm_tasks(
     sg: Any,
     project_id: int,
@@ -131,6 +145,14 @@ def list_confirm_tasks(
         v = latest.get(int(r["task_id"])) if r.get("task_id") is not None else None
         if v is not None:
             _apply_version(r, v)
+    try:
+        tags = shot_tags(sg, [r.get("shot_id") for r in rows])
+    except Exception as e:  # 태그를 못 읽으면 AI 샷 여부는 모름으로 둔다
+        logger.warning("confirm list: shot tags failed: %s", e)
+        tags = {}
+    for r in rows:
+        sid = r.get("shot_id")
+        r["shot_tags"] = tags.get(int(sid)) if sid is not None and int(sid) in tags else None
     # 태스크의 「최신 버전」 칸만 채워져 있고 위에서 못 찾은 줄 — 그 버전의 올린 쪽을 따로 읽는다
     left = [
         r for r in rows if not r.get("uploader_type") and r.get("latest_version_id") is not None

@@ -9,13 +9,16 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Optional
+from typing import Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 VIDEO_EXTS = (".mov", ".mp4", ".mxf", ".mkv", ".m4v")
 _VERSION_RE = re.compile(r"[_.\-]v(\d{2,4})(?=[_.\-]|$)", re.IGNORECASE)
 _VERSION_DIR_RE = re.compile(r"^v(\d{2,4})$", re.IGNORECASE)
 _LUT_RE = re.compile(r"[_.\-]lut(?=[_.\-]|$)", re.IGNORECASE)
-_COMP_DIRS = ("comp/devl/renders", "comp/renders", "comp/devl/review", "comp/review", "comp")
+_TASK_SUBDIRS = ("devl/renders", "renders", "devl/review", "review", "")
+_TASK_DIRS = ("comp", "precomp")  # 이름만으로 아는 작업 폴더
+_SHOT_MARKS = ("plate", "edit")  # 샷 폴더라면 있는 폴더
+_CLIMB = 6
 
 
 class VersionMovie(NamedTuple):
@@ -52,12 +55,35 @@ def is_lut_baked(name: str) -> bool:
 
 
 def shot_root_from_movie(movie: Path) -> Optional[Path]:
-    """작업본 경로에서 샷 폴더(``comp`` 의 부모)를 찾는다."""
+    """작업본 경로에서 샷 폴더를 찾는다.
+
+    ``comp``·``precomp`` 폴더의 부모가 샷 폴더다. 작업 폴더 이름이 다르면(프로젝트마다
+    다름) 위로 올라가며 ``plate`` 나 ``edit`` 폴더가 있는 곳을 샷 폴더로 본다.
+    """
     parts = movie.parts
     for i in range(len(parts) - 1, 0, -1):
-        if parts[i].lower() == "comp":
+        if parts[i].lower() in _TASK_DIRS:
             return Path(*parts[:i])
+    folder = movie.parent
+    for _ in range(_CLIMB):
+        if folder.parent == folder:
+            break
+        folder = folder.parent
+        try:
+            if any((folder / mark).is_dir() for mark in _SHOT_MARKS):
+                return folder
+        except OSError:
+            break
     return None
+
+
+def task_dir_of(movie: Path, shot_root: Path) -> str:
+    """샷 폴더 바로 아래의 작업 폴더 이름(``comp``·``precomp`` …). 모르면 ``comp``."""
+    try:
+        rel = movie.relative_to(shot_root).parts
+    except ValueError:
+        return "comp"
+    return rel[0] if len(rel) > 1 else "comp"
 
 
 def _videos_in(folder: Path) -> List[Path]:
@@ -76,8 +102,8 @@ def _version_dirs(folder: Path) -> List[Path]:
     return sorted(dirs, key=lambda d: int(d.name[1:]), reverse=True)
 
 
-def find_versions(shot_root: Path) -> List[VersionMovie]:
-    """샷의 comp 버전 영상 — 번호 순. 같은 번호는 룩업 안 입힌 것을 우선한다."""
+def find_versions(shot_root: Path, task_dir: str = "comp") -> List[VersionMovie]:
+    """샷의 작업 폴더(*task_dir*) 버전 영상 — 번호 순. 같은 번호는 룩업 안 입힌 것을 우선한다."""
     best: Dict[int, VersionMovie] = {}
 
     def offer(path: Path, version: Optional[int]) -> None:
@@ -88,15 +114,55 @@ def find_versions(shot_root: Path) -> List[VersionMovie]:
         if cur is None or (cur.has_lut_baked and not cand.has_lut_baked):
             best[version] = cand
 
-    for rel in _COMP_DIRS:
-        folder = shot_root / rel
-        for p in _videos_in(folder):
-            offer(p, parse_version(p.name))
-    for vdir in _version_dirs(shot_root / "comp"):
-        dir_version = parse_version(vdir.name)
-        for p in _videos_in(vdir):
-            offer(p, parse_version(p.name) or dir_version)
+    for p, dir_version in _task_videos(shot_root / task_dir):
+        offer(p, parse_version(p.name) or dir_version)
     return [best[k] for k in sorted(best)]
+
+
+def _task_videos(base: Path) -> List[Tuple[Path, Optional[int]]]:
+    """작업 폴더의 영상 전부 — (경로, 버전 폴더에서 읽은 번호)."""
+    out: List[Tuple[Path, Optional[int]]] = []
+    for rel in _TASK_SUBDIRS:
+        out.extend((p, None) for p in _videos_in(base / rel if rel else base))
+    for vdir in _version_dirs(base):
+        dir_version = parse_version(vdir.name)
+        out.extend((p, dir_version) for p in _videos_in(vdir))
+    return out
+
+
+def quick_version_movie(
+    server_root: str,
+    project_folder: str,
+    shot_code: str,
+    version_code: str,
+    task_dirs: Sequence[str] = ("comp",),
+) -> Optional[Path]:
+    """샷 폴더가 늘 있는 자리에 있으면 그 버전 영상을 바로 찾는다.
+
+    늘 있는 자리 = ``<서버>/<프로젝트>/04_sq/<ep>/<샷>``.
+    서버 전체를 훑는 찾기는 몇 초가 걸려서, 먼저 이 지름길을 써 본다. 폴더가 그 자리에
+    없거나 버전 이름과 같은 영상이 없으면 ``None`` — 그때는 넓게 찾는 쪽으로 넘어간다.
+    """
+    code = (shot_code or "").strip()
+    want = (version_code or "").strip().lower()
+    if not server_root or not project_folder or not want or "_" not in code:
+        return None
+    root = Path(server_root) / project_folder / "04_sq" / code.split("_")[0] / code
+    try:
+        if not root.is_dir():
+            return None
+    except OSError:
+        return None
+    seen: List[str] = []
+    for task in task_dirs:
+        name = (task or "").strip()
+        if not name or name.lower() in seen:
+            continue
+        seen.append(name.lower())
+        for p, _dir_version in _task_videos(root / name):
+            if p.stem.lower() == want:
+                return p
+    return None
 
 
 def _subdirs(folder: Path) -> List[str]:
@@ -154,7 +220,7 @@ def find_shot_media(current_movie: Path, shot_root: Optional[Path] = None) -> Sh
     if root is None:
         return ShotMedia(None, current, None, [current], None, None)
 
-    versions = find_versions(root)
+    versions = find_versions(root, task_dir_of(current_movie, root))
     if not any(v.path == current_movie for v in versions):
         versions = [v for v in versions if v.version != current.version] + [current]
         versions.sort(key=lambda v: v.version)

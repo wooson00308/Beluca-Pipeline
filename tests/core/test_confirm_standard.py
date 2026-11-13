@@ -90,7 +90,7 @@ def test_build_standard_from_preset_and_template() -> None:
     s = build_standard("PROJ_001", _PRESET, _TEMPLATE)
     assert s.preset == "PROJ_001"
     assert s.fps == 23.976
-    assert s.mov_size == (1920, 1080) and s.plate_size == (3840, 2076)
+    assert s.mov_sizes == ((1920, 1080),) and s.plate_size == (3840, 2076)
     assert s.codec == "prores" and s.codec_title == "ProRes"
     assert s.look == "ACES / Rec.709" and s.color_tags == ("bt709",)
     assert s.viewer == "Rec.709 (ACES)"
@@ -98,7 +98,7 @@ def test_build_standard_from_preset_and_template() -> None:
 
 def test_build_standard_leaves_unknowns_empty() -> None:
     s = build_standard("X", {"fps": "", "mov_codec": "zzzz", "mov_view": ""})
-    assert s.fps is None and s.mov_size is None and s.plate_size is None
+    assert s.fps is None and s.mov_sizes == () and s.plate_size is None
     assert s.codec == "" and s.look == "" and s.color_tags == ()
 
 
@@ -126,4 +126,4 @@ def test_load_standard_reads_preset_and_template(tmp_app_dir: Path) -> None:
     (tmp_app_dir / "presets.json").write_text(json.dumps({"PROJ_001": _PRESET}), encoding="utf-8")
     (tmp_app_dir / "PROJ_001_template.nk").write_text(_TEMPLATE, encoding="utf-8")
     s = load_standard("PROJ_001")
-    assert s is not None and s.mov_size == (1920, 1080) and s.fps == 23.976
+    assert s is not None and s.mov_sizes == ((1920, 1080),) and s.fps == 23.976

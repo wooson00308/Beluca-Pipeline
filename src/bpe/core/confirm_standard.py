@@ -40,7 +40,9 @@ _CODEC_FAMILY = {
 }
 _CODEC_TITLES = {"prores": "ProRes", "h264": "H.264", "dnxhd": "DNxHD", "mpeg4": "MPEG-4"}
 _NODE_START = re.compile(r"^(\w+) \{\s*$")
-_BRANCH_LINE = re.compile(r"^(push|set) ")
+_SET_LINE = re.compile(r"^set (\w+) \[stack 0\]")
+_PUSH_LINE = re.compile(r"^push \$?(\w+)")
+_NO_INPUT = re.compile(r"^\s*inputs\s+0\s*$")
 _INT_KNOB = re.compile(r"^\s*(box_width|box_height)\s+(\d+)\s*$")
 _FORMAT_KNOB = re.compile(r'^\s*format\s+"?(\d+)\s+(\d+)\b')
 _FILE_TYPE = re.compile(r"^\s*file_type\s+(\w+)\s*$")
@@ -51,7 +53,7 @@ class ProjectStandard(NamedTuple):
 
     preset: str
     fps: Optional[float]
-    mov_size: Optional[Tuple[int, int]]
+    mov_sizes: Tuple[Tuple[int, int], ...]
     plate_size: Optional[Tuple[int, int]]
     codec: str
     look: str
@@ -110,6 +112,41 @@ def preset_names_for(
     return []
 
 
+AI_TAG = "ai"
+_AI_TOKEN = "AI"
+
+
+def is_ai_shot(tags: Optional[Sequence[str]]) -> Optional[bool]:
+    """샷그리드 샷의 태그로 AI 샷인지 본다. 태그 정보가 없으면(``None``) 모름."""
+    if tags is None:
+        return None
+    return any(str(t).strip().lower() == AI_TAG for t in tags)
+
+
+def pick_preset(
+    names: Sequence[str], *, plate_color: Optional[str] = None, is_ai: Optional[bool] = None
+) -> Tuple[str, bool]:
+    """프리셋이 여러 개인 프로젝트에서 이 샷의 프리셋을 고른다 → ``(이름, 하나로 정해졌나)``.
+
+    샷 빌더와 같은 규칙이다: 이름의 ``REC709``/``GAMMA`` 는 플레이트 MOV 의 색(자동 인식),
+    ``AI`` 는 AI 샷 여부로 가른다. 정보가 없는 기준은 건너뛴다.
+    """
+    cand = list(names)
+    if not cand:
+        return "", False
+
+    def tokens(name: str) -> List[str]:
+        return name.upper().split("_")
+
+    if plate_color:
+        hit = [n for n in cand if plate_color.upper() in tokens(n)]
+        cand = hit or cand
+    if is_ai is not None:
+        hit = [n for n in cand if (_AI_TOKEN in tokens(n)) == is_ai]
+        cand = hit or cand
+    return cand[0], len(cand) == 1
+
+
 # ── 풀이 ─────────────────────────────────────────────────────────
 
 
@@ -126,34 +163,45 @@ def _to_size(width: Any, height: Any) -> Optional[Tuple[int, int]]:
     return (int(w), int(h)) if w and h else None
 
 
-def mov_size_from_template(text: str) -> Optional[Tuple[int, int]]:
-    """누크 틀에서 MOV 를 쓰는 Write 바로 앞 Reformat 의 크기.
+def mov_sizes_from_template(text: str) -> List[Tuple[int, int]]:
+    """누크 틀에서 MOV 를 쓰는 Write 로 들어가는 그림의 크기들(Write 가 여럿이면 여럿).
 
-    가지가 바뀌는 줄(``push``/``set``)을 지나면 앞 가지의 크기는 잊는다 —
+    누크 스크립트의 줄 순서를 따라가며 "지금 맨 위 그림의 크기"를 센다: Reformat 은 크기를
+    정하고, ``set 이름 [stack 0]`` 은 그 그림을 이름으로 적어 두고, ``push $이름`` 은 적어 둔
+    그림을 다시 맨 위로 올린다. 크기를 알 수 없는 가지의 MOV 는 넣지 않는다 —
     다른 출력(EXR)의 크기를 MOV 크기로 잘못 읽지 않기 위해서다.
     """
-    last: Optional[Tuple[int, int]] = None
+    top: Optional[Tuple[int, int]] = None
+    saved: Dict[str, Optional[Tuple[int, int]]] = {}
+    out: List[Tuple[int, int]] = []
     node = ""
     knobs: Dict[str, int] = {}
     size: Optional[Tuple[int, int]] = None
-    is_mov = False
+    is_mov = no_input = False
     for line in text.splitlines():
         if not node:
-            if _BRANCH_LINE.match(line):
-                last = None
+            m = _SET_LINE.match(line)
+            if m:
+                saved[m.group(1)] = top
+                continue
+            m = _PUSH_LINE.match(line)
+            if m:
+                top = saved.get(m.group(1))
                 continue
             m = _NODE_START.match(line)
             if m:
-                node, knobs, size, is_mov = m.group(1), {}, None, False
+                node, knobs, size, is_mov, no_input = m.group(1), {}, None, False, False
             continue
         if line.strip() == "}":
             if node == "Reformat":
                 if "box_width" in knobs and "box_height" in knobs:
-                    last = (knobs["box_width"], knobs["box_height"])
-                elif size:
-                    last = size
-            elif node == "Write" and is_mov:
-                return last
+                    top = (knobs["box_width"], knobs["box_height"])
+                else:
+                    top = size
+            elif node == "Read" or no_input:
+                top = None  # 새 그림이 시작된다 — 크기는 모른다
+            elif node == "Write" and is_mov and top is not None and top not in out:
+                out.append(top)
             node = ""
             continue
         k = _INT_KNOB.match(line)
@@ -164,10 +212,19 @@ def mov_size_from_template(text: str) -> Optional[Tuple[int, int]]:
         if f:
             size = (int(f.group(1)), int(f.group(2)))
             continue
+        if _NO_INPUT.match(line):
+            no_input = True
+            continue
         t = _FILE_TYPE.match(line)
         if t and t.group(1).lower() == "mov":
             is_mov = True
-    return None
+    return out
+
+
+def mov_size_from_template(text: str) -> Optional[Tuple[int, int]]:
+    """MOV 크기 하나(여럿이면 첫째). 없으면 ``None``."""
+    sizes = mov_sizes_from_template(text)
+    return sizes[0] if sizes else None
 
 
 def _color_tags_for_view(view: str) -> Tuple[str, ...]:
@@ -188,7 +245,7 @@ def build_standard(name: str, preset: Dict[str, Any], template_text: str = "") -
     return ProjectStandard(
         preset=name,
         fps=_to_float(preset.get("mov_fps")) or _to_float(preset.get("fps")),
-        mov_size=mov_size_from_template(template_text) if template_text else None,
+        mov_sizes=tuple(mov_sizes_from_template(template_text)) if template_text else (),
         plate_size=_to_size(preset.get("plate_width"), preset.get("plate_height")),
         codec=codec,
         look=look,

@@ -54,11 +54,13 @@ from bpe.core.confirm_checks import (
     has_failure,
 )
 from bpe.core.confirm_decode import fit_decode_size, frame_byte_size
-from bpe.core.confirm_media import find_shot_media, parse_version
+from bpe.core.confirm_media import find_shot_media, parse_version, quick_version_movie
 from bpe.core.confirm_probe import VideoInfo, codec_label, probe_video
 from bpe.core.confirm_standard import (
     ProjectStandard,
+    is_ai_shot,
     load_standard,
+    pick_preset,
     preset_names_for,
     read_presets,
 )
@@ -73,12 +75,13 @@ from bpe.core.confirm_view_math import (
 )
 from bpe.core.logging import get_logger
 from bpe.core.lut_cube import CubeLut, load_cube
+from bpe.core.mov_colorspace import DISPLAY_NAME, inspect_mov_color
 from bpe.core.settings import (
     get_confirm_settings,
     get_feedback_frame_start,
     save_confirm_settings,
 )
-from bpe.gui.confirm import style
+from bpe.gui.confirm import status_style, style
 from bpe.gui.confirm.annotation_layer import (
     TOOL_ARROW,
     TOOL_ELLIPSE,
@@ -304,6 +307,8 @@ class ConfirmWindow(QWidget):
         self._scrub_from = 0
         self._standard: Optional[ProjectStandard] = None
         self._preset_names: List[str] = []
+        self._preset_why = ""
+        self._status_styles_asked = False
         self._basis = ""
         self._play_timer = QTimer(self)
         self._play_timer.setTimerType(Qt.TimerType.PreciseTimer)
@@ -419,9 +424,8 @@ class ConfirmWindow(QWidget):
         row.addWidget(self._who)
         status = QHBoxLayout()
         status.setSpacing(5)
-        self._status_dot = QWidget()
-        self._status_dot.setFixedSize(8, 8)
-        self._status_dot.setStyleSheet(f"background: {style.STATUS_DOT}; border-radius: 4px;")
+        self._status_dot = QLabel()  # 상태 색 네모 + 아이콘
+        self._status_dot.setFixedSize(16, 16)
         status.addWidget(self._status_dot, 0, Qt.AlignmentFlag.AlignVCenter)
         self._status_lbl = QLabel("")
         status.addWidget(self._status_lbl)
@@ -857,14 +861,28 @@ class ConfirmWindow(QWidget):
 
         project = self._project_key()
         picked = dict(get_confirm_settings()["presets"])
+        ai = is_ai_shot(self._task.get("shot_tags"))
 
         def _prepare() -> Dict[str, Any]:
             media = find_shot_media(Path(movie))
-            # 검사 기준: 이 프로젝트의 프리셋(여러 개면 전에 고른 것, 없으면 첫째)
+            # 검사 기준: 이 프로젝트의 프리셋. 여러 개면 샷 빌더처럼 플레이트 색(Rec.709/Gamma)과
+            # AI 샷 여부로 고르고, 그래도 못 정하면 전에 고른 것 → 첫째.
             names = preset_names_for(read_presets(), project, Path(movie).parts)
-            name = picked.get(names[0], "") if names else ""
-            if name not in names:
-                name = names[0] if names else ""
+            name, why = (names[0] if names else ""), ""
+            if len(names) > 1:
+                color = inspect_mov_color(media.org).result if media.org else None
+                name, decided = pick_preset(names, plate_color=color, is_ai=ai)
+                parts = []
+                if color:
+                    parts.append(f"플레이트 {DISPLAY_NAME.get(color, color)}")
+                if ai is not None:
+                    parts.append("AI 태그" if ai else "AI 태그 없음")
+                if decided:
+                    why = "자동: " + " · ".join(parts)
+                else:
+                    saved = picked.get(names[0], "")
+                    name = saved if saved in names else name
+                    why = "자동으로 못 정함 — 아래에서 골라 주세요"
             standard = load_standard(name) if name else None
             paths = {
                 KEY_CUR: media.current.path if media.current else None,
@@ -879,6 +897,7 @@ class ConfirmWindow(QWidget):
                 "infos": infos,
                 "standard": standard,
                 "preset_names": names,
+                "preset_why": why,
             }
 
         w = ShotGridWorker(_prepare)
@@ -938,6 +957,7 @@ class ConfirmWindow(QWidget):
         standard = result.get("standard")
         self._standard = standard if isinstance(standard, ProjectStandard) else None
         self._preset_names = list(result.get("preset_names") or [])
+        self._preset_why = str(result.get("preset_why") or "")
         self._run_checks()
         self._timeline.set_range(self._frame_start, self._count)
         self._last_shown = KEY_ORG if self._bufs[KEY_ORG].available else KEY_PREV
@@ -952,6 +972,38 @@ class ConfirmWindow(QWidget):
         self._start_next_decode()
         self._sync_all()
         self._load_sg_context()
+
+    # ── 상태 색·아이콘 ───────────────────────────────────────────
+
+    def _ensure_status_styles(self) -> None:
+        """샷그리드에 정해 둔 상태별 색·아이콘을 한 번만 읽어 온다."""
+        if self._status_styles_asked:
+            return
+        self._status_styles_asked = True
+
+        def _fetch() -> Dict[str, Dict[str, Any]]:
+            from bpe.shotgrid.client import get_default_sg
+            from bpe.shotgrid.confirm_status import fetch_status_styles
+
+            return fetch_status_styles(get_default_sg())
+
+        w = ShotGridWorker(_fetch)
+        w.finished.connect(self._on_status_styles)
+        w.error.connect(self._on_status_styles_failed)
+        w.start()
+        self._workers.append(w)
+
+    def _on_status_styles_failed(self, msg: str) -> None:
+        self._status_styles_asked = False  # 다음에 다시 읽어 본다
+        logger.warning("confirm: status styles load failed: %s", msg)
+
+    def _on_status_styles(self, result: object) -> None:
+        if self._closed or not isinstance(result, dict) or not result:
+            return
+        status_style.set_styles(result)
+        self._panel.refresh_status_styles()
+        self._drawer.refresh_rows()
+        self._sync_header()
 
     # ── 검사 기준(프리셋) ────────────────────────────────────────
 
@@ -983,7 +1035,7 @@ class ConfirmWindow(QWidget):
         else:
             look = ""
         self._panel.set_standard(
-            self._basis,
+            f"{self._basis} ({self._preset_why})" if self._preset_why else self._basis,
             look,
             self._preset_names,
             s.preset if s is not None else "",
@@ -1000,6 +1052,7 @@ class ConfirmWindow(QWidget):
         picked = dict(get_confirm_settings()["presets"])
         picked[self._preset_names[0]] = name
         save_confirm_settings({"presets": picked})
+        self._preset_why = "직접 고름"
         token = self._load_token
         w = ShotGridWorker(lambda: load_standard(name))
         w.finished.connect(lambda r, t=token: self._on_standard_loaded(r, t))
@@ -1025,6 +1078,7 @@ class ConfirmWindow(QWidget):
             self._scrim.raise_()
             self._drawer.raise_()
             self._drawer.load_projects()
+            self._ensure_status_styles()
         self._btn_list.setChecked(show)
 
     def _place_drawer(self) -> None:
@@ -1063,12 +1117,25 @@ class ConfirmWindow(QWidget):
             if not root:
                 auto = find_server_root_auto(proj)
                 root = str(auto) if auto else (os.environ.get("BPE_SERVER_ROOT") or "").strip()
+            root = normalize_path_str(root).strip() if root else ""
+            sg_path = row.get("latest_version_sg_path") or ""
+            version_code = (row.get("latest_version_code") or "").strip()
+            if not sg_path:  # 내부 샷: 늘 있는 자리부터 본다(넓게 찾기는 몇 초 걸림)
+                quick = quick_version_movie(
+                    root,
+                    proj,
+                    row.get("shot_code") or "",
+                    version_code,
+                    (str(row.get("task_content") or ""), "comp", "precomp"),
+                )
+                if quick is not None:
+                    return normalize_path_str(str(quick))
             mov, _tried, _warn = resolve_local_comp_mov_for_feedback(
                 row.get("shot_code") or "",
                 proj,
-                normalize_path_str(root).strip() if root else "",
-                sg_movie_raw=row.get("latest_version_sg_path") or "",
-                version_code=(row.get("latest_version_code") or "").strip() or None,
+                root,
+                sg_movie_raw=sg_path,
+                version_code=version_code or None,
             )
             return normalize_path_str(str(mov)) if mov is not None else ""
 
@@ -1378,7 +1445,10 @@ class ConfirmWindow(QWidget):
         self._who.setText(who)
         status = (t.get("task_status") or "").strip()
         self._status_lbl.setText(status)
+        self._status_lbl.setStyleSheet(f"color: {status_style.text_color(status)};")
         self._status_dot.setVisible(bool(status))
+        if status:
+            self._status_dot.setPixmap(status_style.chip(status, 16))
         rows = self._drawer.shown_rows()
         idx = next((i for i, r in enumerate(rows) if r.get("task_id") == t.get("task_id")), -1)
         self._pos.setText(f"{idx + 1} / {len(rows)}" if idx >= 0 else "")
@@ -1882,6 +1952,7 @@ class ConfirmWindow(QWidget):
             return
         token = self._load_token
         task_id = self._task.get("task_id")
+        self._ensure_status_styles()
 
         def _fetch() -> List[Dict[str, Any]]:
             from bpe.shotgrid.client import get_default_sg

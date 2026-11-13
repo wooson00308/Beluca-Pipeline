@@ -78,7 +78,7 @@ def _standard(**kw: object) -> ProjectStandard:
     base = dict(
         preset="PROJ_001",
         fps=23.976,
-        mov_size=(1920, 1080),
+        mov_sizes=((1920, 1080),),
         plate_size=(3840, 2076),
         codec="prores",
         look="ACES / Rec.709",
@@ -137,7 +137,7 @@ def test_missing_color_tag_is_unknown_not_fail() -> None:
 
 
 def test_preset_without_values_falls_back_to_the_reference() -> None:
-    empty = _standard(fps=None, mov_size=None, codec="", color_tags=())
+    empty = _standard(fps=None, mov_sizes=(), codec="", color_tags=())
     res = check_work_against_reference(
         _info(fps=24.0), _info(), "편집본", standard=empty, plate=_info()
     )
@@ -150,4 +150,4 @@ def test_basis_text() -> None:
 
     assert basis_text("편집본", True, None) == "프리셋 없음 · 프레임 수는 편집본"
     assert basis_text("편집본", True, _standard()) == "프리셋 PROJ_001 · 프레임 수는 편집본"
-    assert basis_text("원본", False, _standard()) == "프리셋 PROJ_001 · 프레임 수는 원본 없음"
+    assert basis_text("원본", False, _standard()) == "프리셋 PROJ_001 · 프레임 수 기준 없음"

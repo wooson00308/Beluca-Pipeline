@@ -11,6 +11,7 @@ from bpe.core.confirm_media import (
     find_versions,
     is_lut_baked,
     parse_version,
+    quick_version_movie,
     shot_root_from_movie,
 )
 
@@ -42,6 +43,24 @@ def test_shot_root_from_movie_both_layouts(tmp_path: Path) -> None:
     assert shot_root_from_movie(internal) == shot
     assert shot_root_from_movie(vendor) == shot
     assert shot_root_from_movie(tmp_path / "loose.mov") is None
+
+
+def test_precomp_and_other_task_folders_find_the_shot(tmp_path: Path) -> None:
+    shot = tmp_path / "ep04" / "ep04_s003_0120"
+    pre1 = _touch(shot / "precomp" / "v001" / "ep04_s003_0120_precomp_v001.mov")
+    pre2 = _touch(shot / "precomp" / "v002" / "ep04_s003_0120_precomp_v002.mov")
+    _touch(shot / "comp" / "v005" / "ep04_s003_0120_comp_v005.mov")  # 다른 작업의 버전은 안 섞임
+    org = _touch(shot / "plate" / "org" / "v001" / "hi" / "ep04_s003_0120_org_v001.mov")
+    edit = _touch(shot / "edit" / "ep04_s003_0120_edit_v001.mov")
+    assert shot_root_from_movie(pre2) == shot
+    media = find_shot_media(pre2)
+    assert media.org == org and media.edit == edit
+    assert [v.path for v in media.versions] == [pre1, pre2]
+    assert media.previous is not None and media.previous.path == pre1
+    # 이름을 모르는 작업 폴더: plate·edit 가 있는 위쪽 폴더가 샷 폴더
+    fx = _touch(shot / "fx" / "v003" / "ep04_s003_0120_fx_v003.mov")
+    assert shot_root_from_movie(fx) == shot
+    assert find_shot_media(fx).org == org
 
 
 def test_internal_layout_finds_everything(tmp_path: Path) -> None:
@@ -134,3 +153,21 @@ def test_plate_movie_is_found_in_hi_or_any_other_subfolder(tmp_path: Path) -> No
     _touch(both / "plate" / "org" / "v001" / "hi" / "s3_org_v001.mov")
     mov = _touch(both / "plate" / "org" / "v001" / "mov" / "s3_org_v001.mov")
     assert find_org(both) == mov  # 둘 다 있으면 mov 가 먼저
+
+
+def test_quick_version_movie_goes_straight_to_the_usual_place(tmp_path: Path) -> None:
+    shot = tmp_path / "PROJ_001" / "04_sq" / "ep06" / "ep06_s020_0012"
+    lut = _touch(shot / "comp" / "devl" / "renders" / "ep06_s020_0012_comp_v001_lut.mov")
+    _touch(shot / "comp" / "devl" / "renders" / "ep06_s020_0012_comp_v001.mov")
+    pre = _touch(shot / "precomp" / "v002" / "ep06_s020_0012_precomp_v002.mov")
+    root = str(tmp_path)
+
+    def quick(version: str, tasks: tuple = ("comp", "precomp")) -> object:
+        return quick_version_movie(root, "PROJ_001", "ep06_s020_0012", version, tasks)
+
+    assert quick("EP06_S020_0012_comp_v001_lut") == lut  # 이름이 똑같은 영상만
+    assert quick("ep06_s020_0012_precomp_v002", ("", "comp", "comp", "precomp")) == pre
+    assert quick("ep06_s020_0012_comp_v009") is None  # 없으면 넓게 찾기로 넘어감
+    assert quick("") is None
+    assert quick_version_movie(root, "PROJ_001", "ep99_s001_0010", "x_v001") is None
+    assert quick_version_movie("", "PROJ_001", "ep06_s020_0012", "x_v001") is None

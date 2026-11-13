@@ -95,7 +95,8 @@ def check_work_against_reference(
     - 프레임 수: *reference*(같은 샷의 edit, 없으면 ORG plate) 영상의 길이와 대조한다.
       edit 은 길이만 참고한다 — 해상도·fps 는 edit 과 맞추지 않는다.
     - fps: 프리셋(*standard*)에 값이 있으면 프리셋과, 없으면 *plate*(ORG plate)와 대조한다.
-    - 해상도: 프리셋에 MOV 크기가 있을 때만 판정한다. 없으면 값만 알려 준다.
+    - 해상도: 프리셋의 누크 틀이 MOV 를 내보내는 크기와 대조한다(크기가 여럿이면 그중 하나면
+      통과). 틀에서 크기를 못 읽으면 판정하지 않고 값만 알려 준다.
     - 코덱·색 표시: 프리셋에 값이 있을 때만.
     """
     if work is None:
@@ -115,17 +116,18 @@ def check_work_against_reference(
         out.append(CheckResult("fps", STATE_UNKNOWN, f"fps {_fmt_fps(work.fps)} · 기준 없음"))
 
     ws = (work.width, work.height)
-    want = standard.mov_size if standard is not None else None
-    if want is None:
+    wants = standard.mov_sizes if standard is not None else ()
+    if not wants:
         out.append(CheckResult("해상도", STATE_UNKNOWN, f"해상도 {ws[0]}×{ws[1]} · 기준 없음"))
-    elif ws == want:
+    elif ws in wants:
         out.append(CheckResult("해상도", STATE_PASS, f"해상도 {ws[0]}×{ws[1]} 통과"))
     else:
+        expect = " 또는 ".join(f"{w}×{h}" for w, h in wants)
         out.append(
             CheckResult(
                 "해상도",
                 STATE_FAIL,
-                f"해상도 다름: {PRESET_LABEL} {want[0]}×{want[1]} / 현재버전 {ws[0]}×{ws[1]}",
+                f"해상도 다름: {PRESET_LABEL} {expect} / 현재버전 {ws[0]}×{ws[1]}",
             )
         )
 
@@ -140,9 +142,10 @@ def basis_text(
     reference_label: str, has_reference: bool, standard: Optional[ProjectStandard]
 ) -> str:
     """무엇을 기준으로 봤는지 한 줄 — 「프리셋 SBS_030 · 프레임 수는 edit」."""
-    ref = reference_label if has_reference else f"{reference_label} 없음"
     head = f"{PRESET_LABEL} {standard.preset}" if standard is not None else f"{PRESET_LABEL} 없음"
-    return f"{head} · 프레임 수는 {ref}"
+    if not has_reference:
+        return f"{head} · 프레임 수 기준 없음"
+    return f"{head} · 프레임 수는 {reference_label}"
 
 
 def has_failure(results: List[CheckResult]) -> bool:

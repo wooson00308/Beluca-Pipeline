@@ -6,7 +6,7 @@ import re
 from html import escape
 from typing import Any, Dict, List, Optional, Tuple
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import (
     QComboBox,
@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QListView,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
@@ -22,14 +23,18 @@ from PySide6.QtWidgets import (
 )
 
 from bpe.core.confirm_checks import STATE_FAIL, STATE_PASS, CheckResult
-from bpe.gui.confirm import style
+from bpe.gui.confirm import status_style, style
 
 PANEL_WIDTH = style.PANEL_WIDTH
 _NO_VERSION = "버전 없음"
 _KEY_COLUMN_W = 76
 _HEADER_H = 28
+_STATUS_ICON = 18
+_STATUS_ROW_H = 30
+_STATUS_LIST_W = 300
 _FRAME_REF = re.compile(r"\[(\d+)((?:\s*[-–~]\s*\d+)?)\]")
 _FRAME_LINK = "frame:"
+_PATH_BREAK = re.compile(r"[\\/_]")
 _CODE_TOKEN = re.compile(r"^[A-Za-z0-9_.\-]*\d[A-Za-z0-9_.\-]*$|^[a-z]{2,6}$")
 
 
@@ -69,7 +74,9 @@ def _frame_links(text: str) -> str:
             f'text-decoration:none; {style.mono()}">[{m.group(1)}{m.group(2)}]</a>'
         )
 
-    return _FRAME_REF.sub(repl, escape(text)).replace("\n", "<br>")
+    # 긴 경로가 칸 밖으로 잘리지 않게, 경로 구분 글자 뒤에서 줄이 바뀔 수 있게 한다
+    safe = _PATH_BREAK.sub(lambda m: m.group(0) + "​", escape(text))
+    return _FRAME_REF.sub(repl, safe).replace("\n", "<br>")
 
 
 def _key(text: str) -> QLabel:
@@ -309,35 +316,39 @@ class ConfirmSidePanel(QWidget):
         actions = QHBoxLayout()
         actions.setContentsMargins(0, 0, 0, 0)
         actions.setSpacing(6)
-        self._btn_retake = QPushButton("retake")
-        self._btn_retake.setStyleSheet(
-            f"QPushButton {{ height: 32px; background: {style.PANEL}; color: {style.RETAKE}; "
-            f"border: 1px solid {style.RETAKE_EDGE}; {style.mono(13, bold=True)} }}"
-            f"QPushButton:hover {{ background: #3a2422; }}"
-            f"QPushButton:disabled {{ color: #6a6a6a; border-color: {style.EDGE}; }}"
-        )
-        self._btn_cfrm = QPushButton("cfrm")
-        self._btn_cfrm.setStyleSheet(
-            f"QPushButton {{ height: 32px; background: {style.ACCENT}; color: {style.ON_ACCENT}; "
-            f"border: 1px solid {style.EDGE}; {style.mono(13, bold=True)} }}"
-            f"QPushButton:hover {{ background: #35a08c; }}"
-            f"QPushButton:disabled {{ color: #6a6a6a; background: #2c2c2c; }}"
-        )
+        self._btn_retake = QPushButton(" retake")
+        self._btn_cfrm = QPushButton(" cfrm")
         for b in (self._btn_retake, self._btn_cfrm):
             b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            b.setIconSize(QSize(_STATUS_ICON, _STATUS_ICON))
         self._btn_retake.clicked.connect(lambda: self.status_requested.emit("retake"))
         self._btn_cfrm.clicked.connect(lambda: self.status_requested.emit("cfrm"))
         actions.addWidget(self._btn_retake, 1)
         actions.addWidget(self._btn_cfrm, 1)
+        # 그 밖의 상태 — 펼치면 줄마다 상태 색·아이콘이 보이는 큼직한 목록
         self._other = QComboBox()
         self._other.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._other.setFixedWidth(84)
-        self._other.setStyleSheet("QComboBox { height: 32px; }")
+        self._other.setFixedWidth(96)
+        self._other.setView(QListView())
+        self._other.setIconSize(QSize(_STATUS_ICON, _STATUS_ICON))
+        self._other.setMaxVisibleItems(24)
+        self._other.view().setMinimumWidth(_STATUS_LIST_W)
+        self._other.setStyleSheet(
+            "QComboBox { height: 32px; }"
+            f"QComboBox QAbstractItemView {{ background: {style.PANEL}; color: {style.TEXT}; "
+            f"border: 1px solid {style.EDGE}; font-size: {style.FONT_PX + 1}px; outline: none; }}"
+            f"QComboBox QAbstractItemView::item {{ min-height: {_STATUS_ROW_H}px; "
+            f"padding: 2px 10px; border-bottom: 1px solid {style.EDGE}; }}"
+            f"QComboBox QAbstractItemView::item:selected {{ background: {style.ON}; "
+            f"color: {style.TEXT_STRONG}; }}"
+        )
+        self._status_items: List[Tuple[str, str]] = []
         self._other.addItem("Status", "")
         self._other.activated.connect(self._on_other)
         actions.addWidget(self._other)
         fcol.addLayout(actions)
         col.addWidget(foot)
+        self.refresh_status_styles()
         self.set_work_info("", "", "")
         self.set_standard("", "", [], "")
         self._fill_past()
@@ -345,10 +356,33 @@ class ConfirmSidePanel(QWidget):
     # ── 채우기 ───────────────────────────────────────────────────
 
     def set_other_statuses(self, items: List[Tuple[str, str]]) -> None:
+        self._status_items = list(items)
+        self.refresh_status_styles()
+
+    def refresh_status_styles(self) -> None:
+        """상태 색·아이콘을 버튼과 목록에 다시 입힌다(샷그리드에서 읽어 온 뒤에도 부른다)."""
         self._other.clear()
         self._other.addItem("Status", "")
-        for code, label in items:
-            self._other.addItem(f"{code} · {label}", code)
+        for code, label in self._status_items:
+            text = f"{code}   {status_style.name(code) or label}"
+            self._other.addItem(status_style.icon(code, _STATUS_ICON), text, code)
+        # retake = 테두리만, cfrm = 채움 — 둘 다 그 상태의 색으로
+        r_bg, _r_fg = status_style.colors("retake")
+        self._btn_retake.setIcon(status_style.icon("retake", _STATUS_ICON))
+        self._btn_retake.setStyleSheet(
+            f"QPushButton {{ height: 32px; background: {style.PANEL}; color: {r_bg}; "
+            f"border: 1px solid {r_bg}; {style.mono(13, bold=True)} }}"
+            f"QPushButton:hover {{ background: {style.RAISED}; }}"
+            f"QPushButton:disabled {{ color: #6a6a6a; border-color: {style.EDGE}; }}"
+        )
+        c_bg, c_fg = status_style.colors("cfrm")
+        self._btn_cfrm.setIcon(status_style.icon("cfrm", _STATUS_ICON))
+        self._btn_cfrm.setStyleSheet(
+            f"QPushButton {{ height: 32px; background: {c_bg}; color: {c_fg}; "
+            f"border: 1px solid {style.EDGE}; {style.mono(13, bold=True)} }}"
+            f"QPushButton:hover {{ border: 1px solid {style.TEXT_STRONG}; }}"
+            f"QPushButton:disabled {{ color: #6a6a6a; background: #2c2c2c; }}"
+        )
 
     def set_work_info(self, order: str, description: str, who: str) -> None:
         """워크 오더·샷 설명·작업 줄. 비어 있으면 '없음'으로 보여 준다."""

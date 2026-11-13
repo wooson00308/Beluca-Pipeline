@@ -308,6 +308,15 @@ _ICON_PATHS: Dict[str, Tuple[str, str]] = {
         "M5 10.25h3.5v3.5H5zM10.25 10.25h3.5v3.5h-3.5zM15.5 10.25H19v3.5h-3.5z"
         "M5 15.5h3.5V19H5zM10.25 15.5h3.5V19h-3.5zM15.5 15.5H19V19h-3.5z",
     ),
+    "thumb": (
+        _STROKE,
+        "M7 11v8H4v-8zM7 11l4-7c1.5 0 2.5 1 2.5 2.5V10h4.6c1 0 1.7 0.9 1.5 1.9l-1.2 5.6"
+        "c-0.2 0.9-1 1.5-1.9 1.5H7",
+    ),
+    "star": (
+        _STROKE,
+        "M12 3.5l2.6 5.4 5.9 0.8-4.3 4.1 1 5.9L12 16.9l-5.2 2.8 1-5.9-4.3-4.1 5.9-0.8z",
+    ),
     "play": (_FILL, "M7 4v16l13-8z"),
     "pause": (_FILL, "M6 5h4v14H6z M14 5h4v14h-4z"),
     "first": (_FILL, "M5 5h2v14H5z M19 5v14l-10-7z"),
@@ -371,7 +380,8 @@ def svg_path(d: str) -> QPainterPath:
     return path
 
 
-def _draw_icon(p: QPainter, name: str, color: str) -> None:
+def draw_icon(p: QPainter, name: str, color: str) -> None:
+    """24×24 칸 좌표로 아이콘 하나를 그린다(부르는 쪽이 크기를 맞춘다)."""
     mode, d = _ICON_PATHS[name]
     if mode == _FILL:
         p.setPen(Qt.PenStyle.NoPen)
@@ -395,7 +405,7 @@ def make_icon(name: str, color: str = TEXT, size: int = 16, on_color: str = TEXT
         p = QPainter(pm)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         p.scale(size * scale / _ICON_BOX, size * scale / _ICON_BOX)
-        _draw_icon(p, name, mode_color)
+        draw_icon(p, name, mode_color)
         p.end()
         pm.setDevicePixelRatio(scale)
         icon.addPixmap(pm, QIcon.Mode.Normal, state)
