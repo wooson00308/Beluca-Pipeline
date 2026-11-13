@@ -2,36 +2,45 @@
 
 from __future__ import annotations
 
-from bpe.core.confirm_standard import is_ai_shot, mov_sizes_from_template, pick_preset
+from typing import Any, Tuple
+
+from bpe.core.confirm_standard import mov_sizes_from_template, pick_preset
 
 _NAMES = ["PROJ_001_AI_GAMMA", "PROJ_001_AI_REC709", "PROJ_001_GAMMA", "PROJ_001_REC709"]
 
 
-def test_ai_tag_decides_ai_shot() -> None:
-    assert is_ai_shot(["ai"]) is True
-    assert is_ai_shot(["뷰티", "AI"]) is True
-    assert is_ai_shot(["뷰티"]) is False
-    assert is_ai_shot([]) is False
-    assert is_ai_shot(None) is None  # 태그를 못 읽었으면 모름
+_UHD, _HD = (3840, 2160), (1920, 1080)
+_SIZES = {
+    "PROJ_001_AI_GAMMA": (_HD,),
+    "PROJ_001_AI_REC709": (_HD,),
+    "PROJ_001_GAMMA": (_UHD,),
+    "PROJ_001_REC709": (_UHD,),
+}
 
 
-def test_plate_colour_and_ai_tag_pick_one_preset() -> None:
-    assert pick_preset(_NAMES, plate_color="REC709", is_ai=False) == ("PROJ_001_REC709", True)
-    assert pick_preset(_NAMES, plate_color="GAMMA", is_ai=True) == ("PROJ_001_AI_GAMMA", True)
-    assert pick_preset(_NAMES, plate_color="GAMMA", is_ai=False) == ("PROJ_001_GAMMA", True)
+def _pick(color: Any = None, size: Any = None) -> Tuple[str, bool]:
+    return pick_preset(_NAMES, plate_color=color, work_size=size, sizes=_SIZES)
 
 
-def test_missing_information_leaves_it_undecided() -> None:
-    name, decided = pick_preset(_NAMES, plate_color="REC709", is_ai=None)
-    assert not decided and name == "PROJ_001_REC709"  # 색은 맞추고, AI 는 몰라 일반을 먼저
-    name, decided = pick_preset(_NAMES, plate_color=None, is_ai=True)
-    assert not decided and "_AI_" in name
-    assert pick_preset(_NAMES)[1] is False
+def test_plate_colour_and_delivered_size_pick_one_preset() -> None:
+    assert _pick("REC709", _UHD) == ("PROJ_001_REC709", True)
+    assert _pick("GAMMA", _HD) == ("PROJ_001_AI_GAMMA", True)
+    assert _pick("GAMMA", _UHD) == ("PROJ_001_GAMMA", True)
+    assert _pick("REC709", _HD) == ("PROJ_001_AI_REC709", True)
+
+
+def test_missing_information_leaves_it_undecided_and_offers_the_ordinary_preset() -> None:
+    assert _pick("REC709") == ("PROJ_001_REC709", False)  # 크기를 모르면 일반을 먼저
+    assert _pick(None, _HD) == ("PROJ_001_AI_GAMMA", False)  # 색을 모르면 둘 중 하나로 못 정함
+    assert _pick("REC709", (2048, 1152)) == ("PROJ_001_REC709", False)  # 어느 프리셋 크기도 아님
+    assert _pick()[1] is False
     assert pick_preset([]) == ("", False)
+    # 프리셋 크기를 못 읽었으면(틀 없음) 크기로는 가르지 않는다
+    assert pick_preset(_NAMES, plate_color="GAMMA", work_size=_HD) == ("PROJ_001_GAMMA", False)
 
 
 def test_single_preset_is_always_decided() -> None:
-    assert pick_preset(["SBS_030"], plate_color="REC709", is_ai=True) == ("SBS_030", True)
+    assert pick_preset(["SBS_030"], plate_color="REC709", work_size=_HD) == ("SBS_030", True)
 
 
 def test_unknown_colour_name_does_not_empty_the_choice() -> None:

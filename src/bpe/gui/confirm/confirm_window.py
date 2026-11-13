@@ -58,7 +58,6 @@ from bpe.core.confirm_media import find_shot_media, parse_version, quick_version
 from bpe.core.confirm_probe import VideoInfo, codec_label, probe_video
 from bpe.core.confirm_standard import (
     ProjectStandard,
-    is_ai_shot,
     load_standard,
     pick_preset,
     preset_names_for,
@@ -861,29 +860,9 @@ class ConfirmWindow(QWidget):
 
         project = self._project_key()
         picked = dict(get_confirm_settings()["presets"])
-        ai = is_ai_shot(self._task.get("shot_tags"))
 
         def _prepare() -> Dict[str, Any]:
             media = find_shot_media(Path(movie))
-            # 검사 기준: 이 프로젝트의 프리셋. 여러 개면 샷 빌더처럼 플레이트 색(Rec.709/Gamma)과
-            # AI 샷 여부로 고르고, 그래도 못 정하면 전에 고른 것 → 첫째.
-            names = preset_names_for(read_presets(), project, Path(movie).parts)
-            name, why = (names[0] if names else ""), ""
-            if len(names) > 1:
-                color = inspect_mov_color(media.org).result if media.org else None
-                name, decided = pick_preset(names, plate_color=color, is_ai=ai)
-                parts = []
-                if color:
-                    parts.append(f"플레이트 {DISPLAY_NAME.get(color, color)}")
-                if ai is not None:
-                    parts.append("AI 태그" if ai else "AI 태그 없음")
-                if decided:
-                    why = "자동: " + " · ".join(parts)
-                else:
-                    saved = picked.get(names[0], "")
-                    name = saved if saved in names else name
-                    why = "자동으로 못 정함 — 아래에서 골라 주세요"
-            standard = load_standard(name) if name else None
             paths = {
                 KEY_CUR: media.current.path if media.current else None,
                 KEY_PREV: media.previous.path if media.previous else None,
@@ -891,6 +870,36 @@ class ConfirmWindow(QWidget):
                 KEY_EDIT: media.edit,
             }
             infos = {k: (probe_video(str(p)) if p else None) for k, p in paths.items()}
+            # 검사 기준: 이 프로젝트의 프리셋. 여러 개면 플레이트 색(Rec.709/Gamma — 샷 빌더와
+            # 같은 판별)과 올라온 영상 크기(AI 프리셋 / 일반 프리셋)로 고르고, 그래도 못 정하면
+            # 전에 고른 것 → 일반 프리셋.
+            names = preset_names_for(read_presets(), project, Path(movie).parts)
+            name, why = (names[0] if names else ""), ""
+            standards = {n: load_standard(n) for n in names} if len(names) > 1 else {}
+            if len(names) > 1:
+                color = inspect_mov_color(media.org).result if media.org else None
+                cur = infos.get(KEY_CUR)
+                size = (cur.width, cur.height) if cur and cur.width and cur.height else None
+                name, decided = pick_preset(
+                    names,
+                    plate_color=color,
+                    work_size=size,
+                    sizes={n: st.mov_sizes for n, st in standards.items() if st is not None},
+                )
+                parts = []
+                if color:
+                    parts.append(f"플레이트 {DISPLAY_NAME.get(color, color)}")
+                if size:
+                    parts.append(f"영상 크기 {size[0]}×{size[1]}")
+                if decided:
+                    why = "자동: " + " · ".join(parts)
+                else:
+                    saved = picked.get(names[0], "")
+                    name = saved if saved in names else name
+                    why = "자동으로 못 정함 — 아래에서 골라 주세요"
+            standard = standards.get(name)
+            if standard is None and name:
+                standard = load_standard(name)
             return {
                 "media": media,
                 "paths": paths,

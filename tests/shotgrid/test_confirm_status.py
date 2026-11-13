@@ -1,4 +1,4 @@
-"""Tests for bpe.shotgrid.confirm_status / shot_tags — 상태 색·아이콘, 샷 태그 (MockShotgun)."""
+"""Tests for bpe.shotgrid.confirm_status — 상태 색·아이콘 (MockShotgun)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ from typing import Any
 
 import pytest
 
-from bpe.shotgrid.confirm_list import shot_tags
 from bpe.shotgrid.confirm_status import fetch_status_styles
 from tests.shotgrid.mock_sg import MockShotgun
 
@@ -71,11 +70,3 @@ def test_icon_lookup_failure_keeps_names_and_colours(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(sg, "find", _find)
     st = fetch_status_styles(sg)
     assert st["sv"]["color"] == "#1dd72e" and st["sv"]["icon_png"] == b""
-
-
-def test_shot_tags_by_shot_id() -> None:
-    sg = MockShotgun()
-    sg._add_entity("Shot", {"id": 101, "tags": [{"type": "Tag", "id": 1, "name": "ai"}]})
-    sg._add_entity("Shot", {"id": 102, "tags": []})
-    assert shot_tags(sg, [101, 102, 102, None]) == {101: ["ai"], 102: []}
-    assert shot_tags(sg, []) == {}

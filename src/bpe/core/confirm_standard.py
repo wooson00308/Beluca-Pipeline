@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 
 import bpe.core.config as cfg
 import bpe.core.settings as settings_mod
@@ -112,24 +112,23 @@ def preset_names_for(
     return []
 
 
-AI_TAG = "ai"
 _AI_TOKEN = "AI"
-
-
-def is_ai_shot(tags: Optional[Sequence[str]]) -> Optional[bool]:
-    """샷그리드 샷의 태그로 AI 샷인지 본다. 태그 정보가 없으면(``None``) 모름."""
-    if tags is None:
-        return None
-    return any(str(t).strip().lower() == AI_TAG for t in tags)
+Size = Tuple[int, int]
 
 
 def pick_preset(
-    names: Sequence[str], *, plate_color: Optional[str] = None, is_ai: Optional[bool] = None
+    names: Sequence[str],
+    *,
+    plate_color: Optional[str] = None,
+    work_size: Optional[Size] = None,
+    sizes: Optional[Mapping[str, Sequence[Size]]] = None,
 ) -> Tuple[str, bool]:
     """프리셋이 여러 개인 프로젝트에서 이 샷의 프리셋을 고른다 → ``(이름, 하나로 정해졌나)``.
 
-    샷 빌더와 같은 규칙이다: 이름의 ``REC709``/``GAMMA`` 는 플레이트 MOV 의 색(자동 인식),
-    ``AI`` 는 AI 샷 여부로 가른다. 정보가 없는 기준은 건너뛴다.
+    이름의 ``REC709``/``GAMMA`` 는 샷 빌더처럼 플레이트 MOV 의 색(자동 인식)으로 가른다.
+    AI 프리셋인지 일반 프리셋인지는 샷그리드에서 믿을 만하게 읽을 길이 없어서, 올라온
+    영상의 크기(*work_size*)가 어느 프리셋의 MOV 크기(*sizes*)와 같은지로 가른다 — 작업자가
+    샷을 만들 때 고른 프리셋이 영상 크기에 그대로 남기 때문이다. 정보가 없는 기준은 건너뛴다.
     """
     cand = list(names)
     if not cand:
@@ -141,11 +140,11 @@ def pick_preset(
     if plate_color:
         hit = [n for n in cand if plate_color.upper() in tokens(n)]
         cand = hit or cand
-    if is_ai is not None:
-        hit = [n for n in cand if (_AI_TOKEN in tokens(n)) == is_ai]
+    if work_size is not None and sizes:
+        hit = [n for n in cand if tuple(work_size) in [tuple(x) for x in sizes.get(n, ())]]
         cand = hit or cand
-    else:  # AI 샷인지 모르면 더 흔한 일반 프리셋을 먼저 내민다
-        cand.sort(key=lambda n: _AI_TOKEN in tokens(n))
+    # 그래도 여럿이면 더 흔한 일반 프리셋을 먼저 내민다
+    cand.sort(key=lambda n: _AI_TOKEN in tokens(n))
     return cand[0], len(cand) == 1
 
 
