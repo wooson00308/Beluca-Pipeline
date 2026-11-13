@@ -35,9 +35,9 @@ def test_checks_collapse_to_one_line_when_all_pass(panel: Any) -> None:
 
 def test_failed_check_is_spelled_out(panel: Any) -> None:
     panel.set_checks(
-        [_check(STATE_FAIL, "프레임 다름: 편집본 75 / 작업본 74"), _check(STATE_PASS, "fps 통과")]
+        [_check(STATE_FAIL, "프레임 다름: 편집본 75 / 현재버전 74"), _check(STATE_PASS, "fps 통과")]
     )
-    assert "편집본 75 / 작업본 74" in panel._v_checks.text()
+    assert "편집본 75 / 현재버전 74" in panel._v_checks.text()
     assert not panel._btn_failures.isHidden()
 
 
@@ -57,12 +57,47 @@ def test_frame_numbers_in_past_notes_are_links(panel: Any) -> None:
     assert got == [1040]
 
 
-def test_memo_lines_keep_their_text_and_count(panel: Any) -> None:
-    panel.set_memo([(1, "[1040] 엣지", True), (2, "[1052] 블랙", False)])
-    assert panel.memo_texts() == ["[1040] 엣지", "[1052] 블랙"]
-    assert "보낼 줄 1" in panel._memo_head.text()
-    panel.set_memo([])
-    assert panel._memo_head.text() == "메모"
+def test_memo_is_one_plain_text_box(panel: Any) -> None:
+    seen: List[int] = []
+    panel.memo_edited.connect(lambda: seen.append(1))
+    panel.set_memo_text("엣지 수정해주세요")
+    panel.append_memo("경로: W:/ref/a.mov")
+    assert panel.memo_text() == "엣지 수정해주세요\n경로: W:/ref/a.mov"
+    assert seen  # 고칠 때마다 알린다(임시 저장용)
+    panel.clear_memo()
+    assert panel.memo_text() == ""
+
+
+def test_notes_show_everything_first_and_mark_version_comments(panel: Any) -> None:
+    panel.set_past_notes(
+        [
+            {
+                "kind": "note",
+                "version_code": "S_comp_v002",
+                "timestamp": "2026-11-12",
+                "content": "b",
+            },
+            {
+                "kind": "version",
+                "version_code": "S_comp_v002",
+                "timestamp": "2026-11-11",
+                "author": "작업자",
+                "content": "엣지 정리했습니다",
+            },
+            {
+                "kind": "note",
+                "version_code": "S_comp_v001",
+                "timestamp": "2026-11-05",
+                "content": "a",
+            },
+        ],
+        "S_comp_v002",
+    )
+    assert panel._past_versions.currentIndex() == 0 and panel.past_count() == 3  # 처음엔 전부
+    assert "버전 올리며 쓴 글" in panel._past_rows[1].text()
+    assert "버전 올리며 쓴 글" not in panel._past_rows[0].text()
+    panel._past_versions.setCurrentIndex(2)  # 버전을 고르면 그 버전 것만
+    assert panel.past_count() == 1
 
 
 def test_work_line_puts_codes_in_mono(panel: Any) -> None:

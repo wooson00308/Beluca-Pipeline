@@ -1,17 +1,20 @@
 """컨펌 목록의 갈래 나누기·찾기·정렬 (표준 라이브러리만).
 
-외주 = 버전을 올린 쪽(샷그리드 Version 의 Artist)이 업체 그룹. 내부 = 사람.
+갈래 이름은 샷그리드 Versions 화면에 만들어 둔 분류 이름을 그대로 쓴다.
+vendor = 버전을 올린 쪽(샷그리드 Version 의 Artist)이 업체 그룹. 내부 = 사람.
 """
 
 from __future__ import annotations
 
 from typing import Any, Dict, List, Tuple
 
-GROUP_VENDOR = "외주"
-GROUP_INTERNAL = "내부"
-GROUP_TM = "TM"
-GROUP_SV = "SV"
-GROUPS: Tuple[str, ...] = (GROUP_VENDOR, GROUP_INTERNAL, GROUP_TM, GROUP_SV)
+GROUP_VENDOR = "SV_Confirm (vendor)"
+GROUP_INTERNAL = "SV_Confirm (내부)"
+GROUP_TM = "TM_Confirm"
+GROUP_ALL = "total"
+GROUPS: Tuple[str, ...] = (GROUP_VENDOR, GROUP_INTERNAL, GROUP_TM, GROUP_ALL)
+STATUS_SV = "sv"
+STATUS_TM = "tm"
 
 SORT_OLD = "오래된 순"
 SORT_NEW = "새 것부터"
@@ -30,13 +33,11 @@ def is_vendor(row: Row) -> bool:
 def in_group(row: Row, group: str) -> bool:
     status = (row.get("task_status") or "").strip().lower()
     if group == GROUP_VENDOR:
-        return is_vendor(row)
+        return status == STATUS_SV and is_vendor(row)
     if group == GROUP_INTERNAL:
-        return not is_vendor(row)
+        return status == STATUS_SV and not is_vendor(row)
     if group == GROUP_TM:
-        return status == "tm"
-    if group == GROUP_SV:
-        return status == "sv"
+        return status == STATUS_TM
     return True
 
 

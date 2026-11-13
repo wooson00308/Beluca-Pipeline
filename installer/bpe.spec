@@ -150,6 +150,7 @@ hiddenimports = [
     "bpe.core.lut_cube",
     "bpe.shotgrid.confirm_submit",
     "bpe.shotgrid.confirm_list",
+    "bpe.shotgrid.confirm_context",
     "bpe.shotgrid",
     "bpe.core.ai_qc",
     "bpe.gui.widgets.ai_qc_dialog",

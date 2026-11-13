@@ -32,8 +32,8 @@ def test_all_pass() -> None:
 def test_frame_count_mismatch_is_fail_with_both_numbers() -> None:
     res = check_work_against_reference(_info(frames=73), _info(frames=74), "편집본")
     assert res[0].state == STATE_FAIL
-    assert res[0].message == "프레임 수 다름: 편집본 74 / 작업본 73"
-    assert failure_lines(res) == ["프레임 수 다름: 편집본 74 / 작업본 73"]
+    assert res[0].message == "프레임 수 다름: 편집본 74 / 현재버전 73"
+    assert failure_lines(res) == ["프레임 수 다름: 편집본 74 / 현재버전 73"]
 
 
 def test_fps_tolerance() -> None:
@@ -108,8 +108,8 @@ def test_preset_fps_and_size_win_over_the_edit() -> None:
     bad = check_work_against_reference(
         _info(2048, 1080, fps=24.0), _info(), "편집본", standard=_standard()
     )
-    assert bad[1].message == "fps 다름: 프리셋 23.976 / 작업본 24.000"
-    assert bad[2].message == "해상도 다름: 프리셋 1920×1080 / 작업본 2048×1080"
+    assert bad[1].message == "fps 다름: 프리셋 23.976 / 현재버전 24.000"
+    assert bad[2].message == "해상도 다름: 프리셋 1920×1080 / 현재버전 2048×1080"
 
 
 def test_preset_judges_size_even_when_only_the_plate_exists() -> None:
@@ -128,8 +128,8 @@ def test_preset_checks_run_without_any_reference_movie() -> None:
 def test_preset_codec_and_color_mismatch() -> None:
     work = VideoInfo(1920, 1080, 23.976, 74, "h264", "High", "yuv420p", "bt2020nc", "")
     res = check_work_against_reference(work, _info(), "편집본", standard=_standard())
-    assert res[3].message == "코덱 다름: 프리셋 ProRes / 작업본 H.264 High"
-    assert res[4].message == "색 표시 다름: 프리셋 ACES / Rec.709 / 작업본 bt2020nc"
+    assert res[3].message == "코덱 다름: 프리셋 ProRes / 현재버전 H.264 High"
+    assert res[4].message == "색 표시 다름: 프리셋 ACES / Rec.709 / 현재버전 bt2020nc"
     assert has_failure(res)
 
 
@@ -143,7 +143,7 @@ def test_preset_without_values_falls_back_to_the_reference() -> None:
     empty = _standard(fps=None, mov_size=None, codec="", color_tags=())
     res = check_work_against_reference(_info(fps=24.0), _info(), "편집본", standard=empty)
     assert len(res) == 3
-    assert res[1].message == "fps 다름: 편집본 23.976 / 작업본 24.000"
+    assert res[1].message == "fps 다름: 편집본 23.976 / 현재버전 24.000"
 
 
 def test_basis_text() -> None:

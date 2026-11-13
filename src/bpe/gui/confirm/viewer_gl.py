@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, Optional, Tuple
 
 from PySide6.QtCore import QPointF, QSize, Qt, Signal
@@ -38,6 +39,7 @@ SLOT_A = 0
 SLOT_B = 1
 
 _ZOOM_MIN, _ZOOM_MAX = 0.1, 64.0
+_ZOOM_DRAG_RATE = 0.006  # Ctrl+끌기: 가로 1픽셀에 약 0.6% 확대
 _NEAREST_FROM_SCALE = 2.0
 
 VERTEX_SRC = """#version 330 core
@@ -244,6 +246,8 @@ class ConfirmGLView(QOpenGLWidget):
     gl_failed = Signal(str)
     view_changed = Signal()  # 그림이 놓인 자리가 바뀜(확대·끌기·창 크기)
     hover_pixel = Signal(int, int)  # 그림 안 픽셀 위치, 밖이면 (-1, -1)
+    scrub_started = Signal()  # 영상을 눌러 좌우로 끌기 시작
+    scrub_moved = Signal(float)  # 누른 곳에서 가로로 움직인 픽셀 수
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -261,6 +265,9 @@ class ConfirmGLView(QOpenGLWidget):
         self._zoom = 1.0
         self._pan = QPointF(0.0, 0.0)
         self._drag_from: Optional[QPointF] = None
+        self._zoom_from: Optional[QPointF] = None
+        self._zoom_anchor = QPointF(0.0, 0.0)
+        self._scrub_x: Optional[float] = None
         self.setMinimumSize(320, 180)
         self.setMouseTracking(True)
 
@@ -378,16 +385,25 @@ class ConfirmGLView(QOpenGLWidget):
         event.accept()
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
-        alt_left = (
-            event.button() == Qt.MouseButton.LeftButton
-            and event.modifiers() & Qt.KeyboardModifier.AltModifier
-        )
-        if event.button() == Qt.MouseButton.MiddleButton or alt_left:
+        """가운데 버튼·Alt+끌기 = 화면 이동, Ctrl+끌기 = 확대, 그냥 끌기 = 프레임 넘기기."""
+        left = event.button() == Qt.MouseButton.LeftButton
+        mods = event.modifiers()
+        if event.button() == Qt.MouseButton.MiddleButton or (
+            left and mods & Qt.KeyboardModifier.AltModifier
+        ):
             self._drag_from = event.position()
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
-            event.accept()
+        elif left and mods & Qt.KeyboardModifier.ControlModifier:
+            self._zoom_from = event.position()
+            self._zoom_anchor = event.position()
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+        elif left and mods == Qt.KeyboardModifier.NoModifier:
+            self._scrub_x = event.position().x()
+            self.scrub_started.emit()
+        else:
+            super().mousePressEvent(event)
             return
-        super().mousePressEvent(event)
+        event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if self._drag_from is not None:
@@ -396,17 +412,28 @@ class ConfirmGLView(QOpenGLWidget):
             self._after_view_change()
             event.accept()
             return
+        if self._zoom_from is not None:
+            # 오른쪽으로 끌면 확대, 왼쪽으로 끌면 축소 — 처음 누른 곳을 중심으로
+            dx = event.position().x() - self._zoom_from.x()
+            self._zoom_from = event.position()
+            self.zoom_at(self._zoom_anchor, math.exp(dx * _ZOOM_DRAG_RATE))
+            event.accept()
+            return
+        if self._scrub_x is not None:
+            self.scrub_moved.emit(event.position().x() - self._scrub_x)
+            event.accept()
+            return
         p = self.image_pos(event.position())
         self.hover_pixel.emit(p[0], p[1]) if p else self.hover_pixel.emit(-1, -1)
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
-        if self._drag_from is not None:
-            self._drag_from = None
-            self.unsetCursor()
-            event.accept()
+        if self._drag_from is None and self._zoom_from is None and self._scrub_x is None:
+            super().mouseReleaseEvent(event)
             return
-        super().mouseReleaseEvent(event)
+        self._drag_from = self._zoom_from = self._scrub_x = None
+        self.unsetCursor()
+        event.accept()
 
     def resizeEvent(self, event: Any) -> None:  # noqa: N802
         super().resizeEvent(event)

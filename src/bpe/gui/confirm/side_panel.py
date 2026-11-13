@@ -1,4 +1,4 @@
-"""컨펌 창 오른쪽 칸 — 작업 내용, 지난 지적, 메모, 상태 버튼 (시안 2판 모양)."""
+"""컨펌 창 오른쪽 칸 — 작업 내용, Note(지난 내용), 메모, 상태 버튼 (시안 2판 모양)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ from typing import Any, Dict, List, Optional, Tuple
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import (
-    QCheckBox,
     QComboBox,
     QFrame,
     QGridLayout,
@@ -28,8 +27,6 @@ from bpe.gui.confirm import style
 PANEL_WIDTH = style.PANEL_WIDTH
 _NO_VERSION = "버전 없음"
 _KEY_COLUMN_W = 76
-_MEMO_FRAME = re.compile(r"^(\[[^\]]+\])\s*(.*)$", re.S)
-_MEMO_FRAME_ON = "#ff8a84"
 _HEADER_H = 28
 _FRAME_REF = re.compile(r"\[(\d+)((?:\s*[-–~]\s*\d+)?)\]")
 _FRAME_LINK = "frame:"
@@ -149,7 +146,7 @@ class ConfirmSidePanel(QWidget):
     past_note_clicked = Signal(object)
     past_frame_clicked = Signal(int)
     preset_picked = Signal(str)
-    memo_toggled = Signal(int, bool)
+    memo_edited = Signal()
     insert_failures_requested = Signal()
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
@@ -163,8 +160,6 @@ class ConfirmSidePanel(QWidget):
         )
         self._past: List[Dict[str, Any]] = []
         self._past_rows: List[_ClickRow] = []
-        self._memo: List[Tuple[int, str, bool]] = []
-        self._memo_rows: List[QWidget] = []
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -253,27 +248,26 @@ class ConfirmSidePanel(QWidget):
         col.addWidget(past_scroll, 2)
 
         self._memo_head = _header("메모")
-        self._memo_head.setTextFormat(Qt.TextFormat.RichText)
         self._memo_head.setStyleSheet(
             style.section_header_style() + f"border-top: 1px solid {style.EDGE};"
         )
         self._memo_head.setFixedHeight(_HEADER_H + 1)
         col.addWidget(self._memo_head)
-        self._memo_box = _clear_block()
-        self._memo_col = QVBoxLayout(self._memo_box)
-        self._memo_col.setContentsMargins(10, 8, 10, 2)
-        self._memo_col.setSpacing(6)
-        col.addWidget(self._memo_box)
         ex = QVBoxLayout()
-        ex.setContentsMargins(10, 6, 10, 6)
+        ex.setContentsMargins(10, 8, 10, 6)
         ex.setSpacing(4)
-        self._extra = QPlainTextEdit()
-        self._extra.setPlaceholderText("경로나 설명을 덧붙여 쓰기")
-        self._extra.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
-        self._extra.setMinimumHeight(64)
-        self._extra.document().setDocumentMargin(4)
-        self._extra.setStyleSheet("QPlainTextEdit { padding: 2px 4px; }")
-        ex.addWidget(self._extra, 1)
+        # 화면에 쓴 글이 한 줄씩 그대로 적히는 글 칸 — 여기서 바로 고치거나 덧붙여 쓴다
+        self._memo_edit = QPlainTextEdit()
+        self._memo_edit.setPlaceholderText(
+            "화면에 네모·원·화살표를 그리고 쓴 글이 여기에 그대로 적힙니다.\n"
+            "직접 고치거나 경로·설명을 덧붙여 써도 됩니다."
+        )
+        self._memo_edit.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        self._memo_edit.setMinimumHeight(64)
+        self._memo_edit.document().setDocumentMargin(4)
+        self._memo_edit.setStyleSheet("QPlainTextEdit { padding: 2px 4px; }")
+        self._memo_edit.textChanged.connect(self.memo_edited)
+        ex.addWidget(self._memo_edit, 1)
         self._attach = QLabel("")
         self._attach.setStyleSheet(f"color: {style.DIM}; font-size: {style.FONT_SMALL_PX}px;")
         ex.addWidget(self._attach)
@@ -347,7 +341,6 @@ class ConfirmSidePanel(QWidget):
         self.set_work_info("", "", "")
         self.set_standard("", "", [], "")
         self._fill_past()
-        self.set_memo([])
 
     # ── 채우기 ───────────────────────────────────────────────────
 
@@ -416,7 +409,10 @@ class ConfirmSidePanel(QWidget):
         self.preset_picked.emit(self._preset_box.currentText())
 
     def set_past_notes(self, notes: List[Dict[str, Any]], current_version: str = "") -> None:
-        """*notes*: ``version_code``·``timestamp``·``author``·``content`` 를 가진 dict 들."""
+        """*notes*: ``version_code``·``timestamp``·``author``·``content`` 를 가진 dict 들.
+
+        ``kind`` 가 ``"version"`` 인 줄은 작업자가 버전을 올리며 적은 글이다.
+        """
         self._past = list(notes)
         versions: List[str] = []
         for n in self._past:
@@ -428,12 +424,8 @@ class ConfirmSidePanel(QWidget):
         self._past_versions.addItem("전체", "")
         for v in versions:
             self._past_versions.addItem(_short_version(v), v)
-        pick = 0
-        for i, v in enumerate(versions):
-            if v != current_version:
-                pick = i + 1  # 지금 버전이 아닌 것 중 가장 최근 = 직전에 받은 지적
-                break
-        self._past_versions.setCurrentIndex(pick)
+        del current_version  # 처음에는 늘 전부 보여 준다(버전은 필요할 때만 고른다)
+        self._past_versions.setCurrentIndex(0)
         self._past_versions.blockSignals(False)
         self._fill_past()
 
@@ -464,9 +456,15 @@ class ConfirmSidePanel(QWidget):
                 )
                 if x
             )
+            tag = (
+                f' <span style="color:{style.OK}; font-size:{style.FONT_SMALL_PX}px">'
+                f"버전 올리며 쓴 글</span>"
+                if n.get("kind") == "version"
+                else ""
+            )
             html = (
                 f'<span style="color:{style.DIM}; {style.mono(style.FONT_SMALL_PX)}">'
-                f"{escape(head)}</span><br>{_note_body(n)}"
+                f"{escape(head)}</span>{tag}<br>{_note_body(n)}"
             )
             row = _ClickRow(html, n)
             row.clicked.connect(self._on_past_clicked)
@@ -478,59 +476,22 @@ class ConfirmSidePanel(QWidget):
     def past_count(self) -> int:
         return len(self._past_rows)
 
-    def set_memo(self, lines: List[Tuple[int, str, bool]]) -> None:
-        self._memo = list(lines)
-        for row in self._memo_rows:
-            row.deleteLater()
-        self._memo_rows = []
-        for shape_id, text, on in lines:
-            row = _clear_block()
-            lay = QHBoxLayout(row)
-            lay.setContentsMargins(0, 0, 0, 0)
-            lay.setSpacing(8)
-            box = QCheckBox()
-            box.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            box.setChecked(on)
-            box.toggled.connect(lambda checked, sid=shape_id: self.memo_toggled.emit(sid, checked))
-            lay.addWidget(box, 0, Qt.AlignmentFlag.AlignTop)
-            m = _MEMO_FRAME.match(text)
-            frame, body = (m.group(1), m.group(2)) if m else ("", text)
-            frame_color = _MEMO_FRAME_ON if on else style.DIM
-            label = QLabel(
-                f'<span style="color:{frame_color}; {style.mono()}">{escape(frame)}</span> '
-                f"{escape(body)}"
-            )
-            label.setTextFormat(Qt.TextFormat.RichText)
-            label.setIndent(0)
-            label.setWordWrap(True)
-            label.setStyleSheet(f"color: {style.TEXT if on else style.DIM};")
-            lay.addWidget(label, 1)
-            self._memo_rows.append(row)
-            self._memo_col.addWidget(row)
-        self._memo_box.setVisible(bool(lines))
-        n = sum(1 for _i, _t, on in lines if on)
-        count = (
-            f' <span style="font-weight:normal; color:{style.DIM}">보낼 줄 {n}</span>'
-            if lines
-            else ""
-        )
-        self._memo_head.setText("메모" + count)
+    def memo_text(self) -> str:
+        return self._memo_edit.toPlainText()
 
-    def memo_texts(self) -> List[str]:
-        return [text for _i, text, _on in self._memo]
+    def set_memo_text(self, text: str) -> None:
+        if text != self._memo_edit.toPlainText():
+            self._memo_edit.setPlainText(text)
+
+    def append_memo(self, text: str) -> None:
+        cur = self._memo_edit.toPlainText().rstrip()
+        self._memo_edit.setPlainText((cur + "\n" if cur else "") + text)
+
+    def clear_memo(self) -> None:
+        self._memo_edit.clear()
 
     def set_attach_text(self, text: str) -> None:
         self._attach.setText(text)
-
-    def extra_text(self) -> str:
-        return self._extra.toPlainText()
-
-    def append_extra(self, text: str) -> None:
-        cur = self._extra.toPlainText().rstrip()
-        self._extra.setPlainText((cur + "\n" if cur else "") + text)
-
-    def clear_extra(self) -> None:
-        self._extra.clear()
 
     def set_pending(self, text: Optional[str]) -> None:
         self._pending.setVisible(bool(text))

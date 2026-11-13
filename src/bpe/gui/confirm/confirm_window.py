@@ -43,7 +43,7 @@ from PySide6.QtWidgets import (
 
 import bpe.core.config as cfg
 from bpe.core.atomic_io import read_json_file, write_json_file
-from bpe.core.confirm_annotations import AnnotationDoc, compose_note_body, memo_lines
+from bpe.core.confirm_annotations import AnnotationDoc
 from bpe.core.confirm_checks import (
     STATE_FAIL,
     STATE_PASS,
@@ -101,10 +101,10 @@ logger = get_logger("gui.confirm.window")
 
 KEY_ORG, KEY_PREV, KEY_CUR, KEY_EDIT = "org", "prev", "cur", "edit"
 _BUFFER_DEFS: Tuple[Tuple[str, int, str], ...] = (
-    (KEY_ORG, 1, "원본"),
-    (KEY_PREV, 2, "전 버전"),
-    (KEY_CUR, 3, "지금"),
-    (KEY_EDIT, 4, "편집본"),
+    (KEY_ORG, 1, "ORG plate"),
+    (KEY_PREV, 2, "이전버전"),
+    (KEY_CUR, 3, "현재버전"),
+    (KEY_EDIT, 4, "edit"),
 )
 _DECODE_ORDER = (KEY_CUR, KEY_PREV, KEY_ORG, KEY_EDIT)
 _SEGMENT_POS = {KEY_ORG: "first", KEY_PREV: "mid", KEY_CUR: "mid", KEY_EDIT: "last"}
@@ -119,6 +119,7 @@ _NOTE_IMAGE_MAX_EDGE = 1280
 _WORKER_WAIT_MS = 5000
 _HEADER_H = 36
 _HINT_W = 184
+_SCRUB_MIN_PX, _SCRUB_MAX_PX = 4.0, 16.0
 _PIXEL_GAP = "&nbsp;&nbsp;&nbsp;"
 _VIDEO_FILTER = "영상 (*.mov *.mp4 *.mxf *.mkv *.m4v);;모든 파일 (*)"
 _CHANNELS: Tuple[Tuple[str, str], ...] = (
@@ -141,12 +142,13 @@ _SHORTCUTS: Tuple[Tuple[str, Tuple[Tuple[Tuple[str, ...], str], ...]], ...] = (
     (
         "보기",
         (
-            (("1", "2", "3", "4"), "원본 / 전 버전 / 지금 / 편집본"),
+            (("1", "2", "3", "4"), "ORG plate / 이전버전 / 현재버전 / edit"),
             (("D",), "Difference (지금 보는 판 − 직전에 본 판)"),
             (("R", "G", "B", "A"), "채널 / 밝기만 — 한 번 더 누르면 RGB"),
             (("L",), "룩업 켜고 끄기"),
-            (("F", "H"), "화면 맞춤 / 꽉 채움"),
-            (("휠", "Alt+끌기"), "확대 / 이동"),
+            (("F", "H"), "Fit / Fill"),
+            (("휠", "Ctrl+끌기"), "확대"),
+            (("Alt+끌기",), "화면 이동"),
         ),
     ),
     (
@@ -154,6 +156,7 @@ _SHORTCUTS: Tuple[Tuple[str, Tuple[Tuple[Tuple[str, ...], str], ...]], ...] = (
         (
             (("Space",), "재생 · 멈춤"),
             (("←", "→"), "한 프레임 앞 / 뒤"),
+            (("영상 끌기",), "좌우로 끌어 프레임 넘기기 (선택 도구일 때)"),
             (("Home", "End"), "처음 / 끝 프레임"),
         ),
     ),
@@ -168,7 +171,7 @@ _SHORTCUTS: Tuple[Tuple[str, Tuple[Tuple[Tuple[str, ...], str], ...]], ...] = (
     (
         "창",
         (
-            (("F11",), "전체화면"),
+            (("F11",), "Fullscreen (영상만 크게)"),
             (("Esc",), "닫기 · 취소"),
             (("?",), "이 표"),
         ),
@@ -206,9 +209,12 @@ class _Buffer:
         return (self.info.frame_count or 0) if self.info else 0
 
     def button_label(self) -> str:
-        if not self.available:
-            return f"{self.title} 없음"
-        return f"{self.title} {self.version_label}".strip()
+        return self.title if self.available else f"{self.title} 없음"
+
+    def tip(self) -> str:
+        """버튼에 마우스를 올리면 보이는 글 — 어느 파일(버전)인지."""
+        name = self.path.name if self.path is not None else "파일 없음"
+        return f"숫자 키 {self.number} · {name}"
 
 
 def _btn(text: str = "", *, checkable: bool = False, tip: str = "") -> QPushButton:
@@ -294,6 +300,8 @@ class ConfirmWindow(QWidget):
         self._submit_busy = False
         self._version_note = ""
         self._open_started = 0.0
+        self._memo_lines: Dict[int, str] = {}  # 도형 id → 메모 칸에 적어 둔 그 도형의 글
+        self._scrub_from = 0
         self._standard: Optional[ProjectStandard] = None
         self._preset_names: List[str] = []
         self._basis = ""
@@ -317,7 +325,8 @@ class ConfirmWindow(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-        root.addWidget(self._build_header())
+        self._header_bar = self._build_header()
+        root.addWidget(self._header_bar)
 
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
@@ -325,7 +334,8 @@ class ConfirmWindow(QWidget):
         left = QVBoxLayout()
         left.setContentsMargins(0, 0, 0, 0)
         left.setSpacing(0)
-        left.addWidget(self._build_bar())
+        self._view_bar = self._build_bar()
+        left.addWidget(self._view_bar)
 
         self._view = ConfirmGLView()
         self._view.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
@@ -354,7 +364,7 @@ class ConfirmWindow(QWidget):
         self._panel.cancel_requested.connect(self._cancel_pending)
         self._panel.retry_requested.connect(self._retry_status_only)
         self._panel.past_note_clicked.connect(self._on_past_note)
-        self._panel.memo_toggled.connect(self._on_memo_toggled)
+        self._panel.memo_edited.connect(self._draft_timer.start)
         self._panel.insert_failures_requested.connect(self._insert_failures)
         from bpe.shotgrid.tasks import BELUCA_TASK_STATUS_PRESETS
 
@@ -379,6 +389,8 @@ class ConfirmWindow(QWidget):
         self._panel.past_frame_clicked.connect(self._on_past_frame)
         self._panel.preset_picked.connect(self._on_preset_picked)
         self._view.view_changed.connect(self._sync_fit)
+        self._view.scrub_started.connect(self._on_scrub_started)
+        self._view.scrub_moved.connect(self._on_scrub_moved)
         for lbl in self.findChildren(QLabel):
             lbl.setIndent(0)  # 테두리 있는 글 칸이 스스로 넣는 들여쓰기를 없애 줄을 맞춘다
 
@@ -498,14 +510,20 @@ class ConfirmWindow(QWidget):
         chans.addStretch(1)
         fseg = QHBoxLayout()
         fseg.setSpacing(0)
-        self._btn_fit = _btn("화면 맞춤", checkable=True, tip="영상 전체가 보이게 (F)")
+        self._btn_fit = _btn("Fit (F)", checkable=True, tip="영상 전체가 보이게 맞춤")
         self._btn_fit.clicked.connect(self._view_fit)
         fseg.addWidget(self._btn_fit)
-        self._btn_fill = _btn("꽉 채움", checkable=True, tip="화면을 꽉 채우게 (H)")
+        self._btn_fill = _btn("Fill (H)", checkable=True, tip="빈 곳 없이 화면을 꽉 채움")
         self._btn_fill.clicked.connect(self._view_fill)
         fseg.addWidget(self._btn_fill)
         style.make_segments([self._btn_fit, self._btn_fill])
         chans.addLayout(fseg)
+        self._btn_fullview = _btn(
+            "Fullscreen (F11)", tip="영상만 화면 가득 — 나올 때는 Esc 또는 F11"
+        )
+        style.set_icon(self._btn_fullview, "fullscreen", size=14)
+        self._btn_fullview.clicked.connect(self._toggle_fullscreen)
+        chans.addWidget(self._btn_fullview)
         grid.addLayout(chans, 0, 1)
 
         tone = QHBoxLayout()
@@ -596,6 +614,12 @@ class ConfirmWindow(QWidget):
         self._banner.hide()
         self._hud.hide()  # 글이 생길 때만 보인다(빈 검은 칸이 뜨지 않게)
         self._state.hide()
+        self._btn_exit_full = QPushButton("Exit Fullscreen (Esc)", self._view)
+        self._btn_exit_full.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._btn_exit_full.setCursor(Qt.CursorShape.PointingHandCursor)
+        style.set_icon(self._btn_exit_full, "fullscreen", size=14)
+        self._btn_exit_full.clicked.connect(self._toggle_fullscreen)
+        self._btn_exit_full.hide()
         self._busy = QLabel("", self._view)
         self._busy.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._busy.setTextFormat(Qt.TextFormat.RichText)
@@ -1362,6 +1386,7 @@ class ConfirmWindow(QWidget):
             buf = self._bufs[key]
             btn.set_label(buf.button_label())
             btn.setEnabled(buf.available)
+            btn.setToolTip(buf.tip())
             btn.setChecked(key == self._shown)
             mark = style.WARN if self._diff and key == self._last_shown else ""
             if self._buf_marks.get(key, "") != mark:
@@ -1408,7 +1433,8 @@ class ConfirmWindow(QWidget):
     def _place_overlays(self) -> None:
         vw, vh = self._view.width(), self._view.height()
         self._hud.move(10, 8)
-        self._state.move(max(10, vw - self._state.width() - 10), 8)
+        state_y = 8 + (self._btn_exit_full.height() + 6 if self.isFullScreen() else 0)
+        self._state.move(max(10, vw - self._state.width() - 10), state_y)
         self._banner.move(max(0, (vw - self._banner.width()) // 2), 36)
         self._pill.adjustSize()
         self._pill.move(
@@ -1418,6 +1444,8 @@ class ConfirmWindow(QWidget):
         self._help.move(
             max(0, (vw - self._help.width()) // 2), max(0, (vh - self._help.height()) // 2)
         )
+        self._btn_exit_full.adjustSize()
+        self._btn_exit_full.move(max(0, vw - self._btn_exit_full.width() - 10), 8)
         self._palette.adjustSize()
         bx = self._pill.x() + self._btn_palette.x() + self._btn_palette.width() // 2
         self._palette.move(
@@ -1434,6 +1462,7 @@ class ConfirmWindow(QWidget):
             self._banner,
             self._pill,
             self._palette,
+            self._btn_exit_full,
             self._busy,
             self._help,
         ):
@@ -1518,13 +1547,19 @@ class ConfirmWindow(QWidget):
         self._set_index(frame - self._frame_start)
 
     def _toggle_fullscreen(self) -> None:
-        if self.isFullScreen():
-            self.showNormal()
-            self._panel.show()
-        else:
-            self._panel.hide()
+        """영상 전체화면 — 영상·그리기 도구·시간 막대만 남기고 나머지 띠와 패널을 감춘다."""
+        full = not self.isFullScreen()
+        for bar in (self._header_bar, self._view_bar, self._info, self._panel):
+            bar.setVisible(not full)
+        if full:
+            if self._drawer.isVisible():
+                self._toggle_drawer()
             self.showFullScreen()
-        self._btn_full.setChecked(self.isFullScreen())
+        else:
+            self.showNormal()
+        self._btn_exit_full.setVisible(full)
+        self._btn_full.setChecked(full)
+        self._place_overlays()
 
     def _toggle_help(self) -> None:
         self._help.setVisible(not self._help.isVisible())
@@ -1618,6 +1653,17 @@ class ConfirmWindow(QWidget):
         self.setFocus()
         self._sync_labels()
 
+    def _on_scrub_started(self) -> None:
+        self._scrub_from = self._index
+
+    def _on_scrub_moved(self, dx: float) -> None:
+        """영상을 누른 채 좌우로 끌면 프레임을 넘긴다(RV 처럼). 한 프레임 = 화면 몇 픽셀."""
+        if self._count <= 1:
+            return
+        per_frame = max(_SCRUB_MIN_PX, min(_SCRUB_MAX_PX, self._view.width() / self._count))
+        self._pause()
+        self._set_index(self._scrub_from + int(dx / per_frame))
+
     def _step(self, delta: int) -> None:
         self._pause()
         self._set_index(self._index + delta)
@@ -1667,8 +1713,41 @@ class ConfirmWindow(QWidget):
         self._draft_timer.start()
 
     def _sync_memo(self) -> None:
+        """화면에 쓴 글을 메모 칸에 그대로 적는다.
+
+        새 글은 끝에 한 줄로 붙이고, 고친 글은 그 줄을 바꾸고, 지운 그림의 줄은 뺀다.
+        사용자가 메모 칸에서 그 줄을 직접 고쳐 놨으면 건드리지 않는다.
+        """
         doc = self._layer.doc()
-        self._panel.set_memo(memo_lines(doc))
+        shapes = sorted(doc.shapes(), key=lambda s: (s["frame"], s["id"]))
+        texts = {int(s["id"]): s["text"].strip() for s in shapes if (s.get("text") or "").strip()}
+        memo = self._panel.memo_text()
+        lines = memo.split("\n") if memo else []
+        changed = False
+        for sid, old in list(self._memo_lines.items()):
+            new = texts.get(sid)
+            if new == old:
+                continue
+            if old in lines:
+                i = lines.index(old)
+                if new is None:
+                    del lines[i]
+                else:
+                    lines[i] = new
+            elif new is not None:
+                lines.append(new)
+            if new is None:
+                del self._memo_lines[sid]
+            else:
+                self._memo_lines[sid] = new
+            changed = True
+        for sid, text in texts.items():
+            if sid not in self._memo_lines:
+                lines.append(text)
+                self._memo_lines[sid] = text
+                changed = True
+        if changed:
+            self._panel.set_memo_text("\n".join(lines))
         frames = self._attachment_frames()
         self._panel.set_attach_text(
             f"그림 {len(frames)}장 첨부 · 샷 이름·버전·프레임 번호가 찍힘"
@@ -1676,13 +1755,9 @@ class ConfirmWindow(QWidget):
             else "그림을 그리면 여기 첨부됩니다"
         )
 
-    def _on_memo_toggled(self, shape_id: int, on: bool) -> None:
-        self._layer.doc().update(shape_id, in_memo=on)
-        self._on_doc_changed()
-
     def _insert_failures(self) -> None:
         for line in failure_lines(self._checks):
-            self._panel.append_extra(line)
+            self._panel.append_memo(line)
 
     def _attachment_frames(self) -> List[int]:
         return self._layer.doc().marked_frames()
@@ -1699,24 +1774,41 @@ class ConfirmWindow(QWidget):
         if path is None:
             return
         doc = self._layer.doc()
+        memo = self._panel.memo_text()
         try:
-            if doc.is_empty():
+            if doc.is_empty() and not memo.strip():
                 if path.is_file():
                     path.unlink()
             else:
-                write_json_file(path, {"movie": self._movie, "shapes": doc.to_list()})
+                write_json_file(
+                    path,
+                    {
+                        "movie": self._movie,
+                        "shapes": doc.to_list(),
+                        "memo": memo,
+                        "memo_lines": {str(k): v for k, v in self._memo_lines.items()},
+                    },
+                )
         except OSError as e:
             logger.warning("confirm draft save failed: %s", e)
 
     def _load_draft(self) -> None:
         path = self._draft_path()
         doc = AnnotationDoc()
+        memo, lines = "", {}
         if path is not None:
             data = read_json_file(path, {})
             if isinstance(data, dict):
                 doc.load_list(data.get("shapes"))
+                memo = str(data.get("memo") or "")
+                stored = data.get("memo_lines")
+                if isinstance(stored, dict):
+                    lines = {int(k): str(v) for k, v in stored.items() if str(k).isdigit()}
+        self._memo_lines = lines
+        self._panel.set_memo_text(memo)
         self._layer.set_doc(doc)
         self._timeline.set_marks(doc.marked_frames())
+        self._sync_memo()
 
     def _render_note_images(self) -> List[str]:
         """그림을 남긴 프레임마다 노트용 PNG 를 임시 폴더에 만든다."""
@@ -1784,12 +1876,13 @@ class ConfirmWindow(QWidget):
             self._panel.set_past_notes([])
             return
         token = self._load_token
+        task_id = self._task.get("task_id")
 
         def _fetch() -> List[Dict[str, Any]]:
             from bpe.shotgrid.client import get_default_sg
-            from bpe.shotgrid.notes import list_notes_for_shots
+            from bpe.shotgrid.confirm_context import list_shot_history
 
-            return list_notes_for_shots(get_default_sg(), [int(shot_id)], days_back=0, limit=250)
+            return list_shot_history(get_default_sg(), int(shot_id), task_id=task_id)
 
         w = ShotGridWorker(_fetch)
         w.finished.connect(lambda r, t=token: self._on_notes(r, t))
@@ -1824,11 +1917,9 @@ class ConfirmWindow(QWidget):
         self._send_timer.start()
 
     def _pending_summary(self) -> str:
-        doc = self._layer.doc()
-        lines = sum(1 for _i, _t, on in memo_lines(doc) if on)
-        extra = bool(self._panel.extra_text().strip())
+        lines = sum(1 for ln in self._panel.memo_text().split("\n") if ln.strip())
         frames = len(self._attachment_frames())
-        if not lines and not extra and not frames:
+        if not lines and not frames:
             return f"상태만 {self._pending_status} 로 바꿈"
         warn = f" · {self._version_note}" if self._version_note else ""
         return f"노트(메모 {lines}줄, 그림 {frames}장) 보내고 상태 {self._pending_status}{warn}"
@@ -1860,8 +1951,7 @@ class ConfirmWindow(QWidget):
 
     def _submit(self, code: str, existing_note_id: Optional[int] = None) -> None:
         t = dict(self._task)
-        doc = self._layer.doc()
-        body = compose_note_body(doc, self._panel.extra_text())
+        body = self._panel.memo_text().strip()
         frames = self._attachment_frames() if existing_note_id is None else []
         images = self._render_note_images() if existing_note_id is None else []
         if len(images) < len(frames):
@@ -1936,9 +2026,10 @@ class ConfirmWindow(QWidget):
                     if res.attachment_ok
                     else f"노트 보냄(그림 실패: {res.attachment_error})"
                 )
+                self._memo_lines = {}
+                self._panel.clear_memo()
                 self._layer.set_doc(AnnotationDoc())
                 self._on_doc_changed()
-                self._panel.clear_extra()
             else:
                 parts.append(f"노트 실패: {res.note_error}")
         if res.status_needed:

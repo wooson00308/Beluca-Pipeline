@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from bpe.core.confirm_list import (
+    GROUP_ALL,
     GROUP_INTERNAL,
-    GROUP_SV,
     GROUP_TM,
     GROUP_VENDOR,
     SORT_NEW,
@@ -58,13 +58,13 @@ def _codes(rows: list) -> list:
 
 def test_vendor_and_internal_split_by_uploader_type() -> None:
     assert _codes(filter_rows(ROWS, GROUP_VENDOR)) == ["ep01_s010_0030", "ep01_s010_0010"]
-    # 올린 쪽을 모르면 내부로 본다
-    assert _codes(filter_rows(ROWS, GROUP_INTERNAL)) == ["ep01_s020_0010", "ep01_s040_0010"]
+    # 올린 쪽을 모르면 내부로 본다. tm 상태는 SV_Confirm 갈래에 들지 않는다
+    assert _codes(filter_rows(ROWS, GROUP_INTERNAL)) == ["ep01_s040_0010"]
 
 
 def test_tm_and_sv_by_status() -> None:
     assert _codes(filter_rows(ROWS, GROUP_TM)) == ["ep01_s020_0010"]
-    assert len(filter_rows(ROWS, GROUP_SV)) == 3
+    assert len(filter_rows(ROWS, GROUP_ALL)) == len(ROWS)
 
 
 def test_vendor_pick_and_search() -> None:

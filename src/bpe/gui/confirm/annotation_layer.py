@@ -306,8 +306,9 @@ class AnnotationLayer(QWidget):
     # ── 마우스 ───────────────────────────────────────────────────
 
     def _passes_to_view(self, event: QMouseEvent) -> bool:
+        mods = event.modifiers()
         return event.button() == Qt.MouseButton.MiddleButton or bool(
-            event.modifiers() & Qt.KeyboardModifier.AltModifier
+            mods & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.ControlModifier)
         )
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802

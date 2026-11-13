@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from bpe.core.confirm_list import (
+    GROUP_VENDOR,
     GROUPS,
     SORT_OLD,
     SORTS,
@@ -96,21 +97,15 @@ class ShotDrawer(QWidget):
         hrow = QHBoxLayout(head)
         hrow.setContentsMargins(8, 6, 8, 6)
         hrow.setSpacing(8)
-        groups = QHBoxLayout()
-        groups.setSpacing(0)
-        self._group_btns: Dict[str, QPushButton] = {}
-        for g in GROUPS:
-            b = QPushButton(g)
-            b.setCheckable(True)
-            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            b.setCursor(Qt.CursorShape.PointingHandCursor)
-            b.clicked.connect(lambda _c=False, name=g: self._set_group(name))
-            self._group_btns[g] = b
-            groups.addWidget(b)
-        style.make_segments(list(self._group_btns.values()))
-        for b in self._group_btns.values():
-            b.setStyleSheet(b.styleSheet() + "QPushButton { padding: 0px 12px; }")
-        hrow.addLayout(groups)
+        # 갈래 이름은 샷그리드 Versions 화면의 분류 이름 그대로(길어서 고르기 칸으로 둔다)
+        self._group_box = QComboBox()
+        self._group_box.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._group_box.addItems(list(GROUPS))
+        self._group_box.setToolTip("샷그리드 Versions 화면의 분류와 같은 이름입니다")
+        self._group_box.setMinimumWidth(180)
+        self._group_box.setStyleSheet(f"QComboBox {{ color: {style.TEXT_STRONG}; }}")
+        self._group_box.activated.connect(lambda _i: self._set_group(self._group_box.currentText()))
+        hrow.addWidget(self._group_box)
         hrow.addStretch(1)
         self._count = QLabel("")
         self._count.setStyleSheet(f"color: {style.DIM};")
@@ -268,9 +263,8 @@ class ShotDrawer(QWidget):
         self._refill()
 
     def _sync_groups(self) -> None:
-        for name, b in self._group_btns.items():
-            b.setChecked(name == self._group)
-        self._vendor.setEnabled(self._group == GROUPS[0])
+        self._group_box.setCurrentText(self._group)
+        self._vendor.setEnabled(self._group == GROUP_VENDOR)
 
     def shown_rows(self) -> List[Dict[str, Any]]:
         return list(self._shown)
@@ -339,7 +333,7 @@ class ShotDrawer(QWidget):
         return row
 
     def _refill(self) -> None:
-        vendor = str(self._vendor.currentData() or "") if self._group == GROUPS[0] else ""
+        vendor = str(self._vendor.currentData() or "") if self._group == GROUP_VENDOR else ""
         rows = filter_rows(self._rows, self._group, vendor=vendor, search=self._search.text())
         self._shown = sort_rows(rows, self._sort)
         self._list.clear()

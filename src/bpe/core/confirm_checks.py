@@ -41,7 +41,7 @@ def _frames(work: VideoInfo, ref: Optional[VideoInfo], ref_label: str) -> CheckR
         return CheckResult("프레임", STATE_UNKNOWN, f"{wf or '?'} / {rf or '?'} 모름")
     if wf == rf:
         return CheckResult("프레임", STATE_PASS, f"프레임 {wf}/{rf} 통과")
-    return CheckResult("프레임", STATE_FAIL, f"프레임 수 다름: {ref_label} {rf} / 작업본 {wf}")
+    return CheckResult("프레임", STATE_FAIL, f"프레임 수 다름: {ref_label} {rf} / 현재버전 {wf}")
 
 
 def _fps(work: VideoInfo, want: Optional[float], label: str, missing: str) -> CheckResult:
@@ -52,7 +52,7 @@ def _fps(work: VideoInfo, want: Optional[float], label: str, missing: str) -> Ch
     if abs(work.fps - want) <= FPS_TOLERANCE:
         return CheckResult("fps", STATE_PASS, f"fps {_fmt_fps(work.fps)} 통과")
     return CheckResult(
-        "fps", STATE_FAIL, f"fps 다름: {label} {_fmt_fps(want)} / 작업본 {_fmt_fps(work.fps)}"
+        "fps", STATE_FAIL, f"fps 다름: {label} {_fmt_fps(want)} / 현재버전 {_fmt_fps(work.fps)}"
     )
 
 
@@ -64,7 +64,7 @@ def _codec(work: VideoInfo, standard: ProjectStandard) -> CheckResult:
     if have == standard.codec:
         return CheckResult("코덱", STATE_PASS, f"코덱 {shown} 통과")
     return CheckResult(
-        "코덱", STATE_FAIL, f"코덱 다름: {PRESET_LABEL} {standard.codec_title} / 작업본 {shown}"
+        "코덱", STATE_FAIL, f"코덱 다름: {PRESET_LABEL} {standard.codec_title} / 현재버전 {shown}"
     )
 
 
@@ -77,7 +77,7 @@ def _color(work: VideoInfo, standard: ProjectStandard) -> CheckResult:
     if have in standard.color_tags:
         return CheckResult("색 표시", STATE_PASS, f"색 표시 {have} 통과")
     return CheckResult(
-        "색 표시", STATE_FAIL, f"색 표시 다름: {PRESET_LABEL} {standard.look} / 작업본 {have}"
+        "색 표시", STATE_FAIL, f"색 표시 다름: {PRESET_LABEL} {standard.look} / 현재버전 {have}"
     )
 
 
@@ -97,7 +97,7 @@ def check_work_against_reference(
     프리셋에 MOV 크기가 없는 한 해상도는 판정하지 않고 값만 알려 준다.
     """
     if work is None:
-        msg = "작업본 규격을 읽지 못함"
+        msg = "현재버전 규격을 읽지 못함"
         return [
             CheckResult("프레임", STATE_UNKNOWN, msg),
             CheckResult("fps", STATE_UNKNOWN, msg),
@@ -133,7 +133,7 @@ def check_work_against_reference(
             CheckResult(
                 "해상도",
                 STATE_FAIL,
-                f"해상도 다름: {label} {want[0]}×{want[1]} / 작업본 {ws[0]}×{ws[1]}",
+                f"해상도 다름: {label} {want[0]}×{want[1]} / 현재버전 {ws[0]}×{ws[1]}",
             )
         )
 

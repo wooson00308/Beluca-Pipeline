@@ -30,7 +30,7 @@ def _task(tid: int, shot: str, status: str, version_id: int) -> Dict[str, Any]:
 def _sg() -> MockShotgun:
     sg = MockShotgun()
     sg._add_entity("Task", _task(1, "S_0010", "sv", 71))
-    sg._add_entity("Task", _task(2, "S_0020", "tm", 72))
+    sg._add_entity("Task", _task(2, "S_0020", "sv", 72))
     sg._add_entity("Version", {"id": 71, "user": {"type": "Group", "id": 5, "name": "업체 A"}})
     sg._add_entity("Version", {"id": 72, "user": {"type": "HumanUser", "id": 9, "name": "작업자"}})
     return sg

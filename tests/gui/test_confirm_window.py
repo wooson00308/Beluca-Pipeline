@@ -98,14 +98,14 @@ def test_opens_all_four_buffers_and_checks_against_edit(win: Any) -> None:
     assert b[KEY_CUR].size == (_W, _H)
     # 편집본이 7프레임, 작업본이 6프레임 → 실패가 크게 떠야 한다
     assert [c.state for c in win._checks] == ["fail", "pass", "pass"]
-    assert win._banner.isVisible() and "편집본 7 / 작업본 6" in win._banner.text()
+    assert win._banner.isVisible() and "edit 7 / 현재버전 6" in win._banner.text()
     assert win._timeline.count() == 6
 
 
 def test_flip_diff_and_view_state_label(win: Any) -> None:
     win._show_buffer(KEY_ORG)
     assert win._shown == KEY_ORG and win._last_shown == KEY_CUR
-    assert win._hud.text().startswith("1 원본")
+    assert win._hud.text().startswith("1 ORG plate")
     win._show_buffer(KEY_CUR)
     win._toggle_diff()
     assert win._diff and "Difference 3−1" in win._state.text()
@@ -154,7 +154,7 @@ def test_draw_rect_then_type_goes_to_memo(win: Any, qtbot: Any) -> None:
     assert shapes[0]["frame"] == frame
     x0, y0 = shapes[0]["points"][0]
     assert abs(x0 - 0.2) < 0.02 and abs(y0 - 0.2) < 0.03
-    assert win._panel.memo_texts() == [f"[{frame}] edge"]
+    assert win._panel.memo_text() == "edge"  # 화면에 쓴 글이 메모 칸에 그대로 적힌다
     assert win._timeline.marks() == [frame]
 
     # 확대해도 그림은 영상의 같은 자리에 붙어 있다
@@ -169,7 +169,7 @@ def test_draw_rect_then_type_goes_to_memo(win: Any, qtbot: Any) -> None:
     assert layer.doc().shapes_at(win.frame_number()) == []
     layer.undo()
     layer.undo()
-    assert layer.doc().is_empty() and win._panel.memo_texts() == []
+    assert layer.doc().is_empty() and win._panel.memo_text() == ""
 
 
 def test_note_images_are_made_per_marked_frame(win: Any) -> None:
@@ -256,6 +256,7 @@ def test_header_follows_list_and_moves_between_shots(win: Any, monkeypatch: Any)
         {
             "task_id": i,
             "shot_code": f"S_00{i}0",
+            "task_status": "sv",
             "uploader_type": "Group",
             "uploader_name": "업체 A",
         }
@@ -263,7 +264,8 @@ def test_header_follows_list_and_moves_between_shots(win: Any, monkeypatch: Any)
     ]
     win._task = dict(rows[1])
     win._drawer.set_rows(rows)
-    assert win._btn_list.text().strip() == "외주 3" and win._pos.text() == "2 / 3"
+    assert win._btn_list.text().strip() == "SV_Confirm (vendor) 3"
+    assert win._pos.text() == "2 / 3"
     assert win._btn_prev.isEnabled() and win._btn_next.isEnabled()
     opened = []
     monkeypatch.setattr(win, "_open_task", opened.append)
@@ -367,7 +369,7 @@ def test_pen_arrow_and_text_tools(win: Any) -> None:
     text = layer.doc().shapes()[-1]
     assert text["kind"] == "text" and text["text"] == "hi"
 
-    assert win._panel.memo_texts() == [f"[{frame}] go", f"[{frame}] hi"]
+    assert win._panel.memo_text() == "go\nhi"
     assert win._timeline.marks() == [frame]
 
     # 고른 그림만 지우개로 지운다
@@ -545,7 +547,7 @@ def test_ellipse_tool_draws_a_circle_and_asks_for_text(win: Any) -> None:
     assert shape["kind"] == "ellipse" and shape["text"] == "halo"
     (x0, y0), (x1, y1) = shape["points"]
     assert x0 < x1 and y0 < y1  # 어느 쪽으로 끌어도 왼쪽 위 → 오른쪽 아래로 정리된다
-    assert win._panel.memo_texts() == [f"[{win.frame_number()}] halo"]
+    assert win._panel.memo_text() == "halo"
     paths = win._render_note_images()
     try:
         assert len(paths) == 1  # 원도 노트 그림에 그려진다
@@ -574,3 +576,89 @@ def test_palette_offers_more_colours_and_recolours_the_selected_shape(win: Any) 
     win._layer._selected = sid
     win._swatch_btns[1].click()  # 띠의 다른 색을 누르면 고른 그림 색이 바뀐다
     assert doc.get(sid)["color"] == win._recent_colors[1] == win._color
+
+
+def test_memo_box_follows_shape_text_but_keeps_what_the_user_typed(win: Any) -> None:
+    from bpe.core.confirm_annotations import KIND_RECT, make_shape
+
+    doc = win._layer.doc()
+    f = win._frame_start
+    a = doc.add(make_shape(KIND_RECT, f, [(0.1, 0.1), (0.3, 0.3)], text="엣지 수정해주세요"))
+    win._on_doc_changed()
+    assert win._panel.memo_text() == "엣지 수정해주세요"
+    win._panel.append_memo("경로: W:/ref/a.mov")  # 사용자가 덧붙인 줄
+    b = doc.add(make_shape(KIND_RECT, f + 2, [(0.5, 0.5), (0.7, 0.7)], text="블랙 뜸"))
+    win._on_doc_changed()
+    assert win._panel.memo_text() == "엣지 수정해주세요\n경로: W:/ref/a.mov\n블랙 뜸"
+    doc.update(a, text="엣지 밝은 테 정리")  # 화면의 글을 고치면 그 줄만 바뀐다
+    win._on_doc_changed()
+    assert win._panel.memo_text() == "엣지 밝은 테 정리\n경로: W:/ref/a.mov\n블랙 뜸"
+    doc.remove(b)  # 그림을 지우면 그 줄이 빠진다
+    win._on_doc_changed()
+    assert win._panel.memo_text() == "엣지 밝은 테 정리\n경로: W:/ref/a.mov"
+    # 메모 칸에서 직접 고친 줄은 그림을 지워도 건드리지 않는다
+    win._panel.set_memo_text("엣지 꼭 정리!\n경로: W:/ref/a.mov")
+    doc.remove(a)
+    win._on_doc_changed()
+    assert win._panel.memo_text() == "엣지 꼭 정리!\n경로: W:/ref/a.mov"
+
+
+def test_memo_text_is_the_note_body_and_survives_reopen(
+    win: Any, shot: Path, qtbot: Any, monkeypatch: Any
+) -> None:
+    from bpe.core.confirm_annotations import KIND_RECT, make_shape
+
+    win._layer.doc().add(
+        make_shape(KIND_RECT, win._frame_start, [(0.1, 0.1), (0.3, 0.3)], text="a")
+    )
+    win._on_doc_changed()
+    win._panel.append_memo("덧붙임")
+    win._save_draft()
+    movie = str(shot / "comp" / "devl" / "renders" / "SHOT_A_comp_v002.mov")
+    win.open_movie(movie)
+    qtbot.waitUntil(lambda: win._count == 6 and len(win._bufs[KEY_CUR].frames) >= 6, timeout=30000)
+    assert win._panel.memo_text() == "a\n덧붙임"  # 다시 열어도 그대로, 줄이 두 번 생기지 않는다
+    win._pending_status = "retake"
+    assert "메모 2줄, 그림 1장" in win._pending_summary()
+
+
+def test_drag_on_the_picture_scrubs_frames_and_ctrl_drag_zooms(win: Any) -> None:
+    win._set_tool("select")
+    win._go_first()
+    layer = win._layer
+    none = Qt.KeyboardModifier.NoModifier
+    y = layer.height() // 2
+    x0 = layer.width() // 2
+    QTest.mousePress(layer, Qt.MouseButton.LeftButton, none, QPointF(x0, y).toPoint())
+    QTest.mouseMove(layer, QPointF(x0 + 40, y).toPoint())
+    assert win._index >= 2  # 오른쪽으로 끌면 뒤 프레임으로
+    QTest.mouseMove(layer, QPointF(x0 - 400, y).toPoint())
+    assert win._index == 0  # 왼쪽 끝을 넘지 않는다
+    QTest.mouseRelease(layer, Qt.MouseButton.LeftButton, none, QPointF(x0 - 400, y).toPoint())
+
+    ctrl = Qt.KeyboardModifier.ControlModifier
+    before, index = win._view.zoom(), win._index
+    QTest.mousePress(layer, Qt.MouseButton.LeftButton, ctrl, QPointF(x0, y).toPoint())
+    QTest.mouseMove(layer, QPointF(x0 + 120, y).toPoint())
+    QTest.mouseRelease(layer, Qt.MouseButton.LeftButton, ctrl, QPointF(x0 + 120, y).toPoint())
+    assert win._view.zoom() > before * 1.5 and win._index == index  # 확대만, 프레임은 그대로
+    assert not win._btn_fit.isChecked()
+
+
+def test_fullscreen_shows_only_the_picture_and_its_controls(win: Any, qtbot: Any) -> None:
+    assert win._btn_fit.text() == "Fit (F)" and win._btn_fill.text() == "Fill (H)"
+    assert win._btn_fullview.text() == "Fullscreen (F11)"
+    win._btn_fullview.click()
+    qtbot.waitUntil(win.isFullScreen, timeout=5000)
+    hidden = (win._header_bar, win._view_bar, win._info, win._panel)
+    assert all(not w.isVisible() for w in hidden)
+    assert win._timeline.isVisible() and win._pill.isVisible() and win._btn_exit_full.isVisible()
+    QTest.keyClick(win, Qt.Key.Key_Escape)
+    qtbot.waitUntil(lambda: not win.isFullScreen(), timeout=5000)
+    assert all(w.isVisible() for w in hidden) and not win._btn_exit_full.isVisible()
+
+
+def test_buffer_buttons_use_the_studio_names(win: Any) -> None:
+    labels = [win._buf_btns[k].label() for k in (KEY_ORG, KEY_PREV, KEY_CUR, KEY_EDIT)]
+    assert labels == ["ORG plate", "이전버전", "현재버전", "edit"]
+    assert "SHOT_A_comp_v002.mov" in win._buf_btns[KEY_CUR].toolTip()
