@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional
 
 import bpe.core.config as cfg
 from bpe.core.atomic_io import read_json_file, write_json_file
+from bpe.core.confirm_memory import auto_cache_mb, total_memory_mb
 from bpe.core.logging import get_logger
 
 logger = get_logger("settings")
@@ -262,7 +263,8 @@ _DEFAULT_CONFIRM: Dict[str, Any] = {
     "luts": {},
     # 프로젝트 → 검사 기준으로 고른 프리셋 이름(프리셋이 여러 개인 프로젝트)
     "presets": {},
-    # 프레임을 메모리에 올리는 한도(MB)
+    # 프레임을 메모리에 올리는 한도(MB). 설정 파일에 값이 없으면 PC 메모리에 맞춰 정한다
+    # (get_confirm_settings — 절반, 최대 32GB · 최소 4GB). 아래 값은 메모리를 못 읽었을 때의 값
     "cache_mb": 4096,
     # 목록에서 마지막에 쓴 갈래·정렬
     "list_group": "",
@@ -286,10 +288,12 @@ def get_confirm_settings(settings_file: Optional[Path] = None) -> Dict[str, Any]
     for key in ("luts", "presets"):
         if not isinstance(merged.get(key), dict):
             merged[key] = {}
+    # 값을 직접 적어 둔 PC 는 그 값을, 아니면 PC 메모리에 맞춘 값을 쓴다
     try:
-        merged["cache_mb"] = max(256, int(merged.get("cache_mb") or 0))
+        explicit = int(stored.get("cache_mb") or 0)
     except (TypeError, ValueError):
-        merged["cache_mb"] = _DEFAULT_CONFIRM["cache_mb"]
+        explicit = 0
+    merged["cache_mb"] = max(256, explicit) if explicit > 0 else auto_cache_mb(total_memory_mb())
     return merged
 
 
