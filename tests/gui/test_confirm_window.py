@@ -474,6 +474,7 @@ def test_note_is_not_sent_when_a_marked_frame_has_no_picture(win: Any, monkeypat
         "bpe.gui.confirm.confirm_window.ShotGridWorker", lambda *a, **k: started.append(1)
     )
     win._task = {"shot_id": 1, "project_id": 1}
+    win._loaded_task_id = ("shot", 1)  # 태스크가 없는 샷 — 화면의 영상이 이 샷의 것이다
     win._submit("retake")
     assert not started and not win._submit_busy
     assert "2장 중 1장" in win._panel._result.text()
@@ -1083,8 +1084,14 @@ def test_annotation_mode_opens_the_plate_and_sends_a_note_only(
         "bpe.shotgrid.confirm_submit.open_submit_session", lambda: (object(), {"name": "SV"})
     )
     monkeypatch.setattr("bpe.shotgrid.confirm_submit.submit_confirm", _fake_submit)
+    # 샷그리드에 edit·org 버전이 하나도 없는 샷 — 노트는 샷에만 붙는다
+    monkeypatch.setattr(
+        "bpe.shotgrid.confirm_submit.guide_note_target", lambda *_a, **_k: ("", None)
+    )
     win._submit("")
     assert sent["status_code"] == "" and sent["version_id"] is None and sent["shot_id"] == 9
+    assert sent["note_task_id"] is None  # 붙일 버전이 없으면 걸 태스크도 없다
+    assert sent["empty_note_text"] == ""  # Annotation 노트에는 쓴 글만
     assert sent["content"] == "하늘 교체 범위 확인"
     assert sent["subject"] == "SV's Note on SHOT_A"
     assert sent["addressings_to"] == [{"type": "HumanUser", "id": 3}]
@@ -1598,3 +1605,298 @@ def test_note_only_send_says_note_sent(win: Any, monkeypatch: Any) -> None:
     failed = _sent(note_ok=False, note_error="timeout", status_ok=False, version_ok=False)
     win._on_submitted(failed, [], [], _ticket(7, "S_B"))
     assert win._status_flash is None and "보냄" not in _row_html_of(win, 7)
+
+
+# ── 2026-11-17 추가: Annotation 그림은 그린 영상에 딸리고, 노트는 edit·org 버전에 붙는다 ──────
+
+
+def test_annotation_drawings_belong_to_the_video_they_were_drawn_on(
+    win: Any, shot: Path, qtbot: Any, monkeypatch: Any
+) -> None:
+    from bpe.core.confirm_list import MODE_ANNOTATION
+
+    monkeypatch.setattr(win._drawer, "load_projects", lambda: None)
+    monkeypatch.setattr(win, "_ensure_status_styles", lambda: None)
+    monkeypatch.setattr(win, "_load_sg_context", lambda: None)
+    win._set_mode(MODE_ANNOTATION)
+    win._toggle_drawer()
+    plate = shot / "plate" / "org" / "v001" / "mov" / "SHOT_A_org_v001.mov"
+    task = {
+        "task_id": 5,
+        "shot_id": 9,
+        "project_id": 1,
+        "shot_code": "SHOT_A",
+        "task_status": "wtg",
+    }
+    win.open_movie(str(plate), task)
+    qtbot.waitUntil(
+        lambda: len(win._bufs[KEY_CUR].frames) >= 6 and len(win._bufs[KEY_EDIT].frames) >= 6,
+        timeout=30000,
+    )
+    layer = win._layer
+    r = win._view.image_rect()
+    assert r is not None
+
+    def at(fx: float, fy: float) -> Any:
+        return QPointF(r[0] + r[2] * fx, r[1] + r[3] * fy).toPoint()
+
+    frame = win.frame_number()
+    # 원본을 보면서 네모를 그린다
+    assert win._shown == KEY_CUR and layer.source() == "org"
+    win._set_tool("rect")
+    _drag(layer, [at(0.1, 0.1), at(0.3, 0.3)])
+    assert [s["source"] for s in layer.doc().shapes()] == ["org"]
+
+    # edit 으로 바꾸면 원본에 그린 네모는 안 보이고, 새 그림은 edit 것이 된다
+    win._show_buffer(KEY_EDIT)
+    assert layer.source() == "edit"
+    assert layer.doc().shapes_at(frame, layer.source()) == []
+    win._set_tool("arrow")
+    _drag(layer, [at(0.5, 0.5), at(0.7, 0.3)])
+    assert [s["source"] for s in layer.doc().shapes()] == ["org", "edit"]
+    assert [s["kind"] for s in layer.doc().shapes_at(frame, "edit")] == ["arrow"]
+    win._show_buffer(KEY_CUR)
+    assert [s["kind"] for s in layer.doc().shapes_at(frame, layer.source())] == ["rect"]
+
+    # 노트 그림은 그린 영상마다 한 장 — 같은 프레임이어도 두 장이다
+    assert win._attachment_marks() == [(KEY_EDIT, frame), (KEY_CUR, frame)]
+    paths = win._render_note_images()
+    try:
+        assert len(paths) == 2 and all(Path(p).is_file() for p in paths)
+        assert [win._note_image_meta[p] for p in paths] == [("edit", 0), ("org", 0)]
+    finally:
+        win._remove_files(paths)
+
+    # 보낼 때: 버전은 샷그리드에서 찾은 edit 버전, 그림 이름은 샷그리드가 붙이는 꼴
+    sent: dict = {}
+
+    class _Now:
+        def __init__(self, fn: Any) -> None:
+            self.finished = self.error = self
+            self._fn = fn
+
+        def connect(self, *_a: Any) -> None:
+            pass
+
+        def start(self) -> None:
+            self._fn()
+
+        def isRunning(self) -> bool:  # noqa: N802
+            return False
+
+    def _fake_submit(_sg: Any, **kw: Any) -> None:
+        sent.update(kw)
+        sent["names"] = [Path(p).name for p in kw["attachment_paths"]]
+        sent["existed"] = all(Path(p).is_file() for p in kw["attachment_paths"])
+
+    asked: dict = {}
+
+    def _fake_target(_sg: Any, shot_id: int, **kw: Any) -> Any:
+        asked.update(kw, shot_id=shot_id)
+        return "edit", {"id": 321, "code": "SHOT_A_edit_v001", "task": "edit", "task_id": 88}
+
+    monkeypatch.setattr("bpe.gui.confirm.confirm_window.ShotGridWorker", _Now)
+    monkeypatch.setattr(
+        "bpe.shotgrid.confirm_submit.open_submit_session", lambda: (object(), {"name": "SV"})
+    )
+    monkeypatch.setattr("bpe.shotgrid.confirm_submit.submit_confirm", _fake_submit)
+    monkeypatch.setattr("bpe.shotgrid.confirm_submit.guide_note_target", _fake_target)
+    win._submit("")
+    assert asked["shot_id"] == 9 and asked["drawn"] == ["edit", "org"] and asked["shown"] == "org"
+    assert asked["codes"] == {"org": "SHOT_A_org_v001", "edit": "SHOT_A_edit_v001"}
+    assert sent["version_id"] == 321
+    # 노트에는 그 버전(edit)의 태스크가 걸린다 — 샷그리드에서 직접 단 노트와 같게
+    assert sent["note_task_id"] == 88
+    # 제목은 샷그리드에서 직접 올린 노트와 같은 꼴(버전 이름 + 샷 이름)
+    assert sent["subject"] == "SV's Note on SHOT_A_edit_v001 and SHOT_A"
+    assert sent["status_code"] == "" and sent["empty_note_text"] == ""
+    # 같은 순번의 그림 두 장은 이름이 겹치지 않게 뒤 것이 다음 번호가 된다
+    assert sent["names"] == ["annot_version_321.0.png", "annot_version_321.1.png"]
+    assert sent["existed"] and not Path(sent["attachment_paths"][0]).parent.exists()
+    win._submit_busy = False
+
+
+# ── 2026-11-17 추가: 샷의 글 칸에 적용 — 노트와 따로, 불러온 글을 고친 그대로 ─────────────
+
+
+def test_shot_text_is_loaded_and_applied_apart_from_the_note(win: Any, monkeypatch: Any) -> None:
+    from bpe.core.confirm_shot_text import KIND_DESCRIPTION, KIND_WORK_ORDER, clean_text
+
+    nl = chr(10)
+    calls: list = []
+    on_sg = {KIND_WORK_ORDER: "2D 합성", KIND_DESCRIPTION: "- 와이어 리무브"}
+
+    class _Now:
+        """바로 실행하고 결과를 끝난 신호로 넘기는 가짜 워커."""
+
+        def __init__(self, fn: Any) -> None:
+            self._fn = fn
+            self._done: list = []
+            self._failed: list = []
+            self.finished, self.error = self, self
+
+        def connect(self, cb: Any) -> None:
+            (self._done if not self._done else self._failed).append(cb)
+
+        def start(self) -> None:
+            try:
+                value = self._fn()
+            except Exception as exc:  # noqa: BLE001
+                self._failed[0](str(exc))
+            else:
+                self._done[0](value)
+
+        def isRunning(self) -> bool:  # noqa: N802
+            return False
+
+    def _fake_apply(_sg: Any, shot_id: int, kind: str, text: str, *, expected: Any = None) -> Any:
+        calls.append((shot_id, kind, text, expected))
+        if "실패" in text:
+            raise RuntimeError("no permission")
+        if clean_text(expected or "") != clean_text(on_sg[kind]):
+            return False, on_sg[kind]  # 그 사이 샷그리드의 글이 바뀌었다
+        on_sg[kind] = clean_text(text)
+        return True, on_sg[kind]
+
+    monkeypatch.setattr("bpe.gui.confirm.confirm_window.ShotGridWorker", _Now)
+    monkeypatch.setattr(
+        "bpe.shotgrid.confirm_submit.open_submit_session", lambda: (object(), {"name": "SV"})
+    )
+    monkeypatch.setattr("bpe.shotgrid.shot_text.apply_shot_text", _fake_apply)
+    _list_rows(win)
+    _as_task(win, 5, "S_A")
+    win._task["vfx_work_order"] = "2D 합성"
+    win._task["shot_description"] = "- 와이어 리무브"
+    win._fill_work_info()
+    win._load_shot_text()
+    assert win._panel._shot_btns[KIND_WORK_ORDER].isEnabled()
+    # 칸에는 샷그리드에 이미 적혀 있는 글이 불러와져 있다
+    assert win._panel.shot_text(KIND_WORK_ORDER) == "2D 합성"
+    assert win._panel.shot_text(KIND_DESCRIPTION) == "- 와이어 리무브"
+
+    # 고친 것이 없으면 샷그리드에 묻지 않는다
+    win._on_shot_text_requested(KIND_WORK_ORDER, "2D 합성" + nl)
+    assert calls == [] and "바뀐 글이 없습니다" in win._panel._shot_result.text()
+
+    # 그대로 두고 덧붙였다 — 칸의 글 그대로 적용되고 화면과 목록 줄에 바로 반영된다
+    win._panel.set_shot_text(KIND_WORK_ORDER, "2D 합성" + nl + "AI" + nl + "ENV 빙벽" + nl)
+    win._panel.set_memo_text("노트에 쓸 글")
+    win._on_shot_text_requested(KIND_WORK_ORDER, win._panel.shot_text(KIND_WORK_ORDER))
+    kept = "2D 합성" + nl + "AI" + nl + "ENV 빙벽"
+    assert calls == [(105, KIND_WORK_ORDER, kept, "2D 합성")]
+    assert win._task["vfx_work_order"] == kept
+    assert "ENV 빙벽" in win._panel.work_order_text()
+    assert win._panel.shot_text(KIND_WORK_ORDER) == kept  # 칸에는 적용된 글이 그대로 있다
+    assert "워크오더 칸에 적용했습니다" in win._panel._shot_result.text()
+    row = next(r for r in win._drawer._rows if r["task_id"] == 5)
+    assert row["vfx_work_order"] == kept
+    # 노트 쪽(메모·보내기)은 건드리지 않는다
+    assert win._panel.memo_text() == "노트에 쓸 글" and not win._send_timer.isActive()
+    assert not win._submit_busy
+
+    # 불러온 글을 지우고 다른 글을 썼다 — 새 글로 바뀐다
+    win._on_shot_text_requested(KIND_DESCRIPTION, "피 추가")
+    assert win._task["shot_description"] == "피 추가" and on_sg[KIND_DESCRIPTION] == "피 추가"
+    assert win._panel.shot_text(KIND_DESCRIPTION) == "피 추가"
+
+    # 그 사이 다른 사람이 샷그리드에서 고쳤다 — 덮어쓰지 않고 지금 글을 칸에 불러온다
+    on_sg[KIND_WORK_ORDER] = kept + nl + "260928 - omit"
+    win._on_shot_text_requested(KIND_WORK_ORDER, "NOCG")
+    assert on_sg[KIND_WORK_ORDER] == kept + nl + "260928 - omit"
+    assert win._panel.shot_text(KIND_WORK_ORDER) == kept + nl + "260928 - omit"
+    assert "바뀌어 적용하지 않았습니다" in win._panel._shot_result.text()
+    assert win._task["vfx_work_order"] == kept + nl + "260928 - omit"
+    # 그 글을 보고 다시 적용하면 된다
+    win._on_shot_text_requested(KIND_WORK_ORDER, "NOCG")
+    assert on_sg[KIND_WORK_ORDER] == "NOCG" and win._panel.shot_text(KIND_WORK_ORDER) == "NOCG"
+
+    # 저장에 실패하면 쓰던 글이 칸에 남는다
+    win._panel.set_shot_text(KIND_WORK_ORDER, "실패할 글")
+    win._on_shot_text_requested(KIND_WORK_ORDER, "실패할 글")
+    assert win._panel.shot_text(KIND_WORK_ORDER) == "실패할 글"
+    assert "적용 실패" in win._panel._shot_result.text() and "no permission" in (
+        win._panel._shot_result.text()
+    )
+    assert win._panel._shot_btns[KIND_WORK_ORDER].isEnabled() and not win._shot_text_busy
+
+    # 샷이 바뀌면 칸이 새 샷의 글로 바뀐다 — 앞 샷에 쓰던 글이 다음 샷에 적용되지 않게
+    nxt = {"task_id": 7, "shot_id": 107, "shot_code": "S_B", "vfx_work_order": "MATTE"}
+    win._reset_shot(task=nxt)
+    assert win._panel.shot_text(KIND_WORK_ORDER) == "MATTE"
+    assert win._panel.shot_text(KIND_DESCRIPTION) == ""
+    win._reset_shot()
+    assert win._panel.shot_text(KIND_WORK_ORDER) == ""
+    # 샷그리드 샷이 열려 있지 않으면 누를 수 없고, 눌러도 아무 일도 없다
+    win._sync_all()
+    assert not win._panel._shot_btns[KIND_WORK_ORDER].isEnabled()
+    before = len(calls)
+    win._on_shot_text_requested(KIND_WORK_ORDER, "AI")
+    assert len(calls) == before
+
+
+def test_shots_without_a_task_are_not_mistaken_for_each_other(win: Any) -> None:
+    from bpe.core.confirm_list import row_ident
+
+    a = {"task_id": None, "shot_id": 301, "project_id": 1, "shot_code": "S_X"}
+    b = {"task_id": None, "shot_id": 302, "project_id": 1, "shot_code": "S_Y"}
+    win._task = dict(a)
+    win._loaded_task_id = row_ident(a)
+    win._sync_all()
+    assert win._task_is_open()
+    assert win._result_is_for_open_shot({"task_id": None, "ident": row_ident(a)})
+
+    # 머리 줄만 다른 샷으로 바뀐 사이 — 태스크 번호가 둘 다 없어도 같은 샷으로 보지 않는다
+    win._task = dict(b)
+    assert not win._task_is_open()
+    assert not win._result_is_for_open_shot({"task_id": None, "ident": row_ident(a)})
+    win._sync_all()
+    assert not win._panel.can_send()
+
+    # 새 샷의 영상이 올라온 뒤에는 그 샷의 결과만 지금 샷의 것이다
+    win._loaded_task_id = row_ident(b)
+    assert win._task_is_open()
+    assert win._result_is_for_open_shot({"task_id": None, "ident": row_ident(b)})
+    assert not win._result_is_for_open_shot({"task_id": None, "ident": row_ident(a)})
+    # 태스크가 있는 샷의 옛 표(ident 없이 task_id 만)도 그대로 맞는다
+    _as_task(win, 5, "S_A")
+    assert win._result_is_for_open_shot({"task_id": 5})
+    assert not win._result_is_for_open_shot({"task_id": 7})
+
+
+def test_confirm_note_carries_the_task_being_confirmed(win: Any, monkeypatch: Any) -> None:
+    sent: dict = {}
+
+    class _Now:
+        def __init__(self, fn: Any) -> None:
+            self.finished = self.error = self
+            self._fn = fn
+
+        def connect(self, *_a: Any) -> None:
+            pass
+
+        def start(self) -> None:
+            self._fn()
+
+        def isRunning(self) -> bool:  # noqa: N802
+            return False
+
+    def _fake_submit(_sg: Any, **kw: Any) -> None:
+        sent.update(kw)
+
+    def _no_guide(*_a: Any, **_k: Any) -> Any:
+        raise AssertionError("Confirm 노트는 edit·org 버전을 찾지 않는다")
+
+    monkeypatch.setattr("bpe.gui.confirm.confirm_window.ShotGridWorker", _Now)
+    monkeypatch.setattr(
+        "bpe.shotgrid.confirm_submit.open_submit_session", lambda: (object(), {"name": "SV"})
+    )
+    monkeypatch.setattr("bpe.shotgrid.confirm_submit.submit_confirm", _fake_submit)
+    monkeypatch.setattr("bpe.shotgrid.confirm_submit.guide_note_target", _no_guide)
+    _as_task(win, 5, "S_A")
+    win._panel.set_memo_text("엣지 정리")
+    win._submit("retake")
+    # 노트는 지금처럼 작업 버전에 붙고, 그 버전의 태스크(확인하는 태스크)가 Tasks 칸에 걸린다
+    assert sent["version_id"] == 205 and sent["task_id"] == 5
+    assert sent["note_task_id"] == 5
+    assert sent["status_code"] == "retake" and "empty_note_text" not in sent
+    win._submit_busy = False

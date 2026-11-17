@@ -246,6 +246,18 @@ def icon_button_style(size: int = 30) -> str:
     )
 
 
+def chip_style() -> str:
+    """고르는 말 단추 — 눌려 있으면 강조색으로 채운다(워크오더에 자주 쓰는 말)."""
+    return (
+        f"QPushButton {{ background: {FIELD}; color: {TEXT}; border: 1px solid {EDGE}; "
+        f"border-radius: 9px; padding: 2px 8px; font-size: {FONT_SMALL_PX}px; "
+        f"min-width: 0px; min-height: 0px; }}"
+        f"QPushButton:hover {{ border-color: {DIM}; }}"
+        f"QPushButton:checked {{ background: {ACCENT}; color: #ffffff; border-color: {ACCENT}; }}"
+        f"QPushButton:disabled {{ color: {DIM}; }}"
+    )
+
+
 def fixed_width_style(width: int) -> str:
     """버튼의 전체 폭을 못박는다(스타일 글의 폭이 위젯의 고정 폭보다 우선하므로 여기서 건다)."""
     inner = width - 2

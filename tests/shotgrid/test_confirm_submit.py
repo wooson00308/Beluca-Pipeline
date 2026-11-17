@@ -204,3 +204,88 @@ def test_no_version_means_only_task_changes() -> None:
     res = _submit(sg, status_code="cfrm", version_id=None)
     assert res.all_ok and res.version_needed is False
     assert _task_status(sg) == "cfrm" and _version_status(sg, 77) == "sv"
+
+
+# ── 2026-11-17 추가: Annotation 노트를 edit·org 버전에 붙이기(guide 봇이 집어 가게) ─────────
+
+
+def _sg_with_source_versions(with_plate: bool = True) -> MockShotgun:
+    sg = MockShotgun()
+    shot = {"type": "Shot", "id": 10}
+    rows = [
+        (30, "ep06_s017_0170_edit_v003", "edit", "2026-11-10"),
+        (20, "ep06_s017_0170_edit_v002", "edit", "2026-10-01"),
+        (77, "ep06_s017_0170_comp_v001", "comp", "2026-11-12"),
+        (99, "ep06_s017_0180_edit_v001", "edit", "2026-11-13"),
+    ]
+    if with_plate:
+        rows.append((40, "ep06_s017_0170_org_v004", "org", "2026-11-11"))
+    for vid, code, task, when in rows:
+        sg._add_entity(
+            "Version",
+            {
+                "id": vid,
+                "code": code,
+                "entity": shot if vid != 99 else {"type": "Shot", "id": 11},
+                "sg_task": {"type": "Task", "id": vid + 1000, "name": task},
+                "sg_task.Task.content": task,  # 가짜 샷그리드는 점으로 이은 칸을 그대로 본다
+                "created_at": when,
+            },
+        )
+    return sg
+
+
+def test_source_versions_lists_edit_and_org_of_the_shot() -> None:
+    rows = cs.source_versions(_sg_with_source_versions(), 10)
+    assert {r["id"] for r in rows} == {30, 20, 40}  # comp 과 다른 샷의 것은 뺀다
+    assert all(set(r) == {"id", "code", "task", "task_id"} for r in rows)
+    assert {r["id"]: r["task_id"] for r in rows} == {30: 1030, 20: 1020, 40: 1040}
+    assert {r["task"] for r in rows} == {"edit", "org"}
+
+
+def test_guide_note_target_follows_the_drawn_video() -> None:
+    sg = _sg_with_source_versions()
+    codes = {"edit": "ep06_s017_0170_edit_v003", "org": "ep06_s017_0170_org_v004"}
+    src, ver = cs.guide_note_target(sg, 10, codes=codes, drawn=["edit"], shown="org")
+    assert src == "edit" and ver is not None and ver["id"] == 30
+    src, ver = cs.guide_note_target(sg, 10, codes=codes, drawn=["org"], shown="org")
+    assert src == "org" and ver is not None and ver["id"] == 40
+    # 연 파일이 옛 버전이면 그 버전에 붙는다
+    old = dict(codes, edit="ep06_s017_0170_edit_v002")
+    _src, ver = cs.guide_note_target(sg, 10, codes=old, drawn=["edit"], shown="edit")
+    assert ver is not None and ver["id"] == 20
+
+    # 샷그리드에 org 버전이 없는 샷 — 원본에 그려도 edit 버전에 붙는다
+    no_plate = _sg_with_source_versions(with_plate=False)
+    src, ver = cs.guide_note_target(no_plate, 10, codes=codes, drawn=["org"], shown="org")
+    assert src == "edit" and ver is not None and ver["id"] == 30
+    # edit·org 버전이 하나도 없는 샷
+    assert cs.guide_note_target(MockShotgun(), 10, codes=codes, drawn=["org"], shown="org") == (
+        "",
+        None,
+    )
+
+
+def test_annotation_note_with_pictures_only_has_no_filler_text(tmp_path: Path) -> None:
+    sg = _sg()
+    png = tmp_path / "annot_version_30.0.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n")
+    res = _submit(
+        sg, content="", attachment_paths=[str(png)], status_code="", version_id=30,
+        empty_note_text="",
+    )  # fmt: skip
+    assert res.note_ok and res.all_ok
+    note = _notes(sg)[0]
+    assert note["content"] == ""  # 노트에는 쓴 글만 — 대신 넣는 글이 없다
+    assert {"type": "Version", "id": 30} in note["note_links"]
+
+
+def test_note_carries_the_task_of_its_version_like_a_native_note() -> None:
+    sg = _sg()
+    res = _submit(sg, note_task_id=500)
+    assert res.note_ok
+    assert _notes(sg)[0]["tasks"] == [{"type": "Task", "id": 500}]
+    # 걸 태스크가 없으면 Tasks 칸을 건드리지 않는다
+    sg = _sg()
+    _submit(sg)
+    assert "tasks" not in _notes(sg)[0]

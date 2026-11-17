@@ -125,3 +125,45 @@ def test_replace_memo_block_swaps_or_drops_a_run_of_lines() -> None:
     assert replace_memo_block(lines, "a\n뒤", "c") is None  # 이어진 묶음이 아니면 건드리지 않는다
     assert replace_memo_block([], "a", "b") is None
     assert lines == ["앞", "a", "b", "뒤"]  # 받은 목록은 그대로 둔다
+
+
+# ── 2026-11-17 추가: 그림은 그린 영상(원본 / edit)을 기억한다 ───────────────────────────
+
+
+def test_shapes_remember_the_video_they_were_drawn_on() -> None:
+    from bpe.core.confirm_annotations import (
+        KIND_RECT,
+        SOURCE_EDIT,
+        SOURCE_PLATE,
+        AnnotationDoc,
+        make_shape,
+        source_of,
+    )
+
+    doc = AnnotationDoc()
+    box = [(0.1, 0.1), (0.3, 0.3)]
+    old = doc.add(make_shape(KIND_RECT, 1001, box))  # 옛 그림 — 적힌 영상이 없다
+    on_edit = doc.add(make_shape(KIND_RECT, 1001, box, source=SOURCE_EDIT))
+    on_plate = doc.add(make_shape(KIND_RECT, 1005, box, source=SOURCE_PLATE))
+    assert doc.get(old)["source"] == "" and source_of(doc.get(old)) == SOURCE_PLATE
+    assert source_of(doc.get(on_edit)) == SOURCE_EDIT
+
+    # 영상을 주면 그 영상에서 그린 것만, 안 주면 전부(Confirm 모드)
+    assert [s["id"] for s in doc.shapes_at(1001)] == [old, on_edit]
+    assert [s["id"] for s in doc.shapes_at(1001, SOURCE_EDIT)] == [on_edit]
+    assert [s["id"] for s in doc.shapes_at(1001, SOURCE_PLATE)] == [old]
+    assert doc.hit_test(1001, 0.2, 0.2) == on_edit
+    assert doc.hit_test(1001, 0.2, 0.2, None, SOURCE_PLATE) == old
+    assert doc.hit_test(1005, 0.2, 0.2, None, SOURCE_EDIT) is None
+
+    # 노트에 붙일 그림 한 장 = (그린 영상, 프레임)
+    assert doc.marked_sources() == [(SOURCE_EDIT, 1001), (SOURCE_PLATE, 1001), (SOURCE_PLATE, 1005)]
+    assert doc.marked_frames() == [1001, 1005]
+
+    # 임시 저장을 거쳐도 남고, 옛 초안(칸이 없는 것)도 읽힌다
+    again = AnnotationDoc()
+    again.load_list(doc.to_list())
+    assert [s["source"] for s in again.shapes()] == ["", SOURCE_EDIT, SOURCE_PLATE]
+    legacy = [{"kind": KIND_RECT, "frame": 1001, "points": [[0.1, 0.1], [0.3, 0.3]]}]
+    again.load_list(legacy)
+    assert again.shapes()[0]["source"] == "" and on_plate

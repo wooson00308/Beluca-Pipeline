@@ -251,8 +251,12 @@ def create_note_with_result(
     author_user: Optional[Dict[str, Any]] = None,
     addressings_to: Optional[List[Dict[str, Any]]] = None,
     addressings_cc: Optional[List[Dict[str, Any]]] = None,
+    task_ids: Optional[List[int]] = None,
 ) -> CreateNoteResult:
     """ShotGrid에 Note를 생성하고 선택적으로 이미지를 첨부한다. 첨부 실패 여부를 반환한다.
+
+    *task_ids* 를 주면 노트의 Tasks 칸에 그 태스크를 건다 — 샷그리드에서 버전에 직접 단
+    노트가 그 버전의 태스크를 달고 있는 것과 같게.
 
     ``attachment_paths``가 비어 있지 않으면 여러 파일을 순서대로 업로드한다.
     그렇지 않고 ``attachment_path``만 있으면 단일 첨부와 동일하다.
@@ -271,6 +275,9 @@ def create_note_with_result(
             data["user"] = {"type": "HumanUser", "id": int(author_user["id"])}
         except (TypeError, ValueError):
             pass
+    tasks = [{"type": "Task", "id": int(t)} for t in task_ids or [] if t is not None]
+    if tasks:
+        data["tasks"] = tasks
     if addressings_to:
         data["addressings_to"] = addressings_to
     if addressings_cc is not None:

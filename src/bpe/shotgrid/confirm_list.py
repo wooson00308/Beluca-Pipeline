@@ -9,9 +9,18 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence
 
-from bpe.core.confirm_list import ANNOTATION_STATUSES, LIST_STATUSES, group_rows_by_shot
+from bpe.core.confirm_list import (
+    ANNOTATION_STATUSES,
+    LIST_STATUSES,
+    MATERIAL_TASKS,
+    group_rows_by_shot,
+)
 from bpe.core.logging import get_logger
-from bpe.shotgrid.tasks import list_review_tasks_for_project
+from bpe.shotgrid.tasks import (
+    _detect_shot_vfx_field,
+    detect_task_status_field,
+    list_review_tasks_for_project,
+)
 
 logger = get_logger("shotgrid.confirm_list")
 
@@ -122,6 +131,105 @@ def list_annotation_shots(
         limit=limit,
     )
     return group_rows_by_shot(rows)
+
+
+def list_shots_for_annotation(
+    sg: Any, project_id: int, shot_ids: Sequence[int]
+) -> List[Dict[str, Any]]:
+    """고른 샷들을 Annotation 목록의 줄로 — 태스크 상태와 상관없이, 샷마다 한 줄(샷 이름 순).
+
+    줄 모양은 :func:`list_annotation_shots` 와 같다. ``tasks`` 에는 작업 태스크만 담고
+    (edit·org·guide 같은 재료 태스크는 뺀다), 담당은 그 태스크들의 담당을 모두 합친다.
+    ``task_id`` 는 첫 작업 태스크의 것 — 작업 태스크가 없는 샷은 아무 태스크나,
+    그것도 없으면 ``None``.
+    """
+    ids = sorted({int(i) for i in shot_ids if i is not None})
+    if not ids:
+        return []
+    vfx_field = _detect_shot_vfx_field(sg)
+    status_fn = detect_task_status_field(sg) or "sg_status_list"
+    shot_fields = [
+        "id", "code", "description", "image", "sg_status_list",
+        "project", "project.Project.code", "project.Project.name",
+    ]  # fmt: skip
+    if vfx_field:
+        shot_fields.append(vfx_field)
+    shots: Dict[int, Dict[str, Any]] = {}
+    tasks: Dict[int, List[Dict[str, Any]]] = {}
+    for i in range(0, len(ids), _CHUNK):
+        part = ids[i : i + _CHUNK]
+        for s in sg.find("Shot", [["id", "in", part]], shot_fields) or []:
+            if s.get("id") is not None:
+                shots[int(s["id"])] = s
+        links = [_link("Shot", x) for x in part]
+        task_fields = ["id", "content", "task_assignees", status_fn, "entity"]
+        for t in sg.find("Task", [["entity", "in", links]], task_fields) or []:
+            sid = _link_id(t.get("entity"))
+            if sid is not None:
+                tasks.setdefault(sid, []).append(t)
+    out: List[Dict[str, Any]] = []
+    for sid in ids:
+        s = shots.get(sid)
+        if s is None:
+            continue
+        proj = s.get("project") if isinstance(s.get("project"), dict) else {}
+        proj_code = str(s.get("project.Project.code") or proj.get("code") or "").strip()
+        proj_name = str(s.get("project.Project.name") or proj.get("name") or "").strip()
+        every = sorted(
+            tasks.get(sid, []),
+            key=lambda t: (str(t.get("content") or "").lower(), t.get("id") or 0),
+        )
+        work = [
+            t for t in every if str(t.get("content") or "").strip().lower() not in MATERIAL_TASKS
+        ]
+        first = (work or every or [{}])[0]
+        people: List[Dict[str, Any]] = []
+        seen: set = set()
+        for t in work:
+            for a in t.get("task_assignees") or []:
+                key = (str(a.get("type") or ""), a.get("id")) if isinstance(a, dict) else None
+                if key is not None and key not in seen:
+                    seen.add(key)
+                    people.append(a)
+        statuses: List[str] = []
+        for t in work:
+            st = str(t.get(status_fn) or "").strip()
+            if st and st not in statuses:
+                statuses.append(st)
+        order = s.get(vfx_field) if vfx_field else ""
+        if isinstance(order, dict):
+            order = order.get("name") or order.get("value")
+        pid = proj.get("id")
+        out.append(
+            {
+                "shot_id": sid,
+                "shot_code": str(s.get("code") or "").strip(),
+                "shot_description": str(s.get("description") or "").strip(),
+                "shot_image": s.get("image") or "",
+                "shot_status": str(s.get("sg_status_list") or "").strip(),
+                "vfx_work_order": str(order or "").strip(),
+                "project_id": pid if pid is not None else int(project_id),
+                "project_code": proj_code,
+                "project_name": proj_name,
+                "project_folder": (proj_code or proj_name).strip(),
+                "status_field": status_fn,
+                "task_id": first.get("id"),
+                "task_content": str(first.get("content") or "").strip(),
+                "task_status": str(first.get(status_fn) or "").strip(),
+                "task_assignees": people,
+                "task_statuses": statuses,
+                "tasks": [
+                    {
+                        "task_id": t.get("id"),
+                        "task_content": str(t.get("content") or "").strip(),
+                        "task_status": str(t.get(status_fn) or "").strip(),
+                        "task_assignees": list(t.get("task_assignees") or []),
+                    }
+                    for t in work
+                ],
+            }
+        )
+    return sorted(out, key=lambda r: str(r.get("shot_code") or "").lower())
 
 
 def list_confirm_tasks(

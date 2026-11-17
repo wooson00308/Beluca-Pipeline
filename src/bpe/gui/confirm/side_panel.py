@@ -6,8 +6,15 @@ import re
 from html import escape
 from typing import Any, Dict, List, Optional, Tuple
 
-from PySide6.QtCore import QMimeData, QPoint, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QContextMenuEvent, QGuiApplication, QImage, QMouseEvent, QPixmap
+from PySide6.QtCore import QMimeData, QPoint, QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import (
+    QContextMenuEvent,
+    QGuiApplication,
+    QImage,
+    QMouseEvent,
+    QPixmap,
+    QTextCursor,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -15,6 +22,8 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLayout,
+    QLayoutItem,
     QLineEdit,
     QListView,
     QListWidget,
@@ -29,6 +38,13 @@ from PySide6.QtWidgets import (
 )
 
 from bpe.core.confirm_checks import STATE_FAIL, STATE_PASS, CheckResult
+from bpe.core.confirm_shot_text import (
+    KIND_DESCRIPTION,
+    KIND_WORK_ORDER,
+    WORK_ORDER_CHIPS,
+    has_line,
+    toggle_line,
+)
 from bpe.gui.confirm import status_style, style
 from bpe.gui.widgets.clickable_image import ClickableImage
 
@@ -49,6 +65,9 @@ _NOTE_THUMB_W, _NOTE_THUMB_H = 150, 94  # Note 에 붙은 그림(한 줄에 둘)
 _CC_REMOVE = "cc-remove:"
 _CC_SEARCH_DELAY_MS = 300
 _CC_LIST_MAX_H = 112
+_SHOT_TEXT_H = 44  # 샷 칸 글 높이(두 줄) — 이미 적힌 글을 불러와 보여 준다(길면 스크롤)
+_SHOT_TEXT_BTN = "적용"
+_SHOT_TEXT_TITLE = "Supervisor Order"
 _CODE_TOKEN = re.compile(r"^[A-Za-z0-9_.\-]*\d[A-Za-z0-9_.\-]*$|^[a-z]{2,6}$")
 
 
@@ -227,6 +246,62 @@ class _ClickRow(QLabel):
         event.accept()
 
 
+class _FlowLayout(QLayout):
+    """왼쪽부터 채우고 넘치면 다음 줄로 넘기는 배치(고르는 말 단추들)."""
+
+    def __init__(self, parent: Optional[QWidget] = None, spacing: int = 4) -> None:
+        super().__init__(parent)
+        self._items: List[QLayoutItem] = []
+        self._gap = spacing
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def addItem(self, item: QLayoutItem) -> None:  # noqa: N802
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, index: int) -> Optional[QLayoutItem]:  # noqa: N802
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index: int) -> Optional[QLayoutItem]:  # noqa: N802
+        return self._items.pop(index) if 0 <= index < len(self._items) else None
+
+    def expandingDirections(self) -> Qt.Orientation:  # noqa: N802
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802
+        return self._place(QRect(0, 0, width, 0), apply=False)
+
+    def setGeometry(self, rect: QRect) -> None:  # noqa: N802
+        super().setGeometry(rect)
+        self._place(rect, apply=True)
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        return self.minimumSize()
+
+    def minimumSize(self) -> QSize:  # noqa: N802
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        return size
+
+    def _place(self, rect: QRect, *, apply: bool) -> int:
+        x, y, row_h = rect.x(), rect.y(), 0
+        for item in self._items:
+            hint = item.sizeHint()
+            if x > rect.x() and x + hint.width() > rect.right() + 1:
+                x, y, row_h = rect.x(), y + row_h + self._gap, 0
+            if apply:
+                item.setGeometry(QRect(x, y, hint.width(), hint.height()))
+            x += hint.width() + self._gap
+            row_h = max(row_h, hint.height())
+        return y + row_h - rect.y()
+
+
 def _images_in_mime(source: QMimeData) -> List[QImage]:
     """클립보드에 든 그림들 — 그림 자체, 또는 탐색기에서 복사한 그림 파일."""
     out: List[QImage] = []
@@ -316,6 +391,7 @@ class ConfirmSidePanel(QWidget):
     preset_picked = Signal(str)
     memo_edited = Signal()
     insert_failures_requested = Signal()
+    shot_text_requested = Signal(str, str)  # (칸 종류, 칸의 글) — 샷의 글 칸에 적용
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -383,6 +459,12 @@ class ConfirmSidePanel(QWidget):
         wrap.setContentsMargins(10, 0, 10, 8)
         wrap.addWidget(self._btn_failures)
         col.addLayout(wrap)
+
+        # Annotation: 샷의 글 칸(VFX work order · Description)에 덧붙이기
+        self._shot_text_on = False
+        self._shot_text_block = self._build_shot_text_block()
+        self._shot_text_block.hide()
+        col.addWidget(self._shot_text_block)
 
         past_head = QFrame()
         past_head.setStyleSheet(
@@ -661,6 +743,123 @@ class ConfirmSidePanel(QWidget):
             f"border: 1px solid {style.EDGE}; {style.mono(13, bold=True)} }}"
             f"QPushButton:hover {{ border: 1px solid {style.TEXT_STRONG}; }}"
             f"QPushButton:disabled {{ color: #6a6a6a; background: #2c2c2c; }}"
+        )
+
+    # ── 샷의 글 칸에 적용(Annotation) ─────────────────────────────
+
+    def _build_shot_text_block(self) -> QWidget:
+        block = _clear_block()
+        outer = QVBoxLayout(block)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        outer.addWidget(_header(_SHOT_TEXT_TITLE))
+        body = _clear_block()
+        lay = QVBoxLayout(body)
+        lay.setContentsMargins(10, 8, 10, 8)
+        lay.setSpacing(6)
+        chips = _clear_block()
+        flow = _FlowLayout(chips, spacing=4)
+        self._chip_btns: Dict[str, QPushButton] = {}
+        for word in WORK_ORDER_CHIPS:
+            chip = QPushButton(word)
+            chip.setCheckable(True)
+            chip.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            chip.setCursor(Qt.CursorShape.PointingHandCursor)
+            chip.setStyleSheet(style.chip_style())
+            chip.setToolTip("누르면 워크오더 글에 한 줄로 들어갑니다 (다시 누르면 빠짐)")
+            chip.clicked.connect(lambda _c=False, w=word: self._on_chip(w))
+            flow.addWidget(chip)
+            self._chip_btns[word] = chip
+        lay.addWidget(chips)
+        self._shot_edits: Dict[str, QPlainTextEdit] = {}
+        self._shot_btns: Dict[str, QPushButton] = {}
+        fields = (
+            (KIND_WORK_ORDER, "VFX work order", "위 단추를 누르거나 직접 씁니다"),
+            (KIND_DESCRIPTION, "Description", "샷 설명"),
+        )
+        for kind, name, hint in fields:
+            # 글을 채우면 안내 글이 사라지므로, 어느 칸인지 이름표를 늘 보인다
+            cap = QLabel(name)
+            cap.setStyleSheet(
+                f"color: {style.DIM}; font-size: {style.FONT_SMALL_PX}px; border: none;"
+            )
+            lay.addWidget(cap)
+            row = QHBoxLayout()
+            row.setSpacing(6)
+            edit = QPlainTextEdit()
+            edit.setPlaceholderText(hint)
+            edit.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+            edit.setFixedHeight(_SHOT_TEXT_H)
+            edit.document().setDocumentMargin(3)
+            edit.setStyleSheet("QPlainTextEdit { padding: 1px 3px; }")
+            btn = QPushButton(_SHOT_TEXT_BTN)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(f"샷그리드 샷의 {name} 칸을 지금 이 칸의 글 그대로 바꿉니다")
+            btn.setEnabled(False)
+            btn.clicked.connect(lambda _c=False, k=kind: self._emit_shot_text(k))
+            row.addWidget(edit, 1)
+            row.addWidget(btn, 0, Qt.AlignmentFlag.AlignBottom)
+            lay.addLayout(row)
+            self._shot_edits[kind] = edit
+            self._shot_btns[kind] = btn
+        self._shot_edits[KIND_WORK_ORDER].textChanged.connect(self._sync_chips)
+        self._shot_result = QLabel("")
+        self._shot_result.setWordWrap(True)
+        self._shot_result.hide()
+        lay.addWidget(self._shot_result)
+        outer.addWidget(body)
+        return block
+
+    def _on_chip(self, word: str) -> None:
+        edit = self._shot_edits[KIND_WORK_ORDER]
+        edit.setPlainText(toggle_line(edit.toPlainText(), word))
+        # 바로 뒤에 내용을 이어 쓸 수 있게(예: 「AI」 뒤에 「 병사연장」)
+        cursor = edit.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        edit.setTextCursor(cursor)
+        edit.setFocus()
+        self._sync_chips()
+
+    def _sync_chips(self) -> None:
+        text = self._shot_edits[KIND_WORK_ORDER].toPlainText()
+        for word, chip in self._chip_btns.items():
+            chip.setChecked(has_line(text, word))
+
+    def _emit_shot_text(self, kind: str) -> None:
+        self.shot_text_requested.emit(kind, self._shot_edits[kind].toPlainText())
+
+    def shot_text(self, kind: str) -> str:
+        return self._shot_edits[kind].toPlainText()
+
+    def set_shot_text(self, kind: str, text: str) -> None:
+        self._shot_edits[kind].setPlainText(text)
+
+    def clear_shot_text(self, kind: Optional[str] = None) -> None:
+        """샷 칸 글을 비운다(*kind* 가 없으면 둘 다) — 샷이 바뀌면 앞 샷의 글이 남지 않게."""
+        for k, edit in self._shot_edits.items():
+            if kind is None or k == kind:
+                edit.clear()
+
+    def set_shot_text_enabled(self, on: bool, tip: str = "") -> None:
+        self._shot_text_on = bool(on)
+        for kind, btn in self._shot_btns.items():
+            btn.setEnabled(self._shot_text_on and btn.text() == _SHOT_TEXT_BTN)
+            if tip:
+                btn.setToolTip(tip)
+            del kind
+
+    def set_shot_text_busy(self, kind: str, on: bool) -> None:
+        btn = self._shot_btns[kind]
+        btn.setText("저장 중…" if on else _SHOT_TEXT_BTN)
+        btn.setEnabled(self._shot_text_on and not on)
+
+    def set_shot_text_result(self, text: str, ok: bool) -> None:
+        self._shot_result.setVisible(bool(text))
+        self._shot_result.setText(text)
+        color = style.OK if ok else style.WARN
+        self._shot_result.setStyleSheet(
+            f"color: {color}; font-size: {style.FONT_SMALL_PX}px; border: none;"
         )
 
     def set_work_info(self, order: str, description: str, who: str) -> None:
@@ -1012,6 +1211,7 @@ class ConfirmSidePanel(QWidget):
         for b in (self._btn_retake, self._btn_cfrm, self._other):
             b.setVisible(not on)
         self._btn_note.setVisible(on)
+        self._shot_text_block.setVisible(on)
 
     def is_annotation(self) -> bool:
         return self._annotation

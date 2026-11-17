@@ -9,6 +9,13 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
+from bpe.core.confirm_guide_note import (
+    SOURCE_TASKS,
+    TASK_EDIT,
+    TASK_PLATE,
+    match_version,
+    pick_note_version,
+)
 from bpe.core.confirm_media import twin_version_key
 from bpe.core.logging import get_logger
 from bpe.shotgrid.client import get_default_sg, get_shotgun_for_version_mutation, resolve_sudo_login
@@ -119,6 +126,57 @@ def open_submit_session() -> Tuple[Any, Optional[Dict[str, Any]]]:
     return sg, me
 
 
+def source_versions(sg: Any, shot_id: int) -> List[Dict[str, Any]]:
+    """샷의 edit·org 태스크 버전들 — 최근 것이 앞. ``[{"id", "code", "task"}]``."""
+    rows = (
+        sg.find(
+            "Version",
+            [
+                ["entity", "is", {"type": "Shot", "id": int(shot_id)}],
+                ["sg_task.Task.content", "in", [TASK_EDIT, TASK_PLATE]],
+            ],
+            ["id", "code", "sg_task"],
+            order=[{"field_name": "created_at", "direction": "desc"}],
+        )
+        or []
+    )
+    out: List[Dict[str, Any]] = []
+    for v in rows:
+        task = v.get("sg_task") if isinstance(v.get("sg_task"), dict) else {}
+        if v.get("id") is None:
+            continue
+        out.append(
+            {
+                "id": int(v["id"]),
+                "code": str(v.get("code") or ""),
+                "task": str(task.get("name") or "").strip().lower(),
+                "task_id": task.get("id"),
+            }
+        )
+    return out
+
+
+def guide_note_target(
+    sg: Any,
+    shot_id: int,
+    *,
+    codes: Dict[str, str],
+    drawn: List[str],
+    shown: str,
+) -> Tuple[str, Optional[Dict[str, Any]]]:
+    """Annotation 노트를 붙일 버전 → ``(그린 영상, 버전)``. 붙일 버전이 없으면 ``("", None)``.
+
+    *codes* 는 ``{영상: 연 파일의 이름}`` — 같은 이름의 버전을 먼저 찾는다.
+    샷그리드에서 직접 그려 올린 노트처럼 edit·org 버전에 붙여야 guide 봇이 집어 간다.
+    """
+    versions = source_versions(sg, shot_id)
+    found = {
+        source: match_version(versions, task, codes.get(source, ""))
+        for source, task in SOURCE_TASKS.items()
+    }
+    return pick_note_version(drawn, shown, found)
+
+
 def note_subject(me: Optional[Dict[str, Any]], version_code: str, shot_code: str) -> str:
     name = ((me or {}).get("name") or (me or {}).get("login") or "").strip()
     return build_native_style_note_subject(name, version_code or None, shot_code)
@@ -141,12 +199,18 @@ def submit_confirm(
     addressings_cc: Optional[List[Dict[str, Any]]] = None,
     existing_note_id: Optional[int] = None,
     with_version_status: bool = True,
+    empty_note_text: str = EMPTY_NOTE_TEXT,
+    note_task_id: Optional[int] = None,
 ) -> ConfirmSubmitResult:
     """노트(메모·그림이 있을 때만)를 보내고, 상태(고른 경우만)를 바꾼다.
 
     상태는 태스크와 버전(그리고 그 버전의 쌍둥이 ``_lut`` 버전)을 같은 값으로 함께 바꾼다.
     *existing_note_id* 가 있으면 노트는 이미 간 것으로 보고 다시 만들지 않는다
     (상태만 다시 시도할 때 — 이미 바뀐 쪽에 같은 값을 다시 써도 해가 없다).
+    *empty_note_text* 는 글 없이 그림만 보낼 때 본문에 넣는 글 — Annotation 은 빈 글을 준다
+    (노트에는 쓴 사람의 글만 들어간다).
+    *note_task_id* 는 노트의 Tasks 칸에 걸 태스크(노트가 붙는 버전의 태스크) — 샷그리드에서
+    직접 단 노트와 같은 모양이라, 나중에 guide 로 표시했을 때 봇이 다루던 노트와 다르지 않다.
     """
     text = (content or "").strip()
     paths = [p for p in (attachment_paths or []) if p]
@@ -163,13 +227,14 @@ def submit_confirm(
                 project_id=int(project_id),
                 shot_id=int(shot_id),
                 subject=subject,
-                content=text or EMPTY_NOTE_TEXT,
+                content=text or empty_note_text,
                 version_id=version_id,
                 attachment_path=None,
                 attachment_paths=paths or None,
                 author_user=author_user,
                 addressings_to=addressings_to or None,
                 addressings_cc=addressings_cc or None,
+                task_ids=[int(note_task_id)] if note_task_id is not None else None,
             )
         except Exception as e:
             logger.warning("confirm submit: note create failed: %s", e)

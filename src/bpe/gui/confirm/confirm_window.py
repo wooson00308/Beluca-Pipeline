@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import math
 import os
+import shutil
 import struct
 import sys
 import tempfile
 import time
 from html import escape
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from PySide6.QtCore import QFileInfo, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import (
@@ -46,7 +47,13 @@ from PySide6.QtWidgets import (
 
 import bpe.core.config as cfg
 from bpe.core.atomic_io import read_json_file, write_json_file
-from bpe.core.confirm_annotations import AnnotationDoc, replace_memo_block
+from bpe.core.confirm_annotations import (
+    SOURCE_EDIT,
+    SOURCE_PLATE,
+    AnnotationDoc,
+    replace_memo_block,
+    source_of,
+)
 from bpe.core.confirm_checks import (
     STATE_FAIL,
     STATE_PASS,
@@ -64,11 +71,13 @@ from bpe.core.confirm_decode import (
     fit_decode_size,
     frame_byte_size,
 )
+from bpe.core.confirm_guide_note import stage_annot_files
 from bpe.core.confirm_list import (
     MODE_ANNOTATION,
     MODE_CONFIRM,
     annotation_status_text,
     annotation_subtitle,
+    row_ident,
 )
 from bpe.core.confirm_look import judge_look, sample_grid
 from bpe.core.confirm_media import (
@@ -89,6 +98,13 @@ from bpe.core.confirm_sequence import (
     order_rows,
     position,
     total_frames,
+)
+from bpe.core.confirm_shot_text import (
+    KIND_LABELS,
+    KIND_ROW_KEYS,
+    KINDS,
+    clean_text,
+    same_text,
 )
 from bpe.core.confirm_standard import (
     ProjectStandard,
@@ -598,6 +614,11 @@ class ConfirmWindow(QWidget):
         self._send_timer = QTimer(self)
         self._send_timer.setInterval(1000)
         self._send_timer.timeout.connect(self._on_send_tick)
+        # 샷의 글 칸(워크오더·디스크립션)에 덧붙이는 중인 칸들
+        self._shot_text_busy: Set[str] = set()
+        self._shot_text_base: Dict[str, str] = {}  # 칸에 불러와 둔 샷그리드의 글
+        # 노트용 그림 파일 → (그린 영상, 그 영상에서의 프레임 순번) — 그림 이름을 맞출 때 쓴다
+        self._note_image_meta: Dict[str, Tuple[str, int]] = {}
         # 보낸 직후 머리 줄 상태 칸을 잠깐 강조한다(「sv → retake」 / 「Note 보냄」)
         self._status_flash: Optional[Dict[str, Any]] = None
         self._flash_timer = QTimer(self)
@@ -660,6 +681,7 @@ class ConfirmWindow(QWidget):
         self._panel = ConfirmSidePanel()
         self._panel.status_requested.connect(self._on_status_requested)
         self._panel.note_requested.connect(self._on_note_requested)
+        self._panel.shot_text_requested.connect(self._on_shot_text_requested)
         self._panel.ref_frame_requested.connect(self._open_ref_dialog)
         self._panel.cancel_requested.connect(self._cancel_pending)
         self._panel.retry_requested.connect(self._retry_status_only)
@@ -1189,9 +1211,9 @@ class ConfirmWindow(QWidget):
         self._movie = movie
         self._shot_root = None
         self._task = self._with_sent_status(task)
-        self._loaded_task_id = self._task.get("task_id")
+        self._loaded_task_id = row_ident(self._task)
         self._retry = None
-        self._drawer.set_current_task(self._task.get("task_id"))
+        self._drawer.set_current_task(row_ident(self._task))
         self._sent_note_id = None
         self._version_note = ""
         for buf in self._bufs.values():
@@ -1207,6 +1229,9 @@ class ConfirmWindow(QWidget):
         self._pasted = []
         self._panel.set_pasted_images([])
         self._panel.clear_cc()
+        # 샷 칸 글은 이 샷에 지금 적혀 있는 글로 채운다(앞 샷에 쓰던 글이 넘어오지 않는다)
+        self._load_shot_text()
+        self._panel.set_shot_text_result("", True)
         self._look_measured, self._look_tried, self._lut_override = {}, set(), {}
         self._plate_probe = None
         self._timeline.set_range(self._frame_start, 0)
@@ -1912,7 +1937,7 @@ class ConfirmWindow(QWidget):
         self._pause()
         self._task = row  # 위 막대가 바로 고른 샷으로 바뀐다
         self._shot_root = None
-        self._drawer.set_current_task(row.get("task_id"))
+        self._drawer.set_current_task(row_ident(row))
         self._sync_header()
         looking = "서버에서 원본(ORG plate) 찾는 중" if self._annotation else ""
         self._set_busy(f"{shot} 여는 중…", looking or "서버에서 영상 파일 찾는 중")
@@ -1957,8 +1982,8 @@ class ConfirmWindow(QWidget):
             self._seq_nav(delta)
             return
         rows = self._drawer.shown_rows()
-        cur = self._task.get("task_id")
-        idx = next((i for i, r in enumerate(rows) if r.get("task_id") == cur), -1)
+        cur = row_ident(self._task)
+        idx = next((i for i, r in enumerate(rows) if row_ident(r) == cur), -1)
         nxt = idx + delta
         if rows and 0 <= nxt < len(rows):
             self._open_task(rows[nxt])
@@ -2082,8 +2107,8 @@ class ConfirmWindow(QWidget):
         if self._seq is not None:  # 이어 재생의 그림이 이미 올라와 있다
             return
         rows = self._drawer.shown_rows()
-        cur = self._task.get("task_id")
-        idx = next((i for i, r in enumerate(rows) if r.get("task_id") == cur), -1)
+        cur = row_ident(self._task)
+        idx = next((i for i, r in enumerate(rows) if row_ident(r) == cur), -1)
         if cur is None or idx < 0 or idx + 1 >= len(rows):
             return
         row = dict(rows[idx + 1])
@@ -2376,7 +2401,7 @@ class ConfirmWindow(QWidget):
             status_text = annotation_status_text(t) or status
         self._who.setText(who)
         flash = self._status_flash
-        if flash is not None and flash.get("task_id") != t.get("task_id"):
+        if flash is not None and flash.get("task_id") != row_ident(t):
             flash = None  # 다른 샷으로 넘어갔다 — 이 샷의 강조가 아니다
         if flash is not None:  # 방금 보냈다 — 바뀐 것을 잠깐 크게 알린다
             code = str(flash.get("code") or "")
@@ -2393,7 +2418,7 @@ class ConfirmWindow(QWidget):
         if status:
             self._status_dot.setPixmap(status_style.chip(status, 16))
         rows = self._nav_rows()
-        idx = next((i for i, r in enumerate(rows) if r.get("task_id") == t.get("task_id")), -1)
+        idx = next((i for i, r in enumerate(rows) if row_ident(r) == row_ident(t)), -1)
         self._panel.set_nav(
             f"{idx + 1} / {len(rows)}" if idx >= 0 else "",
             idx > 0,
@@ -2406,6 +2431,8 @@ class ConfirmWindow(QWidget):
             btn.setChecked((mode == MODE_ANNOTATION) == self._annotation)
 
     def _sync_all(self) -> None:
+        # Annotation: 그림은 그린 영상에 딸린다 — 지금 보는 영상의 그림만 보이고 거기에 그려진다
+        self._layer.set_source(self._source_of(self._shown))
         keys = [k for k, _n, _t in _BUFFER_DEFS if not self._annotation or k in _ANNOTATION_KEYS]
         for key, btn in self._buf_btns.items():
             buf = self._bufs[key]
@@ -2459,6 +2486,8 @@ class ConfirmWindow(QWidget):
             ready and not self._submit_busy,
             "" if ready else "샷그리드 정보가 있는 샷에서만 보낼 수 있습니다",
         )
+        # 샷 칸에 덧붙이기는 영상이 없어도 된다 — 샷그리드의 그 샷이 열려 있으면 된다
+        self._panel.set_shot_text_enabled(bool(self._task.get("shot_id")) and self._task_is_open())
         self._sync_header()
         self._sync_memo()
         self._sync_view()
@@ -2917,8 +2946,24 @@ class ConfirmWindow(QWidget):
         for line in failure_lines(self._checks):
             self._panel.append_memo(line)
 
+    def _source_of(self, key: str) -> str:
+        """판 → 그린 영상 이름. Annotation 에서만 가린다(원본은 「현재버전」 자리에 올라와 있다)."""
+        if not self._annotation:
+            return ""
+        return SOURCE_EDIT if key == KEY_EDIT else SOURCE_PLATE
+
+    def _key_of(self, source: str) -> str:
+        return KEY_EDIT if source == SOURCE_EDIT else KEY_CUR
+
+    def _attachment_marks(self) -> List[Tuple[str, int]]:
+        """노트에 붙일 그림 한 장씩 — ``(판, 프레임)``. Confirm 에서는 늘 현재버전 판이다."""
+        doc = self._layer.doc()
+        if not self._annotation:
+            return [(KEY_CUR, f) for f in doc.marked_frames()]
+        return [(self._key_of(src), f) for src, f in doc.marked_sources()]
+
     def _attachment_frames(self) -> List[int]:
-        return self._layer.doc().marked_frames()
+        return [f for _key, f in self._attachment_marks()]
 
     def _draft_path(self) -> Optional[Path]:
         cur = self._bufs[KEY_CUR]
@@ -2976,28 +3021,43 @@ class ConfirmWindow(QWidget):
         self._sync_memo()
 
     def _render_note_images(self) -> List[str]:
-        """그림을 남긴 프레임마다 노트용 PNG 를 임시 폴더에 만든다."""
+        """그림을 남긴 프레임마다 노트용 PNG 를 임시 폴더에 만든다.
+
+        Annotation 에서는 그림을 그린 그 영상(원본 / edit)의 프레임 위에 찍는다.
+        """
         cur = self._bufs[KEY_CUR]
         doc = self._layer.doc()
         out: List[str] = []
+        self._note_image_meta = {}
         shot = (self._task.get("shot_code") or (cur.path.stem if cur.path else "")).strip()
-        for frame in self._attachment_frames():
-            data = cur.frames.get(frame - self._frame_start)
+        for key, frame in self._attachment_marks():
+            buf = self._bufs[key]
+            if not buf.available:
+                continue
+            # 영상마다 길이가 다를 수 있다(원본은 앞뒤 여유분) — 순번은 그 영상 기준으로 센다
+            index = max(0, min(frame - self._frame_start, (buf.frame_count() or self._count) - 1))
+            data = buf.frames.get(index)
             if data is None:
                 continue
             img = self._view.render_frame_image(
                 data,
-                cur.size[0],
-                cur.size[1],
-                lut_on=self._lut is not None and self._lut_wanted(cur),
+                buf.size[0],
+                buf.size[1],
+                lut_on=self._lut is not None and self._lut_wanted(buf),
             )
             if img is None:
                 continue
             img = img.convertToFormat(QImage.Format.Format_RGB888)
             p = QPainter(img)
             rect = (0.0, 0.0, float(img.width()), float(img.height()))
-            paint_shapes(p, [s for s in doc.shapes() if s["frame"] == frame], rect)
-            label = f"{shot}  {cur.version_label}  프레임 {frame}"
+            shapes = [
+                s
+                for s in doc.shapes()
+                if s["frame"] == frame
+                and (not self._annotation or self._key_of(source_of(s)) == key)
+            ]
+            paint_shapes(p, shapes, rect)
+            label = f"{shot}  {buf.version_label or buf.title}  프레임 {frame}"
             font = p.font()
             font.setBold(True)
             font.setPixelSize(max(14, img.height() // 40))
@@ -3019,6 +3079,7 @@ class ConfirmWindow(QWidget):
             os.close(fd)
             if img.save(tmp, "PNG"):
                 out.append(tmp)
+                self._note_image_meta[tmp] = (self._source_of(key), index)
         self._refresh_view()
         return out
 
@@ -3106,7 +3167,7 @@ class ConfirmWindow(QWidget):
         목록에서 다른 샷을 고르면 머리 줄은 바로 바뀌지만 영상은 서버에서 찾은 뒤에야 바뀐다.
         그 사이와, 새 샷의 영상을 못 찾았을 때는 화면의 메모·그림이 앞 샷 것이라 보내면 안 된다.
         """
-        return self._task.get("task_id") == self._loaded_task_id
+        return row_ident(self._task) == self._loaded_task_id
 
     def _on_note_requested(self) -> None:
         """Annotation 모드의 「Note 보내기」 — 상태는 그대로 두고 메모·그림만 보낸다."""
@@ -3186,6 +3247,7 @@ class ConfirmWindow(QWidget):
         # 결과가 돌아올 때 어느 샷의 것인지 알도록 같이 들려 보낸다
         ticket: Dict[str, Any] = {
             "task_id": t.get("task_id"),
+            "ident": row_ident(t),
             "shot": str(t.get("shot_code") or ""),
             "draft": self._draft_path() if task is None else None,
             "retry": existing_note_id is not None,
@@ -3211,32 +3273,73 @@ class ConfirmWindow(QWidget):
         self._panel.set_result("보내는 중…", True)
         self._sync_all()
         cur_code = (t.get("latest_version_code") or "").strip()
+        # Annotation: 샷그리드에서 직접 그려 올린 노트와 같은 자리(edit·org 버전)에, 같은 그림
+        # 이름으로 보낸다 — 그래야 guide 봇이 집어 가 샷 목록의 guide 칸에 뜬다
+        guide: Optional[Dict[str, Any]] = None
+        if self._annotation and task is None and existing_note_id is None:
+            plate, edit = self._bufs[KEY_CUR], self._bufs[KEY_EDIT]
+            guide = {
+                "codes": {
+                    SOURCE_PLATE: plate.path.stem if plate.path is not None else "",
+                    SOURCE_EDIT: edit.path.stem if edit.path is not None else "",
+                },
+                "drawn": sorted({src for src, _f in self._layer.doc().marked_sources()}),
+                "shown": self._source_of(self._shown),
+                "items": [(p, self._note_image_meta[p][1]) for p in images],
+            }
 
         def _work() -> Any:
             from bpe.shotgrid.confirm_submit import (
                 addressings_for_confirm,
+                guide_note_target,
                 note_subject,
                 open_submit_session,
                 submit_confirm,
             )
 
             sg, me = open_submit_session()
-            return submit_confirm(
-                sg,
-                project_id=int(t["project_id"]),
-                shot_id=int(t["shot_id"]),
-                version_id=t.get("latest_version_id"),
-                task_id=t.get("task_id"),
-                status_code=code,
-                status_field=(t.get("status_field") or None),
-                subject=note_subject(me, cur_code, (t.get("shot_code") or "").strip()),
-                content=body,
-                attachment_paths=images + pasted,
-                author_user=me,
-                addressings_to=addressings_for_confirm(t.get("task_assignees")),
-                addressings_cc=cc or None,
-                existing_note_id=existing_note_id,
-            )
+            version_id, version_code, paths = t.get("latest_version_id"), cur_code, images
+            # 노트에는 그 버전의 태스크를 건다 — Confirm 은 확인하는 태스크, Annotation 은 아래에서
+            # 고른 edit·org 버전의 태스크
+            note_task_id = t.get("task_id") if guide is None else None
+            staged = ""
+            if guide is not None:
+                _src, ver = guide_note_target(
+                    sg,
+                    int(t["shot_id"]),
+                    codes=guide["codes"],
+                    drawn=guide["drawn"],
+                    shown=guide["shown"],
+                )
+                if ver is not None:
+                    version_id, version_code = int(ver["id"]), str(ver["code"])
+                    note_task_id = ver.get("task_id")
+                    ticket["note_version"] = version_code
+                    staged = tempfile.mkdtemp(prefix="bpe_annot_")
+                    paths = stage_annot_files(guide["items"], version_id, Path(staged))
+            try:
+                return submit_confirm(
+                    sg,
+                    project_id=int(t["project_id"]),
+                    shot_id=int(t["shot_id"]),
+                    version_id=version_id,
+                    task_id=t.get("task_id"),
+                    status_code=code,
+                    status_field=(t.get("status_field") or None),
+                    subject=note_subject(me, version_code, (t.get("shot_code") or "").strip()),
+                    content=body,
+                    attachment_paths=paths + pasted,
+                    author_user=me,
+                    addressings_to=addressings_for_confirm(t.get("task_assignees")),
+                    addressings_cc=cc or None,
+                    existing_note_id=existing_note_id,
+                    note_task_id=note_task_id,
+                    # Annotation 노트에는 쓴 글만 — 글이 없어도 대신 넣는 글이 없다
+                    **({"empty_note_text": ""} if guide is not None else {}),
+                )
+            finally:
+                if staged:
+                    shutil.rmtree(staged, ignore_errors=True)
 
         w = ShotGridWorker(_work)
         w.finished.connect(
@@ -3254,11 +3357,100 @@ class ConfirmWindow(QWidget):
             except OSError:
                 pass
 
+    # ── 샷의 글 칸에 덧붙이기(Annotation: VFX work order · Description) ──────
+
+    def _load_shot_text(self) -> None:
+        """오른쪽 칸의 샷 칸 글을 지금 샷에 적혀 있는 글로 채운다."""
+        self._shot_text_base = {}
+        for kind in KINDS:
+            text = clean_text(str(self._task.get(KIND_ROW_KEYS[kind]) or ""))
+            self._shot_text_base[kind] = text
+            self._panel.set_shot_text(kind, text)
+
+    def _on_shot_text_requested(self, kind: str, text: str) -> None:
+        """오른쪽 칸의 「적용」 — 샷그리드 샷의 그 칸을 지금 칸의 글 그대로 바꾼다(노트와 따로)."""
+        t = self._task
+        if kind in self._shot_text_busy or not t.get("shot_id") or not self._task_is_open():
+            return
+        base = self._shot_text_base.get(kind, "")
+        new = clean_text(text)
+        if same_text(new, base):
+            self._panel.set_shot_text_result("바뀐 글이 없습니다", False)
+            return
+        shot_id = int(t["shot_id"])
+        ticket = {
+            "task_id": t.get("task_id"),
+            "ident": row_ident(t),
+            "shot_id": shot_id,
+            "shot": str(t.get("shot_code") or ""),
+            "kind": kind,
+        }
+        self._shot_text_busy.add(kind)
+        self._panel.set_shot_text_busy(kind, True)
+        self._panel.set_shot_text_result("", True)
+
+        def _work() -> Tuple[bool, str]:
+            from bpe.shotgrid.confirm_submit import open_submit_session
+            from bpe.shotgrid.shot_text import apply_shot_text
+
+            sg, _me = open_submit_session()
+            # 칸에 불러와 있던 글(base)과 샷그리드의 지금 글이 다르면 바꾸지 않고 그 글을 돌려준다
+            return apply_shot_text(sg, shot_id, kind, new, expected=base)
+
+        w = ShotGridWorker(_work)
+        w.finished.connect(lambda r, tk=ticket: self._on_shot_text_saved(r, tk))
+        w.error.connect(lambda e, tk=ticket: self._on_shot_text_failed(e, tk))
+        w.start()
+        self._workers.append(w)
+
+    def _on_shot_text_saved(self, result: object, ticket: Dict[str, Any]) -> None:
+        kind = str(ticket.get("kind") or "")
+        self._shot_text_busy.discard(kind)
+        if self._closed:
+            return
+        self._panel.set_shot_text_busy(kind, False)
+        applied, value = True, result
+        if isinstance(result, tuple) and len(result) == 2:
+            applied, value = bool(result[0]), result[1]
+        text = clean_text(str(value or ""))
+        here = self._result_is_for_open_shot(ticket)
+        key = KIND_ROW_KEYS[kind]
+        # 목록의 그 줄에도 샷그리드의 글을 적어 둔다 — 다시 열었을 때 옛 글이 보이지 않게
+        self._drawer.set_row_values(ticket.get("task_id"), {key: text}, ticket.get("shot_id"))
+        if here:
+            self._task[key] = text
+            self._fill_work_info()
+            self._shot_text_base[kind] = text
+            self._panel.set_shot_text(kind, text)
+        label = KIND_LABELS.get(kind, kind)
+        if applied:
+            note = f"샷그리드 {label} 칸에 적용했습니다"
+        else:  # 그 사이 다른 사람이 고쳤다 — 덮어쓰지 않고 지금 글을 다시 보여 준다
+            note = (
+                f"그 사이 샷그리드의 {label} 글이 바뀌어 적용하지 않았습니다 — "
+                "지금 글을 불러왔으니 확인하고 다시 적용해 주세요"
+            )
+        self._panel.set_shot_text_result(self._named(ticket, here, note), applied)
+
+    def _on_shot_text_failed(self, msg: str, ticket: Dict[str, Any]) -> None:
+        kind = str(ticket.get("kind") or "")
+        self._shot_text_busy.discard(kind)
+        if self._closed:
+            return
+        self._panel.set_shot_text_busy(kind, False)
+        here = self._result_is_for_open_shot(ticket)
+        label = KIND_LABELS.get(kind, kind)
+        # 쓰던 글은 칸에 그대로 둔다 — 다시 누르면 된다
+        self._panel.set_shot_text_result(
+            self._named(ticket, here, f"{label} 적용 실패: {msg}"), False
+        )
+
     def _result_is_for_open_shot(self, ticket: Optional[Dict[str, Any]]) -> bool:
         """돌아온 보내기 결과가 지금 열려 있는 샷의 것인가(그 사이 다른 샷으로 넘어갔을 수 있다)."""
         if ticket is None:
             return True
-        return ticket.get("task_id") == self._task.get("task_id") and self._task_is_open()
+        ident = ticket.get("ident", ticket.get("task_id"))
+        return ident == row_ident(self._task) and self._task_is_open()
 
     @staticmethod
     def _named(ticket: Optional[Dict[str, Any]], here: bool, text: str) -> str:
@@ -3305,7 +3497,8 @@ class ConfirmWindow(QWidget):
                         self._panel.clear_memo()
                         self._panel.clear_cc()
                 else:
-                    parts.append("노트 보냄")
+                    where = str((ticket or {}).get("note_version") or "")
+                    parts.append(f"노트 보냄 → {where}" if where else "노트 보냄")
                     # 보낸 붙임 그림은 지운다(다른 샷으로 넘어간 뒤 끝났어도 그 파일만)
                     self._remove_files(sent)
                     self._pasted = [p for p in self._pasted if p not in sent]
@@ -3371,7 +3564,7 @@ class ConfirmWindow(QWidget):
 
     def _flash_status(self, text: str, code: str) -> None:
         """머리 줄 상태 칸을 잠깐 강조한다 — *code* 의 상태 색으로, 없으면 초록(Note 만 보냄)."""
-        self._status_flash = {"task_id": self._task.get("task_id"), "text": text, "code": code}
+        self._status_flash = {"task_id": row_ident(self._task), "text": text, "code": code}
         self._flash_timer.start()
         self._sync_header()
 

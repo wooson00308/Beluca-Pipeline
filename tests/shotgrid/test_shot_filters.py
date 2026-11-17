@@ -218,3 +218,15 @@ def test_fetch_survives_total_failure() -> None:
 
     sg.find = _boom  # type: ignore[method-assign]
     assert fetch_shot_facet_data(sg, 1, fields) == []
+
+
+def test_fetch_can_read_the_shot_name_along_with_the_facets() -> None:
+    sg = _sg_with_shots(3)
+    fields = discover_shot_facet_fields(sg, 1)
+    rows = fetch_shot_facet_data(sg, 1, fields, extra_fields=("code",))
+    assert [r["code"] for r in rows] == ["SH000", "SH001", "SH002"]
+    assert rows[0]["sg_status_list"] == "ip"  # 필터 칸도 그대로 온다
+    # 필터 칸이 하나도 없어도 샷 이름은 읽힌다(이름으로 찾을 수 있게)
+    rows = fetch_shot_facet_data(sg, 1, [], extra_fields=("code",))
+    assert [r["code"] for r in rows] == ["SH000", "SH001", "SH002"]
+    assert fetch_shot_facet_data(sg, 1, []) == []

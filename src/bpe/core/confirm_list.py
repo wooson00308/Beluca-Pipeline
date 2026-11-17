@@ -87,6 +87,10 @@ def sort_rows(rows: List[Row], mode: str) -> List[Row]:
 # ── Annotation 모드: 작업을 나눠 주기 전(wtg·assign)의 샷 ─────────────────────────
 
 ANNOTATION_STATUSES: Tuple[str, ...] = ("wtg", "assign")
+# Annotation 목록에 한 번에 올리는 샷 수 — 넘으면 필터로 더 좁혀야 나머지가 보인다
+ANNOTATION_MAX_SHOTS = 600
+# 작업이 아니라 재료를 올리는 태스크 — 목록의 태스크 줄에는 보이지 않는다
+MATERIAL_TASKS: Tuple[str, ...] = ("edit", "org", "plate", "guide")
 
 
 def _assignee_key(a: Any) -> Tuple[str, int]:
@@ -142,6 +146,46 @@ MODE_ANNOTATION = "Annotation"
 MODES: Tuple[str, ...] = (MODE_CONFIRM, MODE_ANNOTATION)
 
 
+def row_ident(row: Optional[Row]) -> Any:
+    """목록의 한 줄을 가리키는 값 — 태스크 번호, 태스크가 없는 샷은 ``("shot", 샷 번호)``.
+
+    Annotation 에서는 태스크가 하나도 없는 샷도 열 수 있다. 그런 줄끼리 태스크 번호(없음)로
+    견주면 다른 샷이 같은 샷으로 보이므로, "지금 열린 샷이 이 줄인가"는 이 값으로 견준다.
+    """
+    if not isinstance(row, dict):
+        return None
+    if row.get("task_id") is not None:
+        return row.get("task_id")
+    sid = row.get("shot_id")
+    return ("shot", sid) if sid is not None else None
+
+
+def annotation_pick_ids(
+    facet_rows: List[Row],
+    allowed: Optional[Set[int]],
+    search: str = "",
+) -> Optional[List[int]]:
+    """Annotation 에서 볼 샷 — 샷그리드 필터처럼, 고른 조건에 맞는 샷을 샷 이름 순으로.
+
+    *facet_rows* 는 프로젝트의 모든 샷(``id``·``code``·필터 칸), *allowed* 는 필터로 남은
+    샷(고른 것이 없으면 ``None``), *search* 는 샷 이름에 들어 있어야 하는 글.
+    아무것도 고르지 않았으면 ``None`` — 프로젝트의 샷을 통째로 올리지 않는다.
+    """
+    needle = (search or "").strip().lower()
+    if allowed is None and not needle:
+        return None
+    picked: List[Tuple[str, int]] = []
+    for r in facet_rows:
+        sid = r.get("id")
+        if sid is None or (allowed is not None and sid not in allowed):
+            continue
+        code = str(r.get("code") or "").lower()
+        if needle and needle not in code:
+            continue
+        picked.append((code, int(sid)))
+    return [sid for _code, sid in sorted(picked)]
+
+
 def filter_annotation_rows(
     rows: List[Row], *, search: str = "", shot_ids: Optional[Set[int]] = None
 ) -> List[Row]:
@@ -164,6 +208,21 @@ def filter_annotation_rows(
 def annotation_status_text(row: Row) -> str:
     """Annotation 목록 한 줄의 상태 글 — 그 샷 태스크들의 상태(겹치지 않게)."""
     return " · ".join(str(s) for s in row.get("task_statuses") or [] if s)
+
+
+def annotation_status_short(row: Row, limit: int = 12) -> str:
+    """목록의 좁은 칸에 들어가게 줄인 상태 글 — 넘치는 상태는 ``+N`` 으로(예: ``cts · wip +1``).
+
+    태스크마다의 상태는 둘째 줄(:func:`annotation_subtitle`)에 모두 나온다.
+    """
+    codes = [str(c) for c in row.get("task_statuses") or [] if c]
+    text = ""
+    for i, code in enumerate(codes):
+        longer = f"{text} · {code}" if text else code
+        if text and len(longer) > limit:
+            return f"{text} +{len(codes) - i}"
+        text = longer
+    return text
 
 
 def annotation_subtitle(row: Row) -> str:

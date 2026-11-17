@@ -22,6 +22,10 @@ DEFAULT_WIDTH = 3
 DEFAULT_TEXT_SIZE = 0.03  # 영상 높이에 대한 비율
 TEXT_WRAP_WIDTH = 0.3  # 화면 글씨 한 줄의 폭(영상 폭에 대한 비율) — 넘치면 아래로 줄이 바뀐다
 
+# 그림을 그린 영상(Annotation 모드) — 도형의 ``source`` 칸. 빈 글은 옛 그림(원본에 그린 것).
+SOURCE_PLATE = "org"
+SOURCE_EDIT = "edit"
+
 Point = Tuple[float, float]
 Shape = Dict[str, Any]
 
@@ -43,6 +47,7 @@ def make_shape(
     width: int = DEFAULT_WIDTH,
     text_size: float = DEFAULT_TEXT_SIZE,
     frame_end: Optional[int] = None,
+    source: str = "",
 ) -> Shape:
     return {
         "id": 0,
@@ -55,7 +60,13 @@ def make_shape(
         "width": int(width),
         "text_size": float(text_size),
         "in_memo": True,
+        "source": str(source or ""),
     }
+
+
+def source_of(shape: Shape) -> str:
+    """그림을 그린 영상 — 적혀 있지 않은 옛 그림은 원본에 그린 것으로 본다."""
+    return str(shape.get("source") or SOURCE_PLATE)
 
 
 def _text_extent_guess(shape: Shape) -> Tuple[float, float]:
@@ -102,8 +113,16 @@ class AnnotationDoc:
                 return s
         return None
 
-    def shapes_at(self, frame: int) -> List[Shape]:
-        return [s for s in self._shapes if s["frame"] <= frame <= s["frame_end"]]
+    def shapes_at(self, frame: int, source: Optional[str] = None) -> List[Shape]:
+        """이 프레임의 그림들. *source* 를 주면 그 영상에서 그린 것만(Annotation 모드)."""
+        rows = [s for s in self._shapes if s["frame"] <= frame <= s["frame_end"]]
+        if source:
+            rows = [s for s in rows if source_of(s) == source]
+        return rows
+
+    def marked_sources(self) -> List[Tuple[str, int]]:
+        """(그린 영상, 그림이 시작되는 프레임) 묶음 — 노트에 붙일 그림 한 장이 하나씩이다."""
+        return sorted({(source_of(s), int(s["frame"])) for s in self._shapes})
 
     def marked_frames(self) -> List[int]:
         """그림이 시작되는 프레임들(시간 막대 표시용), 오름차순."""
@@ -118,13 +137,14 @@ class AnnotationDoc:
         x: float,
         y: float,
         text_extent: Optional[Callable[[Shape], Tuple[float, float]]] = None,
+        source: Optional[str] = None,
     ) -> Optional[int]:
         """(x, y) 에 있는 도형 id — 나중에 그린 것 우선.
 
         *text_extent* 는 글씨 도형이 화면에서 차지하는 (폭, 높이)를 0~1 로 알려 주는 함수다
         (그리는 쪽이 실제 글꼴로 잰 값 — 줄이 바뀐 글의 아랫줄도 잡힌다). 없으면 글자 수로 어림한다.
         """
-        for s in reversed(self.shapes_at(frame)):
+        for s in reversed(self.shapes_at(frame, source)):
             x0, y0, x1, y1 = shape_bounds(s)
             m = _HIT_MARGIN
             if s["kind"] == KIND_TEXT:
@@ -233,6 +253,7 @@ class AnnotationDoc:
                     width=int(raw.get("width") or DEFAULT_WIDTH),
                     text_size=float(raw.get("text_size") or DEFAULT_TEXT_SIZE),
                     frame_end=raw.get("frame_end"),
+                    source=str(raw.get("source") or ""),
                 )
             except (TypeError, ValueError, IndexError):
                 continue

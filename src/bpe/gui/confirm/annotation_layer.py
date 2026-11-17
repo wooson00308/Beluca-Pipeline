@@ -264,6 +264,8 @@ class AnnotationLayer(QWidget):
         self._drag_last: Optional[Tuple[float, float]] = None
         self._editing_id: Optional[int] = None
         self._editing_new = False
+        # 지금 보고 있는 영상(Annotation: 원본 / edit). 빈 글이면 영상을 가리지 않는다(Confirm).
+        self._source = ""
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setMouseTracking(True)
         self._edit = _TextEdit(self)
@@ -318,6 +320,22 @@ class AnnotationLayer(QWidget):
         self._color = color
         if self._selected is not None and self._doc.update(self._selected, color=color):
             self._changed()
+
+    def source(self) -> str:
+        return self._source
+
+    def set_source(self, source: str) -> None:
+        """그림을 그릴 영상을 정한다 — 새 그림에 적히고, 그 영상에서 그린 그림만 보인다."""
+        source = str(source or "")
+        if source == self._source:
+            return
+        if self._edit.isVisible():
+            self._commit_edit()
+        self._source = source
+        if self._selected is not None:
+            self._selected = None
+            self.selection_changed.emit()
+        self.update()
 
     def set_ghosts(self, shapes: List[Shape]) -> None:
         """지난 지적 그림(노란 점선) — 고칠 수 없다."""
@@ -401,7 +419,7 @@ class AnnotationLayer(QWidget):
             )
         paint_shapes(
             p,
-            self._doc.shapes_at(self._frame),
+            self._doc.shapes_at(self._frame, self._source or None),
             rect,
             selected_id=self._selected,
             skip_text_id=self._editing_id if self._edit.isVisible() else None,
@@ -429,7 +447,9 @@ class AnnotationLayer(QWidget):
             event.ignore()
             return
         if self._tool == TOOL_SELECT:
-            hit = self._doc.hit_test(self._frame, n[0], n[1], self._text_extent)
+            hit = self._doc.hit_test(
+                self._frame, n[0], n[1], self._text_extent, self._source or None
+            )
             if hit != self._selected:
                 self._selected = hit
                 self.selection_changed.emit()
@@ -440,13 +460,25 @@ class AnnotationLayer(QWidget):
             event.accept() if hit is not None else event.ignore()
             return
         if self._tool == TOOL_TEXT:
-            shape = make_shape(KIND_TEXT, self._frame, [n], color=self._color, width=self._width)
+            shape = make_shape(
+                KIND_TEXT,
+                self._frame,
+                [n],
+                color=self._color,
+                width=self._width,
+                source=self._source,
+            )
             self._begin_edit(self._doc.add(shape), is_new=True)
             self._changed()
             event.accept()
             return
         self._draft = make_shape(
-            self._tool, self._frame, [n, n], color=self._color, width=self._width
+            self._tool,
+            self._frame,
+            [n, n],
+            color=self._color,
+            width=self._width,
+            source=self._source,
         )
         event.accept()
 
@@ -497,7 +529,11 @@ class AnnotationLayer(QWidget):
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         n = self._norm(event.position(), clamp=False)
-        hit = self._doc.hit_test(self._frame, n[0], n[1], self._text_extent) if n else None
+        hit = (
+            self._doc.hit_test(self._frame, n[0], n[1], self._text_extent, self._source or None)
+            if n
+            else None
+        )
         if hit is not None:
             self._selected = hit
             s = self._doc.get(hit)

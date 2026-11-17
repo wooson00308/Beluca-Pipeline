@@ -1,7 +1,7 @@
 """컨펌 창의 샷 목록 서랍 — 외주 / 내부 / TM / SV 갈래, 업체 고르기, 찾기, 정렬.
 
-Annotation 모드에서는 작업을 나눠 주기 전(wtg·assign)의 샷을 샷마다 한 줄로 보여 주고,
-내 작업 탭과 같은 필터(시퀀스·태그 …)로 좁힌다.
+Annotation 모드에서는 샷그리드 필터처럼 고른다 — 프로젝트를 고르면 필터(시퀀스·상태·태그 …)
+자료만 읽고, 필터에서 고르거나 샷 이름을 찾으면 그 조건에 맞는 샷만 읽어 와 샷마다 한 줄로 보인다.
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ import queue
 from html import escape
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from PySide6.QtCore import QRect, QSize, Qt, Signal
+from PySide6.QtCore import QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QComboBox,
@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from bpe.core.confirm_list import (
+    ANNOTATION_MAX_SHOTS,
     GROUP_VENDOR,
     GROUPS,
     MODE_ANNOTATION,
@@ -33,10 +34,11 @@ from bpe.core.confirm_list import (
     MODES,
     SORT_OLD,
     SORTS,
-    annotation_status_text,
+    annotation_pick_ids,
+    annotation_status_short,
     annotation_subtitle,
-    filter_annotation_rows,
     filter_rows,
+    row_ident,
     row_subtitle,
     sort_rows,
     vendor_names,
@@ -63,7 +65,9 @@ _THUMB_THREADS = 4
 _ROLE = Qt.ItemDataRole.UserRole
 _ALL_VENDORS = "업체 전체"
 _PICK_PROJECT = "프로젝트 고르기"
-_ANNOTATION_TITLE = "wtg · assign 샷"
+_ANNOTATION_TITLE = "샷 고르기"
+_ANNOTATION_HINT = "필터에서 고르거나 샷 이름을 찾으면 샷이 나옵니다"
+_PICK_DELAY_MS = 250  # 찾는 글을 치는 동안에는 샷그리드에 묻지 않는다
 _FILTER_ARROW = chr(0x25BE)
 
 
@@ -116,6 +120,18 @@ class ShotDrawer(QWidget):
         self._facet_pid: Any = None
         self._facet_req = 0
         self._facet_panel: Optional[FacetFilterPanel] = None
+        self._facets_ready = False  # 이 프로젝트의 필터 자료를 다 읽었는가
+        # Annotation: 고른 조건에 맞는 샷만 샷그리드에서 읽어 온다
+        self._shot_cache: Dict[int, Dict[str, Any]] = {}  # 샷 번호 → 읽어 둔 줄
+        self._shot_gone: Set[int] = set()  # 물었지만 샷그리드에 없던 샷
+        self._asking: Set[int] = set()  # 지금 읽고 있는 샷
+        self._want: List[int] = []  # 지금 조건에 맞는 샷(목록에 올릴 것, 샷 이름 순)
+        self._pick_total = 0  # 조건에 맞는 샷 수(목록에 다 못 올린 것까지)
+        self._pick_req = 0
+        self._pick_timer = QTimer(self)
+        self._pick_timer.setSingleShot(True)
+        self._pick_timer.setInterval(_PICK_DELAY_MS)
+        self._pick_timer.timeout.connect(self._ask_missing)
         saved = get_confirm_settings()
         self._group = saved["list_group"] if saved["list_group"] in GROUPS else GROUPS[0]
         self._sort = saved["list_sort"] if saved["list_sort"] in SORTS else SORT_OLD
@@ -141,7 +157,9 @@ class ShotDrawer(QWidget):
         hrow.addWidget(self._group_box)
         self._mode_title = QLabel(_ANNOTATION_TITLE)  # Annotation 모드에서 갈래 칸 자리에 보인다
         self._mode_title.setStyleSheet(f"color: {style.TEXT_STRONG};")
-        self._mode_title.setToolTip("어느 태스크든 상태가 wtg · assign 인 샷 (샷마다 한 줄)")
+        self._mode_title.setToolTip(
+            "샷그리드 필터처럼 — 필터에서 고르거나 샷 이름을 찾아서 들어갑니다 (샷마다 한 줄)"
+        )
         self._mode_title.hide()
         hrow.addWidget(self._mode_title)
         hrow.addStretch(1)
@@ -161,7 +179,7 @@ class ShotDrawer(QWidget):
         prow.addWidget(self._project, 1)
         self._refresh = QPushButton("조회")
         self._refresh.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._refresh.clicked.connect(self._reload)
+        self._refresh.clicked.connect(self._on_refresh)
         prow.addWidget(self._refresh)
         outer.addWidget(proj)
 
@@ -187,7 +205,9 @@ class ShotDrawer(QWidget):
         frow.addWidget(self._sort_box, 2)
         self._facet_btn = QPushButton(f"필터  {_FILTER_ARROW}")
         self._facet_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._facet_btn.setToolTip("시퀀스·태그 등 샷 정보로 목록 좁히기 (내 작업 탭과 같은 필터)")
+        self._facet_btn.setToolTip(
+            "시퀀스·상태·태그 등 샷 정보로 샷 고르기 (샷그리드·내 작업 탭과 같은 필터)"
+        )
         self._facet_btn.clicked.connect(self._toggle_facets)
         self._facet_btn.setEnabled(False)
         self._facet_btn.hide()
@@ -301,8 +321,21 @@ class ShotDrawer(QWidget):
 
     def _pick_hint(self) -> str:
         if self._annotation():
-            return "프로젝트를 고르면 wtg · assign 샷이 나옵니다"
+            return "프로젝트를 고르고, 필터에서 고르거나 샷 이름을 찾으면 샷이 나옵니다"
         return "프로젝트를 고르면 확인 대기 샷이 나옵니다"
+
+    def _on_refresh(self) -> None:
+        """「조회」 — Annotation 에서는 필터 자료와 읽어 둔 샷을 새로 읽는다(고른 필터는 그대로)."""
+        if self._annotation() and self._project.currentData() is not None:
+            self._facet_pid = None  # 같은 프로젝트라도 다시 읽게
+        self._reload()
+
+    def _drop_shots(self) -> None:
+        """읽어 둔 샷을 버린다(오는 중인 답도 받지 않는다)."""
+        self._pick_req += 1
+        self._pick_timer.stop()
+        self._shot_cache, self._shot_gone, self._asking = {}, set(), set()
+        self._want, self._pick_total = [], 0
 
     def _reload(self) -> None:
         pid = self._project.currentData()
@@ -312,19 +345,28 @@ class ShotDrawer(QWidget):
             self._rows_pid = pid
             self._mode_rows = {}
             self._drop_facets()
+            self._drop_shots()
         self._req += 1
         req = self._req
-        self._say("목록 읽는 중…")
-        annotation = self._annotation()
-        if annotation:
+        if self._annotation():
+            # 샷을 통째로 읽지 않는다 — 필터 자료만 읽고, 고른 조건에 맞는 샷만 그때 읽는다
+            self._drop_shots()
+            self._rows = []
+            if self._facets_ready and self._facet_pid == pid:
+                self._loaded = True
+                self._refill()
+                return
+            self._loaded = False
+            self._refill()
+            self._say("필터 자료 읽는 중…")
             self._ensure_facets(pid)
+            return
+        self._say("목록 읽는 중…")
 
         def _fetch() -> List[Dict[str, Any]]:
             from bpe.shotgrid.client import get_default_sg
-            from bpe.shotgrid.confirm_list import list_annotation_shots, list_confirm_tasks
+            from bpe.shotgrid.confirm_list import list_confirm_tasks
 
-            if annotation:
-                return list_annotation_shots(get_default_sg(), int(pid))
             return list_confirm_tasks(get_default_sg(), int(pid))
 
         w = ShotGridWorker(_fetch)
@@ -341,6 +383,10 @@ class ShotDrawer(QWidget):
     def set_rows(self, rows: List[Dict[str, Any]]) -> None:
         self._rows = list(rows)
         self._loaded = True
+        if self._annotation():  # 읽어 둔 샷으로 삼는다(보이는 것은 고른 조건에 맞는 샷만)
+            self._shot_cache = {
+                int(r["shot_id"]): r for r in self._rows if r.get("shot_id") is not None
+            }
         self._thumb_asked = set(self._thumbs)
         self._vendor.blockSignals(True)
         self._vendor.clear()
@@ -387,7 +433,7 @@ class ShotDrawer(QWidget):
         return self._project.currentText() if self._project.currentData() is not None else ""
 
     def set_mode(self, mode: str) -> None:
-        """목록을 Confirm(확인 대기) 과 Annotation(wtg·assign 샷) 사이에서 바꾼다."""
+        """목록을 Confirm(확인 대기) 과 Annotation(필터로 고른 샷) 사이에서 바꾼다."""
         if mode not in MODES or mode == self._mode:
             return
         if self._loaded:
@@ -406,6 +452,8 @@ class ShotDrawer(QWidget):
         if self._facet_panel is not None and self._facet_panel.isVisible():
             self._facet_panel.hide()
         self._current_task = None
+        self._pick_timer.stop()
+        self._search.setToolTip("샷 이름 찾기" if annotation else "샷 이름이나 작업자 찾기")
         cached = self._mode_rows.get(mode)
         if cached is not None:
             self.set_rows(cached)
@@ -423,6 +471,7 @@ class ShotDrawer(QWidget):
     def _drop_facets(self) -> None:
         self._facet_req += 1
         self._facet_pid = None
+        self._facets_ready = False
         self._facet_fields, self._facet_rows = [], []
         self._facet_selection, self._facet_allowed = {}, None
         if self._facet_panel is not None:
@@ -437,10 +486,11 @@ class ShotDrawer(QWidget):
         self._facet_btn.setEnabled(bool(self._facet_fields and self._facet_rows))
 
     def _ensure_facets(self, pid: Any) -> None:
-        """프로젝트의 샷 정보(시퀀스·태그 …)를 뒤에서 한 번 읽는다."""
+        """프로젝트의 샷 정보(샷 이름·시퀀스·태그 …)를 뒤에서 한 번 읽는다."""
         if self._facet_pid == pid:
             return
         self._facet_pid = pid
+        self._facets_ready = False
         self._facet_req += 1
         req = self._facet_req
 
@@ -453,37 +503,52 @@ class ShotDrawer(QWidget):
 
             sg = get_default_sg()
             fields = discover_shot_facet_fields(sg, int(pid))
-            rows = fetch_shot_facet_data(sg, int(pid), fields) if fields else []
+            # 필터 칸이 하나도 없는 프로젝트라도 샷 이름으로는 찾을 수 있게 늘 읽는다
+            rows = fetch_shot_facet_data(sg, int(pid), fields, extra_fields=("code",))
             return {"fields": fields, "rows": rows}
 
         w = ShotGridWorker(_fetch)
         w.finished.connect(lambda r, q=req: self._on_facets(r, q))
-        w.error.connect(lambda e: logger.warning("confirm drawer: facet load failed: %s", e))
+        w.error.connect(lambda e, q=req: self._on_facets_failed(e, q))
         w.start()
         self._workers.append(w)
 
     def _on_facets(self, result: object, req: int) -> None:
         if self._closed or req != self._facet_req or not isinstance(result, dict):
             return
-        self.set_facets(result.get("fields") or [], result.get("rows") or [])
+        self.set_facets(result.get("fields") or [], result.get("rows") or [], keep_selection=True)
 
-    def set_facets(self, fields: List[Any], rows: List[Any]) -> None:
-        """필터에 쓸 샷 정보를 넣는다(고른 것은 비운다)."""
+    def _on_facets_failed(self, msg: str, req: int) -> None:
+        logger.warning("confirm drawer: facet load failed: %s", msg)
+        if self._closed or req != self._facet_req:
+            return
+        self._facet_pid = None  # 「조회」를 누르면 다시 읽는다
+        if self._annotation():
+            self._say(f"필터 자료를 읽지 못했습니다: {msg}")
+
+    def set_facets(
+        self, fields: List[Any], rows: List[Any], *, keep_selection: bool = False
+    ) -> None:
+        """필터에 쓸 샷 정보를 넣는다. *keep_selection* 이 아니면 고른 것은 비운다.
+
+        「조회」로 같은 프로젝트를 다시 읽었을 때는 고른 필터를 그대로 둔다(사라진 칸만 뺀다).
+        """
         self._facet_fields = [f for f in fields if isinstance(f, ShotFacetField)]
         self._facet_rows = [r for r in rows if isinstance(r, dict)]
-        self._facet_selection, self._facet_allowed = {}, None
-        if self._facet_panel is not None:
+        names = {f.field_name for f in self._facet_fields}
+        kept = {k: v for k, v in self._facet_selection.items() if k in names}
+        self._facet_selection = kept if keep_selection else {}
+        self._facet_allowed = None
+        self._facets_ready = True
+        # 고른 것을 그대로 둘 때는 필터 창도 그대로 둔다(체크 표시가 남아 있어야 한다)
+        if self._facet_panel is not None and not (keep_selection and self._facet_selection):
             self._facet_panel.hide()
             self._facet_panel.deleteLater()
             self._facet_panel = None
         self._sync_facet_btn()
         if self._annotation():
+            self._loaded = True
             self._refill()
-
-    def _facet_rows_in_list(self) -> List[Dict[str, Any]]:
-        """필터 칸의 숫자가 목록과 맞게, 지금 목록에 있는 샷의 정보만 추린다."""
-        ids = {r.get("shot_id") for r in self._rows}
-        return [r for r in self._facet_rows if r.get("id") in ids]
 
     def _toggle_facets(self) -> None:
         panel = self._facet_panel
@@ -495,7 +560,8 @@ class ShotDrawer(QWidget):
         if panel is None:
             panel = FacetFilterPanel(self)
             panel.selectionChanged.connect(self.set_facet_selection)
-            panel.set_facets(self._facet_fields, self._facet_rows_in_list())
+            # 숫자는 프로젝트의 모든 샷 기준 — 샷그리드 필터와 같다
+            panel.set_facets(self._facet_fields, self._facet_rows)
             self._facet_panel = panel
         panel.show_under(self._facet_btn)
 
@@ -616,6 +682,35 @@ class ShotDrawer(QWidget):
                 self._list.setItemWidget(item, self._make_row(row))
         return len(marked)
 
+    def set_row_values(self, task_id: Any, values: Dict[str, Any], shot_id: Any = None) -> int:
+        """목록의 그 태스크(샷) 줄에 값을 적어 둔다 — 다시 열 때 새 값이 쓰이게. 고친 줄 수.
+
+        태스크가 없는 샷 줄은 *shot_id* 로 찾는다.
+        """
+        if (task_id is None and shot_id is None) or not values:
+            return 0
+
+        def hit(r: Dict[str, Any]) -> bool:
+            if task_id is None:
+                return r.get("shot_id") == shot_id
+            return r.get("task_id") == task_id or any(
+                t.get("task_id") == task_id for t in r.get("tasks") or []
+            )
+
+        done: List[Dict[str, Any]] = []
+        for rows in [self._rows, *self._mode_rows.values()]:
+            for r in rows:
+                if hit(r) and not any(r is d for d in done):
+                    r.update(values)
+                    done.append(r)
+        for i in range(self._list.count()):
+            item = self._list.item(i)
+            row = item.data(_ROLE)
+            if isinstance(row, dict) and (hit(row) or any(row is d for d in done)):
+                row.update(values)
+                item.setData(_ROLE, row)
+        return len(done)
+
     def sent_status_of(self, task_id: Any) -> str:
         """이 창에서 보내서 바꾼 상태(없으면 빈 글) — 그 샷을 다시 열 때 머리 줄에 쓴다."""
         if task_id is None:
@@ -627,7 +722,7 @@ class ShotDrawer(QWidget):
         return ""
 
     def _is_current(self, r: Dict[str, Any]) -> bool:
-        return self._current_task is not None and r.get("task_id") == self._current_task
+        return self._current_task is not None and row_ident(r) == self._current_task
 
     @staticmethod
     def _status_code(r: Dict[str, Any]) -> str:
@@ -639,7 +734,7 @@ class ShotDrawer(QWidget):
         status = escape(code)
         sub = row_subtitle(r)
         if self._annotation():  # 샷 한 줄에 태스크가 여럿 — 상태는 모두, 둘째 줄은 태스크들
-            status = escape(annotation_status_text(r) or code)
+            status = escape(annotation_status_short(r) or code)
             sub = annotation_subtitle(r)
         sent = (
             f'<span style="color:{style.OK}; font-size:{style.FONT_SMALL_PX}px">보냄</span>&nbsp; '
@@ -649,7 +744,7 @@ class ShotDrawer(QWidget):
         return (
             f'<table width="100%" cellspacing="0" cellpadding="0"><tr>'
             f'<td><b style="color:{style.TEXT_STRONG}; {style.mono()}">'
-            f"{escape(str(r.get('shot_code') or ''))}</b></td>"
+            f"{escape(str(r.get('shot_code') or ''))}</b>&nbsp;&nbsp;</td>"
             f'<td align="right">{sent}<span style="color:{status_style.text_color(code)}; '
             f'{style.mono()}">{status}</span></td></tr></table>'
             f'<span style="color:{style.DIM}">{escape(sub)}</span>'
@@ -658,7 +753,7 @@ class ShotDrawer(QWidget):
     @staticmethod
     def _thumb_key(r: Dict[str, Any]) -> Any:
         """썸네일을 기억하는 열쇠 — 버전이 바뀌면 새 그림을 받는다."""
-        return (r.get("task_id"), r.get("latest_version_id"))
+        return (row_ident(r), r.get("latest_version_id"))
 
     @staticmethod
     def _thumb_url(r: Dict[str, Any]) -> str:
@@ -700,12 +795,104 @@ class ShotDrawer(QWidget):
         lay.addWidget(chip, 0, Qt.AlignmentFlag.AlignTop)
         return row
 
+    def _pick_shots(self) -> Optional[List[int]]:
+        """Annotation — 지금 고른 조건(필터·찾는 글)에 맞는 샷. 고른 것이 없으면 ``None``."""
+        ids = annotation_pick_ids(self._facet_rows, self._allowed_shot_ids(), self._search.text())
+        if ids is None:
+            self._want, self._pick_total = [], 0
+            return None
+        ids = [i for i in ids if i not in self._shot_gone]
+        self._pick_total = len(ids)
+        self._want = ids[:ANNOTATION_MAX_SHOTS]
+        return self._want
+
+    def _missing(self) -> List[int]:
+        return [i for i in self._want if i not in self._shot_cache]
+
+    def _ask_missing(self) -> None:
+        """목록에 올릴 샷 가운데 아직 안 읽은 것을 샷그리드에서 읽는다."""
+        if self._closed or not self._annotation():
+            return
+        ids = [i for i in self._missing() if i not in self._asking]
+        if ids:
+            self._asking.update(ids)
+            self._request_shots(ids)
+
+    def _request_shots(self, ids: List[int]) -> None:
+        pid = self._project.currentData()
+        if pid is None:
+            self._asking.difference_update(ids)
+            return
+        req = self._pick_req
+        asked = list(ids)
+
+        def _fetch() -> List[Dict[str, Any]]:
+            from bpe.shotgrid.client import get_default_sg
+            from bpe.shotgrid.confirm_list import list_shots_for_annotation
+
+            return list_shots_for_annotation(get_default_sg(), int(pid), asked)
+
+        w = ShotGridWorker(_fetch)
+        w.finished.connect(lambda r, q=req, a=asked: self._on_shot_rows(r, q, a))
+        w.error.connect(lambda e, q=req, a=asked: self._on_shot_rows_failed(e, q, a))
+        w.start()
+        self._workers.append(w)
+
+    def _on_shot_rows(self, result: object, req: int, asked: List[int]) -> None:
+        if self._closed or req != self._pick_req or not isinstance(result, list):
+            return
+        self.add_shot_rows(result, asked)
+
+    def _on_shot_rows_failed(self, msg: str, req: int, asked: List[int]) -> None:
+        if self._closed or req != self._pick_req:
+            return
+        self._asking.difference_update(asked)
+        self._say(f"샷을 읽지 못했습니다: {msg}")
+
+    def add_shot_rows(self, rows: List[Dict[str, Any]], asked: Optional[List[int]] = None) -> None:
+        """샷그리드에서 읽어 온 샷 줄을 기억하고 목록에 올린다(Annotation).
+
+        *asked* 는 물었던 샷 — 답에 없는 샷은 샷그리드에 없는 것으로 보고 다시 묻지 않는다.
+        """
+        got: Set[int] = set()
+        for r in rows:
+            if isinstance(r, dict) and r.get("shot_id") is not None:
+                sid = int(r["shot_id"])
+                self._shot_cache[sid] = r
+                got.add(sid)
+        for sid in asked or []:
+            self._asking.discard(sid)
+            if sid not in got:
+                self._shot_gone.add(sid)
+        self._thumb_asked = set(self._thumbs)
+        if self._annotation():
+            self._rows = list(self._shot_cache.values())
+            self._refill()
+
+    def _annotation_note(self, picked: Optional[List[int]]) -> str:
+        """Annotation 목록 위에 보일 안내 글."""
+        if picked is None:
+            return _ANNOTATION_HINT
+        if not picked:
+            return "조건에 맞는 샷이 없습니다"
+        parts: List[str] = []
+        waiting = len(self._missing())
+        if waiting:
+            parts.append(f"샷 {waiting}개 읽는 중…")
+        over = self._pick_total - len(picked)
+        if over > 0:
+            parts.append(
+                f"조건에 맞는 {self._pick_total}샷 가운데 앞 {len(picked)}샷만 보입니다 — "
+                "필터로 더 좁혀 주세요"
+            )
+        return " · ".join(parts)
+
     def _refill(self) -> None:
         annotation = self._annotation()
+        picked: Optional[List[int]] = None
         if annotation:
-            self._shown = filter_annotation_rows(
-                self._rows, search=self._search.text(), shot_ids=self._allowed_shot_ids()
-            )
+            picked = self._pick_shots() if self._loaded else None
+            self._shown = [self._shot_cache[i] for i in picked or [] if i in self._shot_cache]
         else:
             vendor = str(self._vendor.currentData() or "") if self._group == GROUP_VENDOR else ""
             rows = filter_rows(self._rows, self._group, vendor=vendor, search=self._search.text())
@@ -718,13 +905,14 @@ class ShotDrawer(QWidget):
             item.setSizeHint(QSize(0, _ROW_H))
             self._list.addItem(item)
             self._list.setItemWidget(item, self._make_row(r))
-        if self._loaded:
-            self._count.setText(f"{len(self._shown)}{'샷' if annotation else '컷'}")
-            empty = "이 갈래에는 확인 대기 샷이 없습니다"
-            if annotation:
-                narrowed = bool(self._facet_selection or self._search.text().strip())
-                empty = "조건에 맞는 샷이 없습니다" if narrowed else "wtg · assign 인 샷이 없습니다"
-            self._say("" if self._shown else empty)
+        if self._loaded and annotation:
+            self._count.setText(f"{self._pick_total}샷" if picked is not None else "")
+            self._say(self._annotation_note(picked))
+            if [i for i in self._missing() if i not in self._asking]:
+                self._pick_timer.start()  # 글을 치는 동안은 기다렸다가 한 번에 읽는다
+        elif self._loaded:
+            self._count.setText(f"{len(self._shown)}컷")
+            self._say("" if self._shown else "이 갈래에는 확인 대기 샷이 없습니다")
         self._fetch_thumbs()
         self.rows_changed.emit()
 
@@ -786,6 +974,7 @@ class ShotDrawer(QWidget):
 
     def shutdown(self) -> None:
         self._closed = True
+        self._pick_timer.stop()
         for t in self._thumb_workers:
             t.stop()
         for t in self._thumb_workers:

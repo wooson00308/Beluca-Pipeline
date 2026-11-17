@@ -342,3 +342,71 @@ def test_dragging_on_a_note_selects_and_a_plain_click_compares(panel: Any, qtbot
     panel.past_frame_clicked.connect(got.append)
     first._on_link("frame:1040")
     assert got == [1040]
+
+
+# ── 2026-11-17 추가: Annotation — 샷의 글 칸(VFX work order · Description)에 적용 ──────────
+
+
+def test_shot_text_block_shows_only_in_annotation_and_chips_fill_the_box(panel: Any) -> None:
+    from bpe.core.confirm_shot_text import KIND_DESCRIPTION, KIND_WORK_ORDER, WORK_ORDER_CHIPS
+
+    nl = chr(10)
+    panel.show()
+    assert not panel._shot_text_block.isVisibleTo(panel)  # Confirm 에서는 안 보인다
+    panel.set_annotation(True)
+    assert panel._shot_text_block.isVisibleTo(panel)
+    assert list(panel._chip_btns) == list(WORK_ORDER_CHIPS)
+
+    from bpe.gui.confirm import side_panel as sp
+
+    assert sp._SHOT_TEXT_TITLE == "Supervisor Order"
+    # 단추를 누르면 워크오더 글에 한 줄씩 들어간다(여러 개 가능)
+    panel._chip_btns["AI"].click()
+    panel._chip_btns["2D 합성"].click()
+    assert panel.shot_text(KIND_WORK_ORDER) == "AI" + nl + "2D 합성"
+    assert panel._chip_btns["AI"].isChecked() and panel._chip_btns["2D 합성"].isChecked()
+    assert not panel._chip_btns["ENV"].isChecked()
+    # 다시 누르면 그 줄만 빠진다
+    panel._chip_btns["AI"].click()
+    assert panel.shot_text(KIND_WORK_ORDER) == "2D 합성" and not panel._chip_btns["AI"].isChecked()
+    # 직접 고쳐 써도 된다 — 단추 말 뒤에 내용을 이어 쓰면 단추는 꺼진다
+    panel.set_shot_text(KIND_WORK_ORDER, "2D 합성 불연기 추가")
+    assert not panel._chip_btns["2D 합성"].isChecked()
+    assert panel.shot_text(KIND_DESCRIPTION) == ""  # 디스크립션 칸은 따로다
+
+    # 이미 적혀 있던 글을 불러온 칸 — 그 줄의 단추는 눌린 모양이고, 누르면 그 줄이 빠진다
+    panel.set_shot_text(KIND_WORK_ORDER, "리무브" + nl + "260928 - omit")
+    assert panel._chip_btns["리무브"].isChecked()
+    panel._chip_btns["AI"].click()
+    assert panel.shot_text(KIND_WORK_ORDER) == "리무브" + nl + "260928 - omit" + nl + "AI"
+    panel._chip_btns["리무브"].click()
+    assert panel.shot_text(KIND_WORK_ORDER) == "260928 - omit" + nl + "AI"
+    panel.set_shot_text(KIND_WORK_ORDER, "2D 합성 불연기 추가")
+
+    # 「적용」은 칸마다 따로 — 어느 칸의 어떤 글인지 알려 준다
+    got: List[Any] = []
+    panel.shot_text_requested.connect(lambda k, t: got.append((k, t)))
+    assert not panel._shot_btns[KIND_WORK_ORDER].isEnabled()  # 샷이 열리기 전에는 못 누른다
+    panel.set_shot_text_enabled(True)
+    panel._shot_btns[KIND_WORK_ORDER].click()
+    panel.set_shot_text(KIND_DESCRIPTION, "- 병사 연장")
+    panel._shot_btns[KIND_DESCRIPTION].click()
+    assert got == [(KIND_WORK_ORDER, "2D 합성 불연기 추가"), (KIND_DESCRIPTION, "- 병사 연장")]
+
+    # 저장하는 동안 그 버튼만 잠긴다
+    panel.set_shot_text_busy(KIND_WORK_ORDER, True)
+    assert not panel._shot_btns[KIND_WORK_ORDER].isEnabled()
+    assert panel._shot_btns[KIND_DESCRIPTION].isEnabled()
+    panel.set_shot_text_busy(KIND_WORK_ORDER, False)
+    assert panel._shot_btns[KIND_WORK_ORDER].isEnabled()
+    assert panel._shot_btns[KIND_WORK_ORDER].text() == "적용"
+    assert panel._shot_btns[KIND_DESCRIPTION].text() == "적용"
+
+    panel.set_shot_text_result("샷그리드 워크오더 칸에 적용했습니다", True)
+    assert panel._shot_result.isVisibleTo(panel) and "적용했습니다" in panel._shot_result.text()
+    panel.clear_shot_text(KIND_WORK_ORDER)
+    assert panel.shot_text(KIND_WORK_ORDER) == "" and panel.shot_text(KIND_DESCRIPTION)
+    panel.clear_shot_text()
+    assert panel.shot_text(KIND_DESCRIPTION) == ""
+    panel.set_annotation(False)
+    assert not panel._shot_text_block.isVisibleTo(panel)

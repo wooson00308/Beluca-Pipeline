@@ -156,3 +156,90 @@ def test_annotation_list_takes_any_task_in_wtg_or_assign() -> None:
     rows = list_annotation_shots(sg, 1)
     assert [r["shot_code"] for r in rows] == ["S_0010", "S_0020"]
     assert [t["task_content"] for t in rows[0]["tasks"]] == ["comp", "roto"]
+
+
+def _picked_sg() -> MockShotgun:
+    import bpe.shotgrid.tasks as tasks_mod
+
+    tasks_mod._VFX_FIELD_CACHE = None
+    sg = MockShotgun()
+    sg._schema = {
+        "Shot": {"code": {}, "description": {}, "sg_vfx_work_order": {}},
+        "Task": {"sg_status_list": {"data_type": "status_list"}},
+    }
+    proj = {"type": "Project", "id": 1, "code": "MMK", "name": "문무"}
+    for sid, code, order, desc in (
+        (20, "ep06_s010_0020", "AI", "병사 연장"),
+        (10, "ep06_s010_0010", "2D 합성", ""),
+        (30, "ep06_s010_0030", None, None),
+    ):
+        sg._add_entity(
+            "Shot",
+            {"id": sid, "code": code, "sg_vfx_work_order": order, "description": desc,
+             "image": f"http://img/{sid}", "sg_status_list": "ip", "project": proj,
+             "project.Project.code": "MMK", "project.Project.name": "문무"},
+        )  # fmt: skip
+    who = {"type": "HumanUser", "id": 3, "name": "김작업"}
+    for tid, sid, content, status, people in (
+        (1, 10, "edit", "fin", []),
+        (2, 10, "comp", "ip", [who]),
+        (3, 10, "roto", "wtg", [who]),
+        (4, 20, "org", "fin", []),
+    ):
+        sg._add_entity(
+            "Task",
+            {"id": tid, "content": content, "sg_status_list": status,
+             "task_assignees": people, "entity": {"type": "Shot", "id": sid}},
+        )  # fmt: skip
+    return sg
+
+
+def test_picked_shots_come_whatever_their_task_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    import bpe.shotgrid.tasks as tasks_mod
+    from bpe.shotgrid.confirm_list import list_shots_for_annotation
+
+    monkeypatch.setattr(tasks_mod, "_VFX_FIELD_CACHE", None)
+    sg = _picked_sg()
+    assert list_shots_for_annotation(sg, 1, []) == []
+    rows = list_shots_for_annotation(sg, 1, [30, 10, 20, 999, 10])
+    assert [r["shot_code"] for r in rows] == [
+        "ep06_s010_0010",
+        "ep06_s010_0020",
+        "ep06_s010_0030",
+    ]  # fmt: skip  — 샷 이름 순, 없는 샷(999)은 빠진다
+    first, second, third = rows
+    # 작업 태스크만 보이고(edit 같은 재료 태스크는 뺀다), 상태·담당은 모두 모은다
+    assert [t["task_content"] for t in first["tasks"]] == ["comp", "roto"]
+    assert first["task_statuses"] == ["ip", "wtg"]
+    assert [a["name"] for a in first["task_assignees"]] == ["김작업"]
+    assert (first["task_id"], first["task_content"], first["task_status"]) == (2, "comp", "ip")
+    assert first["vfx_work_order"] == "2D 합성" and first["shot_description"] == ""
+    assert first["shot_image"] == "http://img/10"
+    assert (first["project_id"], first["project_folder"]) == (1, "MMK")
+    assert first["status_field"] == "sg_status_list"
+    # 재료 태스크뿐인 샷 — 줄에는 태스크가 없지만 번호는 그 태스크의 것
+    assert second["tasks"] == [] and second["task_id"] == 4
+    assert second["vfx_work_order"] == "AI" and second["shot_description"] == "병사 연장"
+    # 태스크가 하나도 없는 샷도 나온다
+    assert third["tasks"] == [] and third["task_id"] is None
+    assert third["vfx_work_order"] == "" and third["shot_description"] == ""
+
+
+def test_picked_shots_are_read_in_chunks(monkeypatch: pytest.MonkeyPatch) -> None:
+    import bpe.shotgrid.tasks as tasks_mod
+    from bpe.shotgrid.confirm_list import list_shots_for_annotation
+
+    monkeypatch.setattr(tasks_mod, "_VFX_FIELD_CACHE", None)
+    monkeypatch.setattr(cl, "_CHUNK", 2)
+    sg = _picked_sg()
+    asked = []
+    real = sg.find
+
+    def _find(kind: str, filters: Any, fields: Any, **kw: Any) -> Any:
+        asked.append((kind, len(filters[0][2])))
+        return real(kind, filters, fields, **kw)
+
+    monkeypatch.setattr(sg, "find", _find)
+    rows = list_shots_for_annotation(sg, 1, [10, 20, 30])
+    assert len(rows) == 3
+    assert asked == [("Shot", 2), ("Task", 2), ("Shot", 1), ("Task", 1)]

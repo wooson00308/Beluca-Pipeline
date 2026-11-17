@@ -207,3 +207,50 @@ def test_annotation_filter_by_search_and_shot_ids() -> None:
     assert [r["shot_id"] for r in filter_annotation_rows(rows, shot_ids={1})] == [1]
     assert filter_annotation_rows(rows, shot_ids=set()) == []
     assert annotation_status_text(rows[0]) == "wtg · assign"
+
+
+def test_annotation_pick_is_like_a_shotgrid_filter() -> None:
+    from bpe.core.confirm_list import annotation_pick_ids
+
+    shots = [
+        {"id": 3, "code": "ep06_s010_0030"},
+        {"id": 1, "code": "ep06_s010_0010"},
+        {"id": 2, "code": "EP05_s048_0020"},
+        {"id": None, "code": "broken"},
+    ]
+    # 아무것도 고르지 않았으면 샷을 통째로 올리지 않는다
+    assert annotation_pick_ids(shots, None) is None
+    assert annotation_pick_ids(shots, None, "   ") is None
+    # 필터로 남은 샷만, 샷 이름 순(대소문자 안 가림)
+    assert annotation_pick_ids(shots, {1, 2, 3}) == [2, 1, 3]
+    assert annotation_pick_ids(shots, {3}) == [3]
+    assert annotation_pick_ids(shots, set()) == []
+    # 샷 이름으로 찾기 — 필터와 같이 쓰면 둘 다 맞는 샷만
+    assert annotation_pick_ids(shots, None, "S010") == [1, 3]
+    assert annotation_pick_ids(shots, {2, 3}, "s010") == [3]
+    assert annotation_pick_ids(shots, None, "없는샷") == []
+
+
+def test_row_ident_tells_taskless_shots_apart() -> None:
+    from bpe.core.confirm_list import row_ident
+
+    assert row_ident({"task_id": 7, "shot_id": 1}) == 7
+    a, b = {"task_id": None, "shot_id": 1}, {"shot_id": 2}
+    assert row_ident(a) == ("shot", 1) and row_ident(b) == ("shot", 2)
+    assert row_ident(a) != row_ident(b)  # 태스크가 없는 샷끼리도 서로 다른 줄이다
+    assert row_ident({}) is None and row_ident(None) is None
+
+
+def test_annotation_status_is_shortened_for_the_narrow_list_column() -> None:
+    from bpe.core.confirm_list import annotation_status_short
+
+    assert annotation_status_short({"task_statuses": ["wtg", "assign"]}) == "wtg · assign"
+    assert annotation_status_short({"task_statuses": ["cts", "pub-s"]}) == "cts · pub-s"
+    assert annotation_status_short({"task_statuses": ["cts", "wip", "fin"]}) == "cts · wip +1"
+    assert annotation_status_short({"task_statuses": ["pub-s", "assign", "fin"]}) == "pub-s +2"
+    assert (
+        annotation_status_short({"task_statuses": ["아주긴상태이름입니다"]})
+        == "아주긴상태이름입니다"
+    )
+    assert annotation_status_short({"task_statuses": []}) == ""
+    assert annotation_status_short({}) == ""

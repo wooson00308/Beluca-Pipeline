@@ -224,8 +224,11 @@ def fetch_shot_facet_data(
     *,
     chunk: Optional[int] = None,
     max_rows: Optional[int] = None,
+    extra_fields: Sequence[str] = (),
 ) -> List[Dict[str, Any]]:
     """프로젝트 전체 Shot을 ``id`` + facet 필드만 골라 페이지 단위로 가져온다.
+
+    *extra_fields* 는 필터 칸이 아니어도 같이 읽을 칸(예: 샷 이름 ``code``).
 
     ``limit=0``(무제한 자동 수집)은 쓰지 않는다. 대형 프로젝트에서 타임아웃/메모리 문제가 생긴다.
     """
@@ -234,17 +237,18 @@ def fetch_shot_facet_data(
     except (TypeError, ValueError):
         return []
     names = [f.field_name for f in fields if f.field_name]
-    if not names:
+    extra = [f for f in extra_fields if f]
+    if not names and not extra:
         return []
 
     page_size = int(chunk or _SHOT_FACET_FIND_CHUNK)
     cap = int(max_rows or _SHOT_FACET_MAX_SCAN_ROWS)
-    usable = _usable_field_names(sg, pid, names)
-    if not usable:
+    usable = _usable_field_names(sg, pid, names) if names else []
+    if not usable and not extra:
         logger.warning("Shot facet 조회 가능한 필드가 없음 (project=%s)", pid)
         return []
 
-    read_fields = ["id", *usable]
+    read_fields = ["id", *usable, *[f for f in extra if f not in usable]]
     base_filters = [["project", "is", {"type": "Project", "id": pid}]]
     order = [{"field_name": "id", "direction": "asc"}]
 

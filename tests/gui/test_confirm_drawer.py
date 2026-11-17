@@ -138,9 +138,28 @@ def _anno_rows() -> List[Dict[str, Any]]:
     )
 
 
-def test_annotation_mode_lists_shots_and_filters(drawer: Any) -> None:
-    from bpe.core.confirm_list import MODE_ANNOTATION, MODE_CONFIRM
+def _anno_facets(drawer: Any) -> None:
+    """프로젝트의 샷 정보(샷 이름·시퀀스) — 샷 1·2 는 읽어 둔 줄이 있고 3 은 아직 없다."""
     from bpe.core.shot_filter_logic import ShotFacetField
+
+    field = ShotFacetField(field_name="sg_sequence", display_label="시퀀스", data_type="text")
+    drawer.set_facets(
+        [field],
+        [
+            {"id": 1, "code": "S_0010", "sg_sequence": "S10"},
+            {"id": 2, "code": "S_0020", "sg_sequence": "S20"},
+            {"id": 3, "code": "S_0030", "sg_sequence": "S20"},
+        ],
+    )
+
+
+def test_annotation_mode_picks_shots_like_a_shotgrid_filter(
+    drawer: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bpe.core.confirm_list import MODE_ANNOTATION, MODE_CONFIRM
+
+    asked: List[List[int]] = []
+    monkeypatch.setattr(drawer, "_request_shots", lambda ids: asked.append(list(ids)))
 
     drawer.set_mode(MODE_ANNOTATION)
     assert drawer.mode() == MODE_ANNOTATION
@@ -150,35 +169,141 @@ def test_annotation_mode_lists_shots_and_filters(drawer: Any) -> None:
     assert not drawer._group_box.isVisibleTo(drawer) and not drawer._vendor.isVisibleTo(drawer)
     assert not drawer._sort_box.isVisibleTo(drawer)
     assert drawer._mode_title.isVisibleTo(drawer) and drawer._facet_btn.isVisibleTo(drawer)
+    assert not drawer._facet_btn.isEnabled()
 
-    drawer.set_rows(_anno_rows())
-    assert [r["shot_code"] for r in drawer.shown_rows()] == ["S_0010", "S_0020"]  # 샷 이름 순
-    assert drawer.summary() == "Annotation 2"
+    # 필터 자료가 와도 샷을 통째로 올리지 않는다 — 고르기 전에는 빈 목록과 안내 글
+    _anno_facets(drawer)
+    assert drawer._facet_btn.isEnabled()
+    assert drawer.shown_rows() == [] and drawer.summary() == "Annotation 0"
+    assert "필터에서 고르거나" in drawer._note.text()
+    assert drawer._count.text() == ""
+    drawer._ask_missing()
+    assert asked == []  # 고른 것이 없으면 샷그리드에 묻지 않는다
+
+    # 필터에서 고르면 그 조건에 맞는 샷만 샷그리드에서 읽어 온다
+    drawer.set_facet_selection({"sg_sequence": {"S20"}})
+    assert "필터 1" in drawer._facet_btn.text()
+    assert drawer.shown_rows() == [] and "읽는 중" in drawer._note.text()
     assert drawer._count.text() == "2샷"
+    drawer._ask_missing()
+    assert asked == [[2, 3]]
+    drawer._ask_missing()
+    assert asked == [[2, 3]]  # 읽는 중인 샷은 또 묻지 않는다
+    rows = _anno_rows()
+    drawer.add_shot_rows([r for r in rows if r["shot_id"] == 2], [2, 3])
+    assert [r["shot_code"] for r in drawer.shown_rows()] == ["S_0020"]
+    assert drawer._count.text() == "1샷"  # 샷그리드에 없던 샷(3)은 빠지고 다시 묻지 않는다
+    assert drawer._note.text() == "" and drawer.summary() == "Annotation 1"
+    drawer._ask_missing()
+    assert asked == [[2, 3]]
+    html = drawer._row_html(drawer.shown_rows()[0])
+    assert "comp assign" in html and "S_0020" in html
+
+    # 샷 이름으로 찾기 — 필터와 같이 쓰면 둘 다 맞는 샷만, 이미 읽은 샷은 다시 안 읽는다
+    drawer._search.setText("0010")
+    assert drawer.shown_rows() == [] and "조건에 맞는 샷이 없습니다" in drawer._note.text()
+    drawer.set_facet_selection({})
+    assert drawer._count.text() == "1샷" and drawer.shown_rows() == []
+    drawer._ask_missing()
+    assert asked[-1] == [1]
+    drawer.add_shot_rows([r for r in rows if r["shot_id"] == 1], [1])
+    assert [r["shot_code"] for r in drawer.shown_rows()] == ["S_0010"]
     html = drawer._row_html(drawer.shown_rows()[0])
     assert "roto wtg" in html and "comp assign" in html and "wtg · assign" in html
+    drawer._search.setText("s_00")
+    assert [r["shot_code"] for r in drawer.shown_rows()] == ["S_0010", "S_0020"]  # 샷 이름 순
+    n = len(asked)
+    drawer._ask_missing()
+    assert len(asked) == n
 
-    drawer._search.setText("김작업")
-    assert [r["shot_code"] for r in drawer.shown_rows()] == ["S_0020"]
+    # 찾는 글을 지우면 다시 빈 목록 — 고른 것이 없으니까
     drawer._search.setText("")
+    assert drawer.shown_rows() == [] and "필터에서 고르거나" in drawer._note.text()
 
-    # 내 작업 탭과 같은 필터: 고르면 그 샷만 남는다
-    assert not drawer._facet_btn.isEnabled()
-    field = ShotFacetField(field_name="sg_sequence", display_label="시퀀스", data_type="text")
-    drawer.set_facets([field], [{"id": 1, "sg_sequence": "S10"}, {"id": 2, "sg_sequence": "S20"}])
-    assert drawer._facet_btn.isEnabled()
-    drawer.set_facet_selection({"sg_sequence": {"S20"}})
-    assert [r["shot_code"] for r in drawer.shown_rows()] == ["S_0020"]
-    assert "필터 1" in drawer._facet_btn.text()
-    drawer.set_facet_selection({})
-    assert len(drawer.shown_rows()) == 2
-
-    # Confirm 으로 돌아가면 읽어 둔 확인 대기 목록이 그대로 나온다
+    # Confirm 으로 돌아가면 읽어 둔 확인 대기 목록이 그대로 나오고, 돌아오면 읽어 둔 샷을 다시 쓴다
+    drawer._search.setText("s_00")
     drawer.set_mode(MODE_CONFIRM)
     assert drawer._group_box.isVisibleTo(drawer) and not drawer._facet_btn.isVisibleTo(drawer)
+    drawer._search.setText("")
     assert [r["shot_code"] for r in drawer.shown_rows()] == ["S_0020"]
     drawer.set_mode(MODE_ANNOTATION)
+    drawer._search.setText("s_00")
     assert drawer.summary() == "Annotation 2"
+    drawer._ask_missing()
+    assert len(asked) == n
+
+
+def test_annotation_list_is_capped_and_says_so(
+    drawer: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import bpe.gui.confirm.shot_drawer as mod
+    from bpe.core.confirm_list import MODE_ANNOTATION
+
+    asked: List[List[int]] = []
+    monkeypatch.setattr(drawer, "_request_shots", lambda ids: asked.append(list(ids)))
+    monkeypatch.setattr(mod, "ANNOTATION_MAX_SHOTS", 2)
+    drawer.set_mode(MODE_ANNOTATION)
+    _anno_facets(drawer)
+    drawer._search.setText("s_")
+    assert drawer._count.text() == "3샷"
+    drawer._ask_missing()
+    assert asked == [[1, 2]]  # 앞에서부터 상한까지만 읽는다
+    drawer.add_shot_rows(_anno_rows(), [1, 2])
+    assert [r["shot_code"] for r in drawer.shown_rows()] == ["S_0010", "S_0020"]
+    assert "3샷 가운데 앞 2샷만" in drawer._note.text() and "좁혀" in drawer._note.text()
+
+
+def test_annotation_reload_keeps_the_picked_filter(
+    drawer: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bpe.core.confirm_list import MODE_ANNOTATION
+    from bpe.core.shot_filter_logic import ShotFacetField
+
+    asked: List[List[int]] = []
+    monkeypatch.setattr(drawer, "_request_shots", lambda ids: asked.append(list(ids)))
+    drawer.set_mode(MODE_ANNOTATION)
+    _anno_facets(drawer)
+    drawer.set_facet_selection({"sg_sequence": {"S10"}})
+    drawer.add_shot_rows(_anno_rows(), [1])
+    assert [r["shot_code"] for r in drawer.shown_rows()] == ["S_0010"]
+    # 「조회」로 같은 프로젝트의 필터 자료가 다시 오면 고른 필터는 그대로다
+    field = ShotFacetField(field_name="sg_sequence", display_label="시퀀스", data_type="text")
+    drawer.set_facets(
+        [field], [{"id": 1, "code": "S_0010", "sg_sequence": "S10"}], keep_selection=True
+    )
+    assert "필터 1" in drawer._facet_btn.text()
+    assert [r["shot_code"] for r in drawer.shown_rows()] == ["S_0010"]
+    # 사라진 필터 칸에 고른 것은 버린다
+    other = ShotFacetField(field_name="tags", display_label="태그", data_type="multi_entity")
+    drawer.set_facets([other], [{"id": 1, "code": "S_0010", "tags": []}], keep_selection=True)
+    assert drawer._facet_btn.text().startswith("필터 ") and "1" not in drawer._facet_btn.text()
+    assert drawer.shown_rows() == []
+
+
+def test_annotation_shot_without_a_task_is_its_own_row(
+    drawer: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from bpe.core.confirm_list import MODE_ANNOTATION, row_ident
+
+    monkeypatch.setattr(drawer, "_request_shots", lambda ids: None)
+    drawer.set_mode(MODE_ANNOTATION)
+    _anno_facets(drawer)
+    drawer._search.setText("s_")
+    bare = [
+        {"task_id": None, "shot_id": 2, "shot_code": "S_0020", "tasks": [], "shot_image": "a"},
+        {"task_id": None, "shot_id": 3, "shot_code": "S_0030", "tasks": [], "shot_image": "b"},
+    ]
+    drawer.add_shot_rows(_anno_rows()[:1] + bare, [1, 2, 3])
+    rows = drawer.shown_rows()
+    assert [r["shot_code"] for r in rows] == ["S_0010", "S_0020", "S_0030"]
+    assert drawer._thumb_key(rows[1]) != drawer._thumb_key(rows[2])  # 썸네일이 섞이지 않는다
+    drawer.set_current_task(row_ident(rows[2]))
+    assert [drawer._is_current(r) for r in rows] == [False, False, True]
+    # 태스크가 없는 샷 줄도 샷 번호로 값을 적고 「보냄」을 단다
+    assert drawer.set_row_values(None, {"vfx_work_order": "AI"}, 3) == 1
+    assert rows[2]["vfx_work_order"] == "AI" and "vfx_work_order" not in rows[1]
+    assert drawer.mark_sent(None, "", 3) == 1
+    assert "보냄" in drawer._row_html(rows[2]) and "보냄" not in drawer._row_html(rows[1])
 
 
 def test_sequence_pick_mode_marks_rows_instead_of_opening(drawer: Any) -> None:
@@ -255,7 +380,9 @@ def test_sent_row_is_marked_at_once_and_stays_in_place(drawer: Any) -> None:
 
     # Annotation 줄(샷 한 줄에 태스크가 여럿)은 그 샷의 어느 태스크로 보내도 표시된다
     drawer.set_mode(MODE_ANNOTATION)
-    drawer.set_rows(_anno_rows())
+    _anno_facets(drawer)
+    drawer._search.setText("s_")
+    drawer.add_shot_rows(_anno_rows(), [1, 2, 3])
     assert drawer.mark_sent(13) == 1
     shot = next(r for r in drawer.shown_rows() if r["shot_code"] == "S_0010")
     assert "보냄" in drawer._row_html(shot)
