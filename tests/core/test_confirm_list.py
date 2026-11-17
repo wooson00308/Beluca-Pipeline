@@ -84,3 +84,126 @@ def test_sorting() -> None:
 def test_row_subtitle() -> None:
     assert row_subtitle(ROWS[0]) == "v004 · 업체 A · 2026-11-10"
     assert row_subtitle(ROWS[3]) == ""
+
+
+def test_internal_comes_first_and_cgi_confirm_has_its_own_group() -> None:
+    from bpe.core.confirm_list import GROUP_CGI, GROUPS, LIST_STATUSES
+
+    assert GROUPS[0] == GROUP_INTERNAL  # 내부가 맨 위
+    assert GROUPS == (GROUP_INTERNAL, GROUP_VENDOR, GROUP_CGI, GROUP_TM, GROUP_ALL)
+    assert "cgi" in LIST_STATUSES
+    rows = ROWS + [
+        {"shot_code": "ep01_s050_0010", "task_status": "cgi", "uploader_type": "HumanUser"}
+    ]
+    assert _codes(filter_rows(rows, GROUP_CGI)) == ["ep01_s050_0010"]
+    # cgi 상태 샷은 SV·TM 갈래에 섞이지 않고, total 에는 들어간다
+    assert "ep01_s050_0010" not in _codes(filter_rows(rows, GROUP_INTERNAL))
+    assert "ep01_s050_0010" not in _codes(filter_rows(rows, GROUP_TM))
+    assert "ep01_s050_0010" in _codes(filter_rows(rows, GROUP_ALL))
+
+
+def test_annotation_rows_are_grouped_one_line_per_shot() -> None:
+    from bpe.core.confirm_list import annotation_subtitle, group_rows_by_shot
+
+    a = {"type": "HumanUser", "id": 3, "name": "작업자"}
+    b = {"type": "Group", "id": 9, "name": "업체"}
+    rows = [
+        {
+            "task_id": 12,
+            "shot_id": 2,
+            "shot_code": "ep01_s020_0010",
+            "task_content": "comp",
+            "task_status": "assign",
+            "task_assignees": [a],
+        },
+        {
+            "task_id": 11,
+            "shot_id": 1,
+            "shot_code": "ep01_s010_0010",
+            "task_content": "roto",
+            "task_status": "wtg",
+            "task_assignees": [],
+        },
+        {
+            "task_id": 10,
+            "shot_id": 1,
+            "shot_code": "ep01_s010_0010",
+            "task_content": "comp",
+            "task_status": "assign",
+            "task_assignees": [a, b],
+        },
+        {
+            "task_id": 13,
+            "shot_id": 1,
+            "shot_code": "ep01_s010_0010",
+            "task_content": "matte",
+            "task_status": "assign",
+            "task_assignees": [a],
+        },
+        {
+            "task_id": 14,
+            "shot_id": None,
+            "shot_code": "",
+            "task_content": "x",
+            "task_status": "wtg",
+        },
+    ]
+    out = group_rows_by_shot(rows)
+    assert [r["shot_code"] for r in out] == [
+        "ep01_s010_0010",
+        "ep01_s020_0010",
+    ]  # 샷 이름 순, 샷당 한 줄
+    first = out[0]
+    assert [t["task_id"] for t in first["tasks"]] == [10, 11, 13]
+    assert first["task_id"] == 10 and first["task_statuses"] == ["assign", "wtg"]
+    assert first["task_assignees"] == [a, b]  # 담당은 겹치지 않게 모두
+    assert annotation_subtitle(first) == "comp assign · roto wtg · matte assign"
+    assert rows[1]["task_assignees"] == []  # 받은 목록은 그대로 둔다
+
+
+def test_annotation_filter_by_search_and_shot_ids() -> None:
+    from bpe.core.confirm_list import (
+        annotation_status_text,
+        filter_annotation_rows,
+        group_rows_by_shot,
+    )
+
+    who = {"type": "HumanUser", "id": 3, "name": "김작업"}
+    rows = group_rows_by_shot(
+        [
+            {
+                "task_id": 1,
+                "shot_id": 2,
+                "shot_code": "ep01_s020_0010",
+                "task_content": "comp",
+                "task_status": "assign",
+                "task_assignees": [who],
+            },
+            {
+                "task_id": 2,
+                "shot_id": 1,
+                "shot_code": "ep01_s010_0010",
+                "task_content": "roto",
+                "task_status": "wtg",
+                "task_assignees": [],
+            },
+            {
+                "task_id": 3,
+                "shot_id": 1,
+                "shot_code": "ep01_s010_0010",
+                "task_content": "comp",
+                "task_status": "assign",
+                "task_assignees": [],
+            },
+        ]  # fmt: skip
+    )
+    assert [r["shot_code"] for r in filter_annotation_rows(rows)] == [
+        "ep01_s010_0010",
+        "ep01_s020_0010",
+    ]
+    assert [r["shot_id"] for r in filter_annotation_rows(rows, search="s020")] == [2]
+    assert [r["shot_id"] for r in filter_annotation_rows(rows, search="김작업")] == [2]
+    assert [r["shot_id"] for r in filter_annotation_rows(rows, search="ROTO")] == [1]
+    assert [r["shot_id"] for r in filter_annotation_rows(rows, shot_ids={1})] == [1]
+    assert filter_annotation_rows(rows, shot_ids=set()) == []
+    assert annotation_status_text(rows[0]) == "wtg · assign"

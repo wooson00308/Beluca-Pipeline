@@ -16,10 +16,12 @@ from html import escape
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QFileInfo, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import (
     QCloseEvent,
     QColor,
+    QDesktopServices,
+    QIcon,
     QImage,
     QKeyEvent,
     QPainter,
@@ -28,6 +30,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QFileDialog,
+    QFileIconProvider,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -43,7 +46,7 @@ from PySide6.QtWidgets import (
 
 import bpe.core.config as cfg
 from bpe.core.atomic_io import read_json_file, write_json_file
-from bpe.core.confirm_annotations import AnnotationDoc
+from bpe.core.confirm_annotations import AnnotationDoc, replace_memo_block
 from bpe.core.confirm_checks import (
     STATE_FAIL,
     STATE_PASS,
@@ -53,9 +56,40 @@ from bpe.core.confirm_checks import (
     failure_lines,
     has_failure,
 )
-from bpe.core.confirm_decode import fit_decode_size, frame_byte_size
-from bpe.core.confirm_media import find_shot_media, parse_version, quick_version_movie
+from bpe.core.confirm_decode import (
+    RESAMPLE_LINEAR_22,
+    RESAMPLE_LINEAR_709,
+    RESAMPLE_PLAIN,
+    ffmpeg_has_filter,
+    fit_decode_size,
+    frame_byte_size,
+)
+from bpe.core.confirm_list import (
+    MODE_ANNOTATION,
+    MODE_CONFIRM,
+    annotation_status_text,
+    annotation_subtitle,
+)
+from bpe.core.confirm_look import judge_look, sample_grid
+from bpe.core.confirm_media import (
+    find_org,
+    find_plate_media,
+    find_shot_media,
+    parse_version,
+    quick_version_movie,
+    reference_sources,
+    usual_shot_root,
+)
 from bpe.core.confirm_probe import VideoInfo, codec_label, probe_video
+from bpe.core.confirm_sequence import (
+    SEQ_BUDGET_SHARE,
+    SEQ_MIN_CUTS,
+    locate,
+    next_position,
+    order_rows,
+    position,
+    total_frames,
+)
 from bpe.core.confirm_standard import (
     ProjectStandard,
     load_standard,
@@ -69,12 +103,15 @@ from bpe.core.confirm_view_math import (
     CHANNEL_LUMA,
     CHANNEL_R,
     CHANNEL_RGB,
+    CURVE_GAMMA22,
+    CURVE_REC709,
     VIEW_MODE_A,
     VIEW_MODE_DIFF,
 )
+from bpe.core.ffmpeg_paths import resolve_ffmpeg
 from bpe.core.logging import get_logger
 from bpe.core.lut_cube import CubeLut, load_cube
-from bpe.core.mov_colorspace import DISPLAY_NAME, inspect_mov_color
+from bpe.core.mov_colorspace import DISPLAY_NAME, GAMMA, REC709, inspect_mov_color
 from bpe.core.settings import (
     get_confirm_settings,
     get_feedback_frame_start,
@@ -92,6 +129,9 @@ from bpe.gui.confirm.annotation_layer import (
     paint_shapes,
 )
 from bpe.gui.confirm.parts import Grip, KeyButton
+from bpe.gui.confirm.ref_frame_dialog import RefFrameDialog
+from bpe.gui.confirm.sequence_player import SequencePlayer, prepare_cuts
+from bpe.gui.confirm.sequence_strip import SequenceStrip
 from bpe.gui.confirm.shot_drawer import ShotDrawer
 from bpe.gui.confirm.side_panel import ConfirmSidePanel
 from bpe.gui.confirm.timeline import ConfirmTimeline
@@ -109,15 +149,19 @@ _BUFFER_DEFS: Tuple[Tuple[str, int, str], ...] = (
     (KEY_EDIT, 4, "edit"),
 )
 _DECODE_ORDER = (KEY_CUR, KEY_PREV, KEY_ORG, KEY_EDIT)
-_SEGMENT_POS = {KEY_ORG: "first", KEY_PREV: "mid", KEY_CUR: "mid", KEY_EDIT: "last"}
+_BUFFER_TITLES = {k: t for k, _n, t in _BUFFER_DEFS}
+# Annotation 모드: 작업본이 없는 샷이라 원본을 「지금 보는 판」 자리에 올린다
+_ANNOTATION_KEYS = (KEY_CUR, KEY_EDIT)
+_ANNOTATION_PLATE_TITLE = "ORG plate"
 _MAX_W, _MAX_H = 2048, 1556
 _ONDEMAND_KEEP = 12
 _GAIN_STEPS_PER_STOP = 4
 _GAIN_STOPS = 5
 _GAMMA_STEPS = 100  # 막대 한쪽 끝까지의 칸 수
 _GAMMA_SPAN = 4.0  # 막대 끝의 감마 배수(1/4 ~ 4)
-_SEND_DELAY_SECS = 5
+_SEND_DELAY_SECS = 3
 _NOTE_IMAGE_MAX_EDGE = 1280
+_NOTE_IMAGE_NOTES = 40  # 그림을 찾아볼 노트 수(최근 것부터)
 _WORKER_WAIT_MS = 5000
 _HEADER_H = 36
 _HINT_W = 184
@@ -148,7 +192,9 @@ _SHORTCUTS: Tuple[Tuple[str, Tuple[Tuple[Tuple[str, ...], str], ...]], ...] = (
             (("D",), "Difference (지금 보는 판 − 직전에 본 판)"),
             (("R", "G", "B", "A"), "채널 / 밝기만 — 한 번 더 누르면 RGB"),
             (("L",), "룩업 켜고 끄기"),
+            (("Shift+L",), "지금 보는 판만 룩업 씌우기 / 빼기"),
             (("F", "H"), "Fit / Fill"),
+            (("PgUp", "PgDn"), "이전 샷 / 다음 샷"),
             (("휠", "Ctrl+끌기"), "확대"),
             (("Alt+끌기",), "화면 이동"),
         ),
@@ -160,6 +206,7 @@ _SHORTCUTS: Tuple[Tuple[str, Tuple[Tuple[Tuple[str, ...], str], ...]], ...] = (
             (("←", "→"), "한 프레임 앞 / 뒤"),
             (("영상 끌기",), "좌우로 끌어 프레임 넘기기 (선택 도구일 때)"),
             (("Home", "End"), "처음 / 끝 프레임"),
+            (("이어 재생",), "목록의 「이어 보기」로 컷을 골라 재생 · 멈추면 그 컷이 열림"),
         ),
     ),
     (
@@ -168,6 +215,8 @@ _SHORTCUTS: Tuple[Tuple[str, Tuple[Tuple[Tuple[str, ...], str], ...]], ...] = (
             (("V", "N", "O", "P", "W", "T"), "선택 / 네모 / 원 / 펜 / 화살표 / 글씨"),
             (("Ctrl+Z", "Ctrl+Y"), "되돌리기 / 다시"),
             (("Delete",), "고른 그림 지우기"),
+            (("Enter",), "글씨 확정"),
+            (("Shift+Enter", "Alt+Enter"), "글씨 줄 바꿈"),
         ),
     ),
     (
@@ -181,11 +230,11 @@ _SHORTCUTS: Tuple[Tuple[str, Tuple[Tuple[Tuple[str, ...], str], ...]], ...] = (
 )
 _TOOL_HINTS = {
     TOOL_SELECT: "선택 · 옮기기",
-    TOOL_RECT: "끌어서 네모 → 글 쓰고 Enter",
-    TOOL_ELLIPSE: "끌어서 원 → 글 쓰고 Enter",
+    TOOL_RECT: "끌어서 네모",
+    TOOL_ELLIPSE: "끌어서 원",
     TOOL_PEN: "펜 · 자유롭게 그리기",
-    TOOL_ARROW: "끌어서 화살표 → 글 쓰고 Enter",
-    TOOL_TEXT: "눌러서 글씨 쓰기",
+    TOOL_ARROW: "끌어서 화살표",
+    TOOL_TEXT: "눌러서 글씨 쓰기 → Enter",
 }
 
 
@@ -200,6 +249,7 @@ class _Buffer:
         self.frames: Dict[int, Any] = {}
         self.full = False
         self.lut_baked = False
+        self.resample = RESAMPLE_PLAIN  # 크기를 줄이는 방법(원본만 줄일 때는 누크식 선형)
         self.version_label = ""
         self.error = ""
 
@@ -236,6 +286,48 @@ def _icon_btn(icon: str, tip: str, *, checkable: bool = False, size: int = 16) -
     return b
 
 
+_STATUS_FLASH_MS = 1500  # 보낸 뒤 머리 줄 상태 칸을 강조해 두는 시간
+_APP_ICON_PX = 18  # 색이 있는 프로그램 아이콘(탐색기·샷그리드)은 선 그림보다 조금 크게
+
+
+def _explorer_icon() -> QIcon:
+    """윈도우 탐색기 아이콘(노란 폴더). 못 읽으면 빈 아이콘 — 부르는 쪽이 선 그림을 그대로 둔다."""
+    if sys.platform != "win32":
+        return QIcon()
+    exe = Path(os.environ.get("SystemRoot") or r"C:\Windows") / "explorer.exe"
+    provider = QFileIconProvider()
+    try:
+        if exe.is_file():
+            icon = provider.icon(QFileInfo(str(exe)))
+            if not icon.isNull():
+                return icon
+    except OSError:
+        pass
+    return provider.icon(QFileIconProvider.IconType.Folder)
+
+
+def _shotgrid_icon() -> QIcon:
+    """내 작업 탭의 「ShotGrid에서 열기」 버튼과 같은 그림. 파일이 없으면 빈 아이콘."""
+    from bpe.gui.shotgrid_open_shot import shotgrid_open_shot_icon_png_path
+
+    png = shotgrid_open_shot_icon_png_path()
+    return QIcon(str(png)) if png.is_file() else QIcon()
+
+
+def _use_app_icon(button: QPushButton, icon: QIcon) -> None:
+    """프로그램 아이콘이 있으면 선 그림 대신 쓴다(없으면 그대로)."""
+    if not icon.isNull():
+        button.setIcon(icon)
+        button.setIconSize(QSize(_APP_ICON_PX, _APP_ICON_PX))
+
+
+def _same_file(a: str, b: str) -> bool:
+    """경로 글 두 개가 같은 파일을 가리키나(빗금 방향·대소문자 차이는 무시)."""
+    if not a or not b:
+        return False
+    return a.replace("\\", "/").lower() == b.replace("\\", "/").lower()
+
+
 def _divider() -> QWidget:
     w = QWidget()
     w.setFixedSize(1, 18)
@@ -257,6 +349,170 @@ def _bar_frame(name: str, bg: str, *, top: bool = False, bottom: bool = True) ->
     return f
 
 
+def _resolve_task_movie(row: Dict[str, Any]) -> str:
+    """목록의 한 줄(샷)에서 그 최신 버전 영상 파일을 서버에서 찾는다(뒤에서 돈다)."""
+    from bpe.core.feedback_project_paths import effective_project_for_paths
+    from bpe.core.nk_finder import (
+        find_server_root_auto,
+        resolve_local_comp_mov_for_feedback,
+    )
+    from bpe.core.nuke_render_paths import normalize_path_str
+
+    proj = effective_project_for_paths(row)
+    root = (os.environ.get("BPE_FEEDBACK_SERVER_ROOT") or "").strip()
+    if not root:
+        auto = find_server_root_auto(proj)
+        root = str(auto) if auto else (os.environ.get("BPE_SERVER_ROOT") or "").strip()
+    root = normalize_path_str(root).strip() if root else ""
+    sg_path = row.get("latest_version_sg_path") or ""
+    version_code = (row.get("latest_version_code") or "").strip()
+    if not sg_path:  # 내부 샷: 늘 있는 자리부터 본다(넓게 찾기는 몇 초 걸림)
+        quick = quick_version_movie(
+            root,
+            proj,
+            row.get("shot_code") or "",
+            version_code,
+            (str(row.get("task_content") or ""), "comp", "precomp"),
+        )
+        if quick is not None:
+            return normalize_path_str(str(quick))
+    mov, _tried, _warn = resolve_local_comp_mov_for_feedback(
+        row.get("shot_code") or "",
+        proj,
+        root,
+        sg_movie_raw=sg_path,
+        version_code=version_code or None,
+    )
+    return normalize_path_str(str(mov)) if mov is not None else ""
+
+
+def _resolve_plate_movie(row: Dict[str, Any]) -> str:
+    """목록의 한 줄(샷)에서 그 샷의 원본(ORG plate) 영상을 서버에서 찾는다(뒤에서 돈다)."""
+    from bpe.core.feedback_project_paths import effective_project_for_paths
+    from bpe.core.nuke_render_paths import normalize_path_str
+
+    shot_root = _find_shot_root(effective_project_for_paths(row), str(row.get("shot_code") or ""))
+    plate = find_org(shot_root) if shot_root is not None else None
+    return normalize_path_str(str(plate)) if plate is not None else ""
+
+
+def _find_shot_root(project: str, shot: str) -> Optional[Path]:
+    """프로젝트 폴더 이름과 샷 이름으로 서버의 샷 폴더를 찾는다(뒤에서 돈다)."""
+    from bpe.core.nk_finder import _resolve_shot_root, find_server_root_auto
+    from bpe.core.nuke_render_paths import normalize_path_str
+
+    root = (os.environ.get("BPE_FEEDBACK_SERVER_ROOT") or "").strip()
+    if not root:
+        auto = find_server_root_auto(project)
+        root = str(auto) if auto else (os.environ.get("BPE_SERVER_ROOT") or "").strip()
+    root = normalize_path_str(root).strip() if root else ""
+    shot_root = usual_shot_root(root, project, shot)  # 늘 있는 자리부터(넓게 찾기는 몇 초 걸림)
+    if shot_root is None and root and shot:
+        shot_root = _resolve_shot_root(root, project, shot)
+    return shot_root
+
+
+def _find_ref_sources(project: str, shot: str) -> List[Dict[str, Any]]:
+    """다른 샷을 참고 그림으로 쓸 때 고를 영상들(최신 작업본·원본·편집본)과 프레임 수."""
+    shot_root = _find_shot_root(project, shot.strip())
+    out: List[Dict[str, Any]] = []
+    for label, path in reference_sources(shot_root) if shot_root is not None else []:
+        info = probe_video(str(path))
+        frames = (info.frame_count or 1) if info is not None else 1
+        out.append({"label": label, "path": str(path), "frames": frames})
+    return out
+
+
+def _prepare_media(
+    movie: str, project: str, picked: Dict[str, Any], annotation: bool = False
+) -> Dict[str, Any]:
+    """작업본 영상에서 같은 샷의 재료·규격·검사 기준(프리셋)을 모은다(뒤에서 돈다).
+
+    *annotation* 이면 *movie* 는 원본(ORG plate) — 작업본 없이 원본과 편집본만 올린다.
+    """
+    media = find_plate_media(Path(movie)) if annotation else find_shot_media(Path(movie))
+    paths = {
+        KEY_CUR: media.current.path if media.current else None,
+        KEY_PREV: media.previous.path if media.previous else None,
+        KEY_ORG: media.org,
+        KEY_EDIT: media.edit,
+    }
+    infos = {k: (probe_video(str(p)) if p else None) for k, p in paths.items()}
+    # 검사 기준: 이 프로젝트의 프리셋. 여러 개면 플레이트 색(Rec.709/Gamma — 샷 빌더와
+    # 같은 판별)과 올라온 영상 크기(AI 프리셋 / 일반 프리셋)로 고르고, 그래도 못 정하면
+    # 전에 고른 것 → 일반 프리셋.
+    names = preset_names_for(read_presets(), project, Path(movie).parts)
+    name, why = (names[0] if names else ""), ""
+    plate_path = media.current.path if annotation and media.current else media.org
+    color = inspect_mov_color(plate_path).result if plate_path else None
+    ffmpeg = resolve_ffmpeg()
+    standards = {n: load_standard(n) for n in names} if len(names) > 1 else {}
+    if len(names) > 1:
+        cur = infos.get(KEY_CUR)
+        size = (cur.width, cur.height) if cur and cur.width and cur.height else None
+        if annotation:  # 원본의 크기는 납품 크기가 아니다 — 플레이트 색으로만 고른다
+            size = None
+        name, decided = pick_preset(
+            names,
+            plate_color=color,
+            work_size=size,
+            sizes={n: st.mov_sizes for n, st in standards.items() if st is not None},
+        )
+        parts = []
+        if color:
+            parts.append(f"플레이트 {DISPLAY_NAME.get(color, color)}")
+        if size:
+            parts.append(f"영상 크기 {size[0]}×{size[1]}")
+        if decided:
+            why = "자동: " + " · ".join(parts)
+        else:
+            saved = picked.get(names[0], "")
+            name = saved if saved in names else name
+            why = "자동으로 못 정함 — 아래에서 골라 주세요"
+    standard = standards.get(name)
+    if standard is None and name:
+        standard = load_standard(name)
+    return {
+        "media": media,
+        "paths": paths,
+        "infos": infos,
+        "standard": standard,
+        "preset_names": names,
+        "preset_why": why,
+        "plate_color": color,
+        "zscale": bool(ffmpeg) and ffmpeg_has_filter(str(ffmpeg), "zscale"),
+    }
+
+
+def _prepare_sequence(rows: List[Dict[str, Any]], picked: Dict[str, Any]) -> Dict[str, Any]:
+    """이어 볼 컷들의 영상·규격을 찾고, 첫 컷으로 검사 기준(프리셋·룩업)을 정한다(뒤에서 돈다)."""
+    found = prepare_cuts(rows, _resolve_task_movie)
+    cuts = found["cuts"]
+    first: Optional[Dict[str, Any]] = None
+    if cuts:
+        row = cuts[0].row
+        project = (row.get("project_code") or row.get("project_name") or "").strip()
+        first = _prepare_media(cuts[0].movie, project, picked)
+    return {"cuts": cuts, "skipped": found["skipped"], "first": first}
+
+
+class _Preload:
+    """미리 올려 둔 다음 샷 — 영상 위치·재료 정보와 현재버전의 앞쪽 프레임."""
+
+    def __init__(self, task: Dict[str, Any]) -> None:
+        self.task = task
+        self.movie = ""
+        self.prepared: Optional[Dict[str, Any]] = None
+        self.frames: Dict[int, Any] = {}
+        self.decoder: Optional[StreamDecodeWorker] = None
+
+    def matches(self, row: Dict[str, Any]) -> bool:
+        """같은 샷의 같은 버전인가(그 사이 새 버전이 올라왔으면 버린다)."""
+        return row.get("task_id") == self.task.get("task_id") and row.get(
+            "latest_version_id"
+        ) == self.task.get("latest_version_id")
+
+
 class ConfirmWindow(QWidget):
     """컨펌 전용 창."""
 
@@ -266,12 +522,26 @@ class ConfirmWindow(QWidget):
         self.resize(1680, 980)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._closed = False
+        self._annotation = False  # Annotation 모드인가
+        self._ref_dialog: Optional[RefFrameDialog] = None
+        # 이어 재생: 줄인 그림 창고, 한 줄 위의 자리, 지금 컷
+        self._seq: Optional[SequencePlayer] = None
+        self._seq_token = 0
+        self._seq_pos = 0
+        self._seq_cut = -1
+        self._seq_playing = False
+        self._seq_wait_start = False  # 첫 그림이 오면 바로 재생
+        self._seq_quiet = False  # 멈춘 컷을 여는 동안 가운데 알림을 띄우지 않는다
+        self._pending_index: Optional[int] = None  # 열리면 옮겨 갈 프레임
         self._aumid_applied = False
         self._workers: List[Any] = []
         self._decoders: List[StreamDecodeWorker] = []
         self._decode_queue: List[str] = []
         self._decoding: Optional[StreamDecodeWorker] = None
         self._ondemand_pending: Dict[Tuple[str, int], StreamDecodeWorker] = {}
+        self._decode_from: Dict[str, int] = {}  # 판마다 풀기를 시작할 프레임(미리 올린 만큼 건너뜀)
+        self._preload: Optional[_Preload] = None
+        self._preload_token = 0
         self._bufs: Dict[str, _Buffer] = {k: _Buffer(k, n, t) for k, n, t in _BUFFER_DEFS}
         self._shown = KEY_CUR
         self._last_shown = KEY_ORG
@@ -298,11 +568,24 @@ class ConfirmWindow(QWidget):
         self._pending_status = ""
         self._pending_left = 0
         self._sent_note_id: Optional[int] = None
+        # 화면에 올라와 있는 영상이 어느 태스크의 것인가(머리 줄의 샷과 다를 수 있다)
+        self._loaded_task_id: Any = None
+        # 「상태만 다시 바꾸기」가 쓸 값 — 보냈던 그 샷의 것(지금 열린 샷이 아니다)
+        self._retry: Optional[Dict[str, Any]] = None
         self._last_status_code = ""
         self._submit_busy = False
         self._version_note = ""
         self._open_started = 0.0
         self._memo_lines: Dict[int, str] = {}  # 도형 id → 메모 칸에 적어 둔 그 도형의 글
+        self._pasted: List[str] = []  # 메모에 붙여 넣은 그림 파일들(이 샷의 초안과 함께 남는다)
+        self._cc_req = 0
+        self._lut_failed = ""
+        # 룩이 입혀졌는지: 원본과 그림을 견줘 가린 결과(판 → True 입혀짐 / False 로그)
+        self._look_measured: Dict[str, bool] = {}
+        self._look_tried: set = set()
+        self._lut_override: Dict[str, bool] = {}  # 판 → 사용자가 정한 룩업 씌움/뺌
+        self._plate_probe: Optional[List[Any]] = None  # 일찍 읽어 둔 원본 첫 장의 점들
+        self._curve = CURVE_REC709  # 영상 값 ↔ 선형 빛 곡선(원본의 색 표시로 정함)
         self._scrub_from = 0
         self._standard: Optional[ProjectStandard] = None
         self._preset_names: List[str] = []
@@ -315,6 +598,12 @@ class ConfirmWindow(QWidget):
         self._send_timer = QTimer(self)
         self._send_timer.setInterval(1000)
         self._send_timer.timeout.connect(self._on_send_tick)
+        # 보낸 직후 머리 줄 상태 칸을 잠깐 강조한다(「sv → retake」 / 「Note 보냄」)
+        self._status_flash: Optional[Dict[str, Any]] = None
+        self._flash_timer = QTimer(self)
+        self._flash_timer.setSingleShot(True)
+        self._flash_timer.setInterval(_STATUS_FLASH_MS)
+        self._flash_timer.timeout.connect(self._end_status_flash)
         self._draft_timer = QTimer(self)
         self._draft_timer.setSingleShot(True)
         self._draft_timer.setInterval(800)
@@ -357,6 +646,11 @@ class ConfirmWindow(QWidget):
         )
         left.addWidget(self._info)
 
+        self._strip = SequenceStrip()  # 이어 재생의 컷 띠(이어 재생 중에만 보인다)
+        self._strip.seek_requested.connect(self._on_seq_seek)
+        self._strip.close_requested.connect(self._close_sequence)
+        self._strip.hide()
+        left.addWidget(self._strip)
         self._timeline = ConfirmTimeline()
         self._timeline.frame_picked.connect(self._on_frame_picked)
         left.addWidget(self._timeline)
@@ -365,11 +659,17 @@ class ConfirmWindow(QWidget):
 
         self._panel = ConfirmSidePanel()
         self._panel.status_requested.connect(self._on_status_requested)
+        self._panel.note_requested.connect(self._on_note_requested)
+        self._panel.ref_frame_requested.connect(self._open_ref_dialog)
         self._panel.cancel_requested.connect(self._cancel_pending)
         self._panel.retry_requested.connect(self._retry_status_only)
         self._panel.past_note_clicked.connect(self._on_past_note)
         self._panel.memo_edited.connect(self._draft_timer.start)
         self._panel.insert_failures_requested.connect(self._insert_failures)
+        self._panel.nav_requested.connect(self._nav_shot)
+        self._panel.image_pasted.connect(self._on_image_pasted)
+        self._panel.image_remove_requested.connect(self._remove_pasted)
+        self._panel.cc_search_requested.connect(self._search_cc)
         from bpe.shotgrid.tasks import BELUCA_TASK_STATUS_PRESETS
 
         self._panel.set_other_statuses(
@@ -388,7 +688,9 @@ class ConfirmWindow(QWidget):
         self._scrim.hide()
         self._drawer = ShotDrawer(self)
         self._drawer.task_picked.connect(self._open_task)
+        self._drawer.sequence_requested.connect(self._start_sequence)
         self._drawer.rows_changed.connect(self._sync_header)
+        self._drawer.rows_changed.connect(self._maybe_preload)
         self._drawer.hide()
         self._panel.past_frame_clicked.connect(self._on_past_frame)
         self._panel.preset_picked.connect(self._on_preset_picked)
@@ -412,6 +714,22 @@ class ConfirmWindow(QWidget):
         )
         self._btn_list.clicked.connect(self._toggle_drawer)
         row.addWidget(self._btn_list)
+        modes = QHBoxLayout()
+        modes.setSpacing(0)
+        self._mode_btns: Dict[str, QPushButton] = {}
+        for mode, tip in (
+            (MODE_CONFIRM, "확인 대기 샷을 보고 상태를 정한다"),
+            (MODE_ANNOTATION, "작업을 나눠 주기 전(wtg · assign) 샷의 원본에 가이드를 남긴다"),
+        ):
+            b = _btn(mode, checkable=True, tip=tip)
+            b.clicked.connect(lambda _c=False, m=mode: self._set_mode(m))
+            self._mode_btns[mode] = b
+            modes.addWidget(b)
+        style.make_segments(list(self._mode_btns.values()))
+        for b in self._mode_btns.values():
+            b.setStyleSheet(b.styleSheet() + "QPushButton { padding: 0px 10px; }")
+        self._mode_btns[MODE_CONFIRM].setChecked(True)
+        row.addLayout(modes)
         self._crumb = QLabel("영상을 열어 주세요")
         self._crumb.setTextFormat(Qt.TextFormat.RichText)
         row.addWidget(self._crumb)
@@ -430,19 +748,14 @@ class ConfirmWindow(QWidget):
         status.addWidget(self._status_lbl)
         row.addLayout(status)
         row.addStretch(1)
-        self._pos = QLabel("")
-        self._pos.setStyleSheet(f"color: {style.DIM}; {style.mono()}")
-        row.addWidget(self._pos)
-        nav = QHBoxLayout()
-        nav.setSpacing(0)
-        self._btn_prev = _icon_btn("chev_left", "이전 샷", size=14)
-        self._btn_next = _icon_btn("chev_right", "다음 샷", size=14)
-        self._btn_prev.clicked.connect(lambda: self._nav_shot(-1))
-        self._btn_next.clicked.connect(lambda: self._nav_shot(1))
-        for b, pos in ((self._btn_prev, "first"), (self._btn_next, "last")):
-            b.setStyleSheet(style.segment_style(pos) + style.fixed_width_style(31))
-            nav.addWidget(b)
-        row.addLayout(nav)
+        self._btn_shot_dir = _icon_btn("shot_dir", "이 샷 작업 폴더 열기")
+        _use_app_icon(self._btn_shot_dir, _explorer_icon())  # 윈도우 탐색기 아이콘
+        self._btn_shot_dir.clicked.connect(self._open_shot_folder)
+        row.addWidget(self._btn_shot_dir)
+        self._btn_sg = _icon_btn("web", "샷그리드에서 이 샷 열기")
+        _use_app_icon(self._btn_sg, _shotgrid_icon())  # 내 작업 탭과 같은 샷그리드 아이콘
+        self._btn_sg.clicked.connect(self._open_shot_in_shotgrid)
+        row.addWidget(self._btn_sg)
         row.addWidget(_divider())
         self._btn_open = _icon_btn("folder", "영상 파일 열기…")
         self._btn_open.clicked.connect(self._pick_file)
@@ -470,6 +783,7 @@ class ConfirmWindow(QWidget):
         seg.setSpacing(0)
         self._buf_btns: Dict[str, KeyButton] = {}
         self._buf_marks: Dict[str, str] = {}
+        self._buf_pos: Dict[str, str] = {}
         for key, number, _title in _BUFFER_DEFS:
             b = KeyButton(str(number))
             b.setToolTip(f"숫자 키 {number}")
@@ -536,7 +850,7 @@ class ConfirmWindow(QWidget):
             f"padding: 0px 2px; }} "
             f"QPushButton:hover {{ color: {style.TEXT}; background: transparent; }}"
         )
-        self._btn_gain = _btn("게인", tip="누르면 1.00 으로")
+        self._btn_gain = _btn("Gain", tip="누르면 1.00 으로")
         self._btn_gain.setStyleSheet(flat)
         self._btn_gain.clicked.connect(lambda: self._gain.setValue(0))
         tone.addWidget(self._btn_gain)
@@ -552,7 +866,7 @@ class ConfirmWindow(QWidget):
         self._gain_val.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         tone.addWidget(self._gain_val)
         tone.addSpacing(4)
-        self._btn_gamma = _btn("감마", tip="누르면 1.00 으로")
+        self._btn_gamma = _btn("Gamma", tip="누르면 1.00 으로")
         self._btn_gamma.setStyleSheet(flat)
         self._btn_gamma.clicked.connect(lambda: self._gamma.setValue(0))
         tone.addWidget(self._btn_gamma)
@@ -584,6 +898,14 @@ class ConfirmWindow(QWidget):
         self._btn_lut_pick.clicked.connect(self._pick_lut)
         lseg.addWidget(self._btn_lut_pick)
         look.addLayout(lseg)
+        self._btn_lut_here = _btn(
+            "이 판에 씌움",
+            checkable=True,
+            tip="지금 보는 판에 룩업을 씌울지 — 자동 판단이 틀렸을 때 바꿉니다 (Shift+L)",
+        )
+        self._btn_lut_here.setStyleSheet(style.segment_style("only"))
+        self._btn_lut_here.clicked.connect(self._toggle_lut_here)
+        look.addWidget(self._btn_lut_here)
         self._btn_reset = _btn("보기 원래대로")
         self._btn_reset.setStyleSheet(style.warn_button_style())
         self._btn_reset.clicked.connect(self._reset_view)
@@ -819,40 +1141,25 @@ class ConfirmWindow(QWidget):
     def _pick_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "영상 파일 고르기", "", _VIDEO_FILTER)
         if path:
+            self._stop_sequence()
             self.open_movie(path)
 
-    def open_movie(self, movie: str, task: Optional[Dict[str, Any]] = None) -> None:
-        """작업본 영상 하나에서 출발해 같은 샷의 재료를 찾아 올린다."""
-        self._save_draft()
-        self._stop_decoders()
-        self._cancel_pending()
-        self._pause()
-        self._load_token += 1
-        token = self._load_token
-        self._movie = movie
-        self._shot_root = None
-        self._task = dict(task or {})
-        self._drawer.set_current_task(self._task.get("task_id"))
-        self._sent_note_id = None
-        self._version_note = ""
-        for buf in self._bufs.values():
-            buf.path, buf.info, buf.size, buf.frames = None, None, (0, 0), {}
-            buf.full, buf.lut_baked, buf.version_label, buf.error = False, False, "", ""
-        self._index, self._count = 0, 0
-        self._checks = []
-        self._standard, self._preset_names, self._basis = None, [], ""
-        self._shown, self._last_shown, self._diff = KEY_CUR, KEY_ORG, False
-        self._layer.set_doc(AnnotationDoc())
-        self._layer.set_ghosts([])
-        self._timeline.set_range(self._frame_start, 0)
-        self._panel.set_result("", True)
-        self._panel.set_checks([])
-        self._panel.set_standard("", "", [], "")
-        self._panel.set_past_notes([])
+    def open_movie(
+        self,
+        movie: str,
+        task: Optional[Dict[str, Any]] = None,
+        preloaded: Optional[_Preload] = None,
+    ) -> None:
+        """작업본 영상 하나에서 출발해 같은 샷의 재료를 찾아 올린다.
+
+        *preloaded* 는 미리 올려 둔 것 — 재료 찾기를 건너뛰고 올라와 있는 프레임부터 보여 준다.
+        """
+        token = self._reset_shot(movie, task)
         self._hud.setText(Path(movie).stem)
         self._hud.adjustSize()
         self._hud.show()
-        self._set_busy(f"{Path(movie).stem} 여는 중…", "원본 · 전 버전 · 편집본 찾는 중")
+        looking = "편집본 찾는 중" if self._annotation else "원본 · 전 버전 · 편집본 찾는 중"
+        self._set_busy(f"{Path(movie).stem} 여는 중…", looking)
         if self._open_started <= 0:
             self._open_started = time.perf_counter()
         logger.info("confirm open: movie resolved +%.2fs", time.perf_counter() - self._open_started)
@@ -861,66 +1168,395 @@ class ConfirmWindow(QWidget):
         project = self._project_key()
         picked = dict(get_confirm_settings()["presets"])
 
-        def _prepare() -> Dict[str, Any]:
-            media = find_shot_media(Path(movie))
-            paths = {
-                KEY_CUR: media.current.path if media.current else None,
-                KEY_PREV: media.previous.path if media.previous else None,
-                KEY_ORG: media.org,
-                KEY_EDIT: media.edit,
-            }
-            infos = {k: (probe_video(str(p)) if p else None) for k, p in paths.items()}
-            # 검사 기준: 이 프로젝트의 프리셋. 여러 개면 플레이트 색(Rec.709/Gamma — 샷 빌더와
-            # 같은 판별)과 올라온 영상 크기(AI 프리셋 / 일반 프리셋)로 고르고, 그래도 못 정하면
-            # 전에 고른 것 → 일반 프리셋.
-            names = preset_names_for(read_presets(), project, Path(movie).parts)
-            name, why = (names[0] if names else ""), ""
-            standards = {n: load_standard(n) for n in names} if len(names) > 1 else {}
-            if len(names) > 1:
-                color = inspect_mov_color(media.org).result if media.org else None
-                cur = infos.get(KEY_CUR)
-                size = (cur.width, cur.height) if cur and cur.width and cur.height else None
-                name, decided = pick_preset(
-                    names,
-                    plate_color=color,
-                    work_size=size,
-                    sizes={n: st.mov_sizes for n, st in standards.items() if st is not None},
-                )
-                parts = []
-                if color:
-                    parts.append(f"플레이트 {DISPLAY_NAME.get(color, color)}")
-                if size:
-                    parts.append(f"영상 크기 {size[0]}×{size[1]}")
-                if decided:
-                    why = "자동: " + " · ".join(parts)
-                else:
-                    saved = picked.get(names[0], "")
-                    name = saved if saved in names else name
-                    why = "자동으로 못 정함 — 아래에서 골라 주세요"
-            standard = standards.get(name)
-            if standard is None and name:
-                standard = load_standard(name)
-            return {
-                "media": media,
-                "paths": paths,
-                "infos": infos,
-                "standard": standard,
-                "preset_names": names,
-                "preset_why": why,
-            }
-
-        w = ShotGridWorker(_prepare)
+        if preloaded is not None and preloaded.prepared is not None:
+            self._on_prepared(preloaded.prepared, token, preloaded.frames)
+            return
+        annotation = self._annotation
+        w = ShotGridWorker(lambda: _prepare_media(movie, project, picked, annotation))
         w.finished.connect(lambda r, t=token: self._on_prepared(r, t))
         w.error.connect(lambda e, t=token: self._on_prepare_failed(e, t))
         w.start()
         self._workers.append(w)
 
+    def _reset_shot(self, movie: str = "", task: Optional[Dict[str, Any]] = None) -> int:
+        """열려 있던 샷을 내려놓고 빈 상태로 돌린다. 새로 여는 일의 번호를 돌려준다."""
+        self._save_draft()
+        self._stop_decoders()
+        self._drop_preload()
+        self._cancel_pending()
+        self._pause()
+        self._load_token += 1
+        self._movie = movie
+        self._shot_root = None
+        self._task = self._with_sent_status(task)
+        self._loaded_task_id = self._task.get("task_id")
+        self._retry = None
+        self._drawer.set_current_task(self._task.get("task_id"))
+        self._sent_note_id = None
+        self._version_note = ""
+        for buf in self._bufs.values():
+            buf.path, buf.info, buf.size, buf.frames = None, None, (0, 0), {}
+            buf.full, buf.lut_baked, buf.version_label, buf.error = False, False, "", ""
+            buf.resample = RESAMPLE_PLAIN
+        self._index, self._count = 0, 0
+        self._checks = []
+        self._standard, self._preset_names, self._basis = None, [], ""
+        self._shown, self._last_shown, self._diff = KEY_CUR, KEY_ORG, False
+        self._layer.set_doc(AnnotationDoc())
+        self._layer.set_ghosts([])
+        self._pasted = []
+        self._panel.set_pasted_images([])
+        self._panel.clear_cc()
+        self._look_measured, self._look_tried, self._lut_override = {}, set(), {}
+        self._plate_probe = None
+        self._timeline.set_range(self._frame_start, 0)
+        self._panel.set_result("", True)
+        self._panel.set_checks([])
+        self._panel.set_standard("", "", [], "")
+        self._panel.set_past_notes([])
+        return self._load_token
+
+    # ── 이어 재생 ────────────────────────────────────────────────
+    # 고른 컷들의 줄인 그림을 한 줄로 재생한다. 재생 중에는 열린 샷이 없고(화면은 줄인
+    # 그림 창고에서 바로 온다), 멈추면 그 컷을 평소처럼 열어 그리기·판 바꾸기·상태를 쓴다.
+
+    def _nav_rows(self) -> List[Dict[str, Any]]:
+        """이전·다음 샷이 오가는 줄들 — 이어 재생 중에는 그 컷들."""
+        return self._seq.rows() if self._seq is not None else self._drawer.shown_rows()
+
+    def is_sequence(self) -> bool:
+        return self._seq is not None
+
+    def _start_sequence(self, rows: object) -> None:
+        """목록에서 고른 컷들을 샷 이름 순으로 이어 재생한다(준비는 뒤에서)."""
+        picked_rows = (
+            [dict(r) for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+        )
+        if len(picked_rows) < SEQ_MIN_CUTS or self._annotation:
+            return
+        if self._drawer.isVisible():
+            self._toggle_drawer()
+        self._stop_sequence()
+        self._reset_shot()
+        self._view.clear_images()
+        self._hud.hide()
+        token = self._seq_token
+        self._strip.set_cuts([], [])
+        self._strip.set_note("준비 중…")
+        self._strip.show()
+        self._set_busy("이어 재생 준비 중…", f"컷 {len(picked_rows)}개의 영상 찾는 중")
+        ordered = order_rows(picked_rows)
+        picked = dict(get_confirm_settings()["presets"])
+        w = ShotGridWorker(lambda: _prepare_sequence(ordered, picked))
+        w.finished.connect(lambda r, t=token: self._on_sequence_prepared(r, t))
+        w.error.connect(lambda e, t=token: self._on_sequence_failed(e, t))
+        w.start()
+        self._workers.append(w)
+        self._sync_all()
+
+    def _on_sequence_failed(self, msg: str, token: int) -> None:
+        if token != self._seq_token or self._closed:
+            return
+        self._strip.hide()
+        self._set_busy("이어 재생을 준비하지 못했습니다", msg, error=True)
+
+    def _on_sequence_prepared(self, result: object, token: int) -> None:
+        if token != self._seq_token or self._closed or not isinstance(result, dict):
+            return
+        cuts = list(result.get("cuts") or [])
+        skipped = [s for s in result.get("skipped") or [] if s]
+        if len(cuts) < SEQ_MIN_CUTS:
+            self._strip.hide()
+            detail = "서버에 영상이 없는 컷: " + ", ".join(skipped) if skipped else ""
+            self._set_busy("이어 볼 영상을 찾지 못했습니다", detail, error=True)
+            return
+        budget = int(int(get_confirm_settings()["cache_mb"]) * 1024 * 1024 * SEQ_BUDGET_SHARE)
+        player = SequencePlayer(self)
+        if not player.load(cuts, budget):
+            self._strip.hide()
+            player.deleteLater()
+            self._set_busy(
+                "컷이 너무 길어 이어 재생할 수 없습니다", "컷 수를 줄여 주세요", error=True
+            )
+            return
+        first = result.get("first")
+        if isinstance(first, dict):  # 첫 컷의 프리셋으로 룩업을 고른다
+            standard = first.get("standard")
+            self._standard = standard if isinstance(standard, ProjectStandard) else None
+            self._task = dict(cuts[0].row)
+            self._load_project_lut()
+        player.frame_ready.connect(self._on_seq_frame)
+        player.counts_changed.connect(self._on_seq_counts)
+        player.look_changed.connect(self._on_seq_look)
+        player.cut_failed.connect(self._on_seq_cut_failed)
+        self._seq = player
+        player.set_lut(self._lut, bool(self._standard and self._standard.look))
+        self._seq_pos, self._seq_cut, self._seq_wait_start = 0, -1, True
+        self._strip.set_cuts([c.shot for c in cuts], player.counts())
+        note = f"{len(cuts)}컷 · {cuts[0].size[0]}×{cuts[0].size[1]}"
+        if skipped:
+            note += f" · 영상 없음 {len(skipped)}컷"
+        self._strip.set_note(note)
+        self._set_busy("이어 재생 올리는 중…", cuts[0].shot)
+        logger.info(
+            "confirm sequence: %d cuts, %d frames, %s, %.0f MB",
+            len(cuts),
+            total_frames(player.counts()),
+            cuts[0].size,
+            player.bytes_planned() / 1048576,
+        )
+        player.start()
+        self._sync_all()
+
+    def _on_seq_frame(self, cut: int, index: int) -> None:
+        seq = self._seq
+        if seq is None or self._closed:
+            return
+        self._strip.set_cached(cut, len(seq.cuts[cut].frames))
+        if cut == self._seq_cut and self._seq_playing:
+            self._timeline.add_cached(index)
+        if self._seq_wait_start and index == 0:  # 첫 그림이 왔다 — 바로 재생
+            self._seq_wait_start = False
+            self._set_busy("")
+            self._seq_play(position(seq.counts(), cut, 0))
+
+    def _on_seq_counts(self) -> None:
+        seq = self._seq
+        if seq is None:
+            return
+        counts = seq.counts()
+        self._strip.set_counts(counts)
+        self._seq_pos = max(0, min(self._seq_pos, max(0, total_frames(counts) - 1)))
+
+    def _on_seq_look(self, cut: int) -> None:
+        if self._seq_playing and cut == self._seq_cut:
+            self._seq_show(self._seq_pos)  # 룩 판단이 나왔다 — 지금 그림에 바로 맞춘다
+
+    def _on_seq_cut_failed(self, cut: int, msg: str) -> None:
+        seq = self._seq
+        if seq is None:
+            return
+        self._panel.set_result(f"{seq.cuts[cut].shot} 영상을 풀지 못했습니다: {msg}", False)
+
+    def _seq_interval(self) -> int:
+        return max(1, int(round(1000.0 / (self._fps or 24.0))))
+
+    def _seq_play(self, pos: Optional[int] = None) -> None:
+        """이어 재생을 시작하거나 잇는다. 자리를 안 주면 멈춰서 보던 컷·프레임부터."""
+        seq = self._seq
+        if seq is None or total_frames(seq.counts()) <= 0:
+            return
+        if pos is None:
+            pos = self._seq_pos
+            cut = seq.index_of(self._task)
+            if cut >= 0 and self._bufs[KEY_CUR].available:
+                pos = position(seq.counts(), cut, self._index)
+        self._seq_wait_start = False
+        self._seq_quiet = False
+        self._reset_shot()  # 열려 있던 컷은 내려놓는다(메모·그림은 초안으로 남는다)
+        self._set_busy("")
+        self._seq_cut = -1
+        self._seq_pos = pos
+        self._seq_playing = True
+        self._layer.set_tool(TOOL_SELECT)
+        self._seq_show(pos)
+        self._play_timer.start(self._seq_interval())
+        self._sync_all()
+
+    def _seq_show(self, pos: int) -> bool:
+        """한 줄 위의 *pos* 자리 그림을 화면에 올린다. 아직 안 풀린 자리면 ``False``."""
+        seq = self._seq
+        if seq is None:
+            return False
+        counts = seq.counts()
+        cut, frame = locate(counts, pos)
+        data = seq.frame(cut, frame)
+        if data is None:
+            return False
+        c = seq.cuts[cut]
+        if cut != self._seq_cut:  # 컷 경계 — 머리 줄·작업 내용·타임라인을 그 컷 것으로
+            self._seq_cut = cut
+            self._task = dict(c.row)
+            self._fps = c.fps
+            self._timeline.set_range(self._frame_start, c.count)
+            for i in c.frames:
+                self._timeline.add_cached(i)
+            self._fill_work_info()
+            self._sync_header()
+            if self._seq_playing:
+                self._play_timer.setInterval(self._seq_interval())
+        self._seq_pos = pos
+        self._view.set_image(SLOT_A, data, c.size[0], c.size[1])
+        self._view.set_view(
+            gain=self._gain_value(),
+            gamma=self._gamma_value(),
+            mode=VIEW_MODE_A,
+            channel=self._channel,
+            lut_on=self._lut_on and self._lut is not None and seq.lut_wanted(cut),
+            lut_b_on=False,
+            lut_post=False,
+            curve=self._curve,
+        )
+        number = self._frame_start + frame
+        self._timeline.set_current(frame)
+        self._strip.set_position(pos)
+        self._hud.setText(f"{cut + 1}/{len(counts)}  {Path(c.movie).stem}  {number}")
+        self._hud.adjustSize()
+        self._hud.show()
+        if not self._frame_edit.hasFocus():
+            self._frame_edit.setText(str(number))
+        return True
+
+    def _seq_tick(self) -> None:
+        seq = self._seq
+        if seq is None:
+            self._seq_playing = False
+            self._play_timer.stop()
+            return
+        nxt = next_position(seq.counts(), self._seq_pos, self._loop)
+        if nxt is None:
+            self._seq_pause()
+            return
+        self._seq_show(nxt)  # 아직 안 풀린 자리면 올라올 때까지 기다린다
+
+    def _seq_halt(self) -> None:
+        """재생 시계만 멈춘다(컷을 열지는 않는다)."""
+        self._seq_playing = False
+        self._seq_wait_start = False
+        if not self._playing:
+            self._play_timer.stop()
+        style.set_icon(self._btn_play, "play", size=14)
+
+    def _seq_pause(self) -> None:
+        """이어 재생을 멈추고, 멈춘 컷을 평소처럼 연다 — 그 프레임에서 그리기·판 바꾸기·상태."""
+        if self._seq is None or not self._seq_playing:
+            return
+        self._seq_halt()
+        self._seq_open_at(self._seq_pos)
+
+    def _seq_open_at(self, pos: int) -> None:
+        seq = self._seq
+        if seq is None:
+            return
+        cut, frame = locate(seq.counts(), pos)
+        c = seq.cuts[cut]
+        self._seq_pos, self._seq_cut = pos, cut
+        self._strip.set_position(pos)
+        self._pending_index = frame
+        self._seq_quiet = True  # 줄인 그림이 보이고 있다 — 가운데 알림으로 가리지 않는다
+        self._open_started = time.perf_counter()
+        self.open_movie(c.movie, dict(c.row))
+
+    def _on_seq_seek(self, pos: int) -> None:
+        """컷 띠를 눌렀다 — 재생 중이면 그 자리로, 멈춰 있으면 그 컷·프레임을 연다."""
+        seq = self._seq
+        if seq is None:
+            return
+        if self._seq_playing:
+            self._seq_show(pos)
+            return
+        cut, frame = locate(seq.counts(), pos)
+        if cut == seq.index_of(self._task) and self._bufs[KEY_CUR].available:
+            self._set_index(frame)
+            return
+        self._seq_open_at(pos)
+
+    def _seq_follow(self) -> None:
+        """멈춰서 프레임을 옮길 때 컷 띠의 자리도 따라가게 한다."""
+        seq = self._seq
+        if seq is None or self._seq_playing or not self._bufs[KEY_CUR].available:
+            return
+        cut = seq.index_of(self._task)
+        if cut >= 0:
+            self._seq_pos = position(seq.counts(), cut, self._index)
+            self._strip.set_position(self._seq_pos)
+
+    def _seq_nav(self, delta: int) -> None:
+        """이어 재생 중의 이전·다음 샷 — 그 컷들 사이에서만 오간다."""
+        seq = self._seq
+        if seq is None:
+            return
+        counts = seq.counts()
+        cut = self._seq_cut if self._seq_playing else seq.index_of(self._task)
+        if cut < 0:
+            cut = locate(counts, self._seq_pos)[0]
+        nxt = cut + delta
+        while 0 <= nxt < len(counts) and counts[nxt] <= 0:  # 못 푼 컷은 건너뛴다
+            nxt += delta
+        if not 0 <= nxt < len(counts):
+            return
+        pos = position(counts, nxt, 0)
+        if not self._seq_playing:
+            self._seq_open_at(pos)
+        elif not self._seq_show(pos):
+            self._seq_pos = max(0, pos - 1)  # 아직 안 풀렸다 — 올라오면 그 컷부터 잇는다
+
+    def _stop_sequence(self) -> None:
+        """이어 재생을 끝내고 풀어 둔 그림을 내려놓는다(열려 있는 컷은 그대로 둔다)."""
+        self._seq_token += 1
+        self._seq_playing = self._seq_wait_start = self._seq_quiet = False
+        if not self._playing:
+            self._play_timer.stop()
+        seq, self._seq = self._seq, None
+        self._seq_cut = -1
+        if seq is not None:
+            seq.stop()
+            seq.deleteLater()
+        self._strip.hide()
+
+    def _close_sequence(self) -> None:
+        """컷 띠의 「닫기」."""
+        was_playing = self._seq_playing or not self._bufs[KEY_CUR].available
+        self._stop_sequence()
+        if was_playing:  # 열린 컷이 없다 — 화면을 비운다
+            self._reset_shot()
+            self._view.clear_images()
+            self._hud.hide()
+            self._panel.set_work_info("", "", "")
+            self._set_busy("")
+        style.set_icon(self._btn_play, "play", size=14)
+        self._sync_all()
+
+    def _set_mode(self, mode: str) -> None:
+        """Confirm(확인 대기 샷) 과 Annotation(나눠 주기 전 샷의 원본에 가이드) 을 오간다.
+
+        모드가 바뀌면 열려 있던 샷은 내려놓고(쓰던 메모·그림은 초안으로 남는다) 그 모드의
+        목록을 연다.
+        """
+        annotation = mode == MODE_ANNOTATION
+        if annotation == self._annotation:
+            self._sync_header()
+            return
+        self._stop_sequence()
+        self._reset_shot()
+        self._annotation = annotation
+        self._bufs[KEY_CUR].title = (
+            _ANNOTATION_PLATE_TITLE if annotation else _BUFFER_TITLES[KEY_CUR]
+        )
+        self._panel.set_memo_text("")
+        self._memo_lines = {}
+        self._panel.set_work_info("", "", "")
+        self._panel.set_annotation(annotation)
+        self._drawer.set_mode(mode)
+        self._view.clear_images()
+        self._hud.hide()
+        self._set_busy("")
+        self._sync_all()
+        if not self._drawer.isVisible():
+            self._toggle_drawer()
+
+    def is_annotation(self) -> bool:
+        return self._annotation
+
     def _on_prepare_failed(self, msg: str, token: int) -> None:
         if token != self._load_token or self._closed:
             return
+        self._pending_index = None
         self._set_busy("영상을 열지 못했습니다", msg, error=True)
 
-    def _on_prepared(self, result: object, token: int) -> None:
+    def _on_prepared(
+        self, result: object, token: int, seed: Optional[Dict[int, Any]] = None
+    ) -> None:
         if token != self._load_token or self._closed or not isinstance(result, dict):
             return
         media = result["media"]
@@ -931,10 +1567,21 @@ class ConfirmWindow(QWidget):
             self._set_busy("영상 규격을 읽지 못했습니다", Path(self._movie).name, error=True)
             return
         self._shot_root = media.shot_root
+        self._curve = CURVE_GAMMA22 if result.get("plate_color") == GAMMA else CURVE_REC709
+        linear = ""
+        if result.get("zscale"):
+            linear = {REC709: RESAMPLE_LINEAR_709, GAMMA: RESAMPLE_LINEAR_22}.get(
+                str(result.get("plate_color") or ""), ""
+            )
         cur_size = fit_decode_size(cur_info.width, cur_info.height, _MAX_W, _MAX_H)
         self._count = max(1, cur_info.frame_count or 1)
         self._fps = cur_info.fps or 24.0
+        pending, self._pending_index = self._pending_index, None
+        if pending:  # 이어 재생에서 멈춘 자리
+            self._index = max(0, min(self._count - 1, int(pending)))
         budget = int(get_confirm_settings()["cache_mb"]) * 1024 * 1024
+        if self._seq is not None:  # 이어 재생이 들고 있는 그림만큼은 뺀다
+            budget = max(0, budget - self._seq.bytes_planned())
         for key in _DECODE_ORDER:
             buf = self._bufs[key]
             buf.path, buf.info = paths.get(key), infos.get(key)
@@ -944,11 +1591,17 @@ class ConfirmWindow(QWidget):
                 buf.size = cur_size
             else:
                 buf.size = fit_decode_size(buf.info.width, buf.info.height, *cur_size)
+                # 원본이 작업본보다 커서 원본만 줄여야 하면(예: UHD 원본 · 1080 납품) 누크처럼
+                # 선형 색에서 줄인다 — 그래야 Difference 에서 그레인이 지워진다.
+                bigger = (buf.info.width, buf.info.height) != (cur_info.width, cur_info.height)
+                shrunk = buf.size != (buf.info.width, buf.info.height)
+                if key == KEY_ORG and bigger and shrunk and linear:
+                    buf.resample = linear
             need = frame_byte_size(*buf.size) * min(self._count, buf.frame_count() or self._count)
             buf.full = key == KEY_CUR or need <= budget
             if buf.full:
                 budget -= need
-        if media.current:
+        if media.current and (not self._annotation or media.current.version):
             self._bufs[KEY_CUR].version_label = media.current.label
             self._bufs[KEY_CUR].lut_baked = media.current.has_lut_baked
         if media.previous:
@@ -970,16 +1623,45 @@ class ConfirmWindow(QWidget):
         self._run_checks()
         self._timeline.set_range(self._frame_start, self._count)
         self._last_shown = KEY_ORG if self._bufs[KEY_ORG].available else KEY_PREV
+        if self._annotation:
+            self._last_shown = KEY_EDIT
         self._load_draft()
         self._load_project_lut()
         self._fill_work_info()
         self._decode_queue = [
             k for k in _DECODE_ORDER if self._bufs[k].available and self._bufs[k].full
         ]
+        cur_buf = self._bufs[KEY_CUR]
+        seeded = False
+        if seed and len(next(iter(seed.values()))) == frame_byte_size(*cur_buf.size):
+            # 미리 올려 둔 앞쪽 프레임을 그대로 쓰고, 풀기는 그 뒤부터 잇는다
+            seeded = True
+            cur_buf.frames = dict(seed)
+            for i in sorted(cur_buf.frames):
+                self._timeline.add_cached(i)
+            if len(cur_buf.frames) >= self._count:
+                self._decode_queue.remove(KEY_CUR)
+            else:
+                self._decode_from[KEY_CUR] = len(cur_buf.frames)
         self._set_busy(f"{Path(self._movie).stem} 올리는 중…", f"0 / {self._count} 프레임")
+        self._seq_quiet = False
         logger.info("confirm open: media ready +%.2fs", time.perf_counter() - self._open_started)
+        self._start_look_probe()
         self._start_next_decode()
+        if self._index > 0:  # 멈춘 프레임부터 먼저 보여 준다(앞에서부터 푸는 것을 안 기다린다)
+            self._request_frame(cur_buf, self._index, force=True)
         self._sync_all()
+        if seeded and self._buffer_index(cur_buf) in cur_buf.frames:
+            self._set_busy("")
+            logger.info(
+                "confirm open: first picture +%.2fs (preloaded %d frames)",
+                time.perf_counter() - self._open_started,
+                len(cur_buf.frames),
+            )
+            self._open_started = 0.0
+            self._refresh_view()
+        if self._decoding is None and not self._decode_queue:
+            QTimer.singleShot(0, self._maybe_preload)
         self._load_sg_context()
 
     # ── 상태 색·아이콘 ───────────────────────────────────────────
@@ -1021,6 +1703,12 @@ class ConfirmWindow(QWidget):
 
         나머지는 프리셋 기준이다(edit 은 길이만 참고한다).
         """
+        if self._annotation:  # 원본을 보는 중 — 납품 규격 검사는 하지 않는다
+            self._checks = []
+            self._basis = "Annotation — 원본(ORG plate)을 보는 중 · 규격 검사 없음"
+            self._panel.set_checks([])
+            self._show_standard()
+            return
         ref_key = KEY_EDIT if self._bufs[KEY_EDIT].info else KEY_ORG
         ref = self._bufs[ref_key]
         plate = self._bufs[KEY_ORG]
@@ -1034,11 +1722,27 @@ class ConfirmWindow(QWidget):
         )
         self._basis = basis_text(ref.title, ref.info is not None, self._standard)
         self._panel.set_checks(self._checks)
+        self._show_standard()
+
+    def _show_standard(self) -> None:
+        """기준·룩 줄을 오른쪽 칸에 적는다(룩업을 읽은 뒤에도 다시 부른다)."""
         s = self._standard
+        lut_name = Path(self._lut_path).stem if self._lut is not None else ""
         if s is None:
             look = ""
+        elif lut_name and self._bufs[KEY_CUR].available:
+            parts = [
+                f"{b.title} {'씌움' if self._lut_wanted(b) else '그대로'}"
+                for b in self._bufs.values()
+                if b.available
+            ]
+            look = f"룩업 {lut_name} — " + " · ".join(parts)
+        elif s.look and lut_name:
+            look = f"{s.look} 입혀진 MOV — 룩업은 ORG plate 에만 ({lut_name})"
         elif s.look:
             look = f"{s.look} 입혀진 MOV — 룩업 안 씌움"
+        elif s.viewer and lut_name:
+            look = f"MOV 에 룩 없음 · 룩업 {lut_name}"
         elif s.viewer:
             look = f"MOV 에 룩 없음 · 프리셋 뷰어 {s.viewer} — 룩업 파일을 골라 주세요"
         else:
@@ -1051,9 +1755,99 @@ class ConfirmWindow(QWidget):
         )
 
     def _look_baked(self, buf: _Buffer) -> bool:
-        """이 판에 룩이 이미 입혀져 있나 — 파일 이름(_lut) 또는 프리셋이 그렇게 내보내는 작업본."""
-        by_preset = bool(self._standard and self._standard.look)
-        return buf.lut_baked or (by_preset and buf.key in (KEY_CUR, KEY_PREV))
+        """이 판에 룩이 이미 입혀져 있나(자동 판단).
+
+        먼저 원본과 그림을 견줘 가린 결과를 쓴다 — 같은 프로젝트에서도 로그로 온 것과
+        룩을 입혀 온 것이 섞여 있어서, 이름·프리셋만으로는 틀린다. 그림으로 못 가렸을 때만
+        파일 이름(_lut) → 편집본은 입혀진 것 → 프리셋 순서로 본다. 원본은 늘 로그로 본다.
+        """
+        if buf.key == KEY_ORG or (self._annotation and buf.key == KEY_CUR):
+            return buf.lut_baked  # 원본은 늘 로그(Annotation 에서는 「지금 보는 판」이 원본)
+        measured = self._look_measured.get(buf.key)
+        if measured is not None:
+            return measured
+        if buf.lut_baked or buf.key == KEY_EDIT:
+            return True
+        return bool(self._standard and self._standard.look)
+
+    def _lut_wanted(self, buf: _Buffer) -> bool:
+        """이 판에 룩업을 씌워야 하나 — 사용자가 바꿔 놓았으면 그대로, 아니면 자동 판단."""
+        forced = self._lut_override.get(buf.key)
+        return forced if forced is not None else not self._look_baked(buf)
+
+    def _lut_applies(self, buf: _Buffer) -> bool:
+        return self._lut_on and self._lut is not None and self._lut_wanted(buf)
+
+    def _measure_looks(self) -> None:
+        """원본과 견줘 각 판에 룩이 입혀졌는지 가린다(판마다 한 번, 프레임이 올라온 뒤)."""
+        lut = self._lut
+        org = self._bufs[KEY_ORG]
+        if lut is None or (self._plate_probe is None and not org.frames):
+            return
+        changed = False
+        for key in (KEY_CUR, KEY_PREV, KEY_EDIT):
+            buf = self._bufs[key]
+            if key in self._look_tried or not buf.frames:
+                continue
+            if self._plate_probe is not None:
+                # 일찍 읽어 둔 원본 첫 장과, 이 판에서 가장 앞에 올라온 장을 견준다
+                index = min(buf.frames)
+                plate = self._plate_probe
+            else:
+                found = next((i for i in sorted(org.frames) if i in buf.frames), None)
+                if found is None:
+                    continue
+                index = found
+                plate = sample_grid(org.frames[index], org.size[0], org.size[1])
+            self._look_tried.add(key)
+            verdict = judge_look(
+                sample_grid(buf.frames[index], buf.size[0], buf.size[1]), plate, lut
+            )
+            logger.info(
+                "confirm look: %s baked=%s (plain %.3f, lut %.3f)",
+                key,
+                verdict.baked,
+                verdict.to_plain,
+                verdict.to_lut,
+            )
+            if verdict.baked is not None:
+                self._look_measured[key] = verdict.baked
+                changed = True
+        if changed:
+            self._show_standard()
+            self._sync_all()
+
+    def _start_look_probe(self) -> None:
+        """원본 첫 장만 먼저 읽는다 — 긴 샷에서도 룩 판단이 바로 나오게."""
+        org = self._bufs[KEY_ORG]
+        if not org.available or self._closed:
+            return
+        w = StreamDecodeWorker(
+            KEY_ORG, str(org.path), org.size[0], org.size[1], start_index=0, frame_count=1
+        )
+        token = self._load_token
+        w.frame_ready.connect(lambda _k, _i, d, t=token: self._on_look_probe(d, t))
+        self._decoders.append(w)
+        w.start()
+
+    def _on_look_probe(self, data: object, token: int) -> None:
+        if token != self._load_token or self._closed:
+            return
+        org = self._bufs[KEY_ORG]
+        samples = sample_grid(data, org.size[0], org.size[1])
+        if samples:
+            self._plate_probe = samples
+            self._measure_looks()
+
+    def _toggle_lut_here(self) -> None:
+        """지금 보는 판만 룩업을 씌우거나 뺀다(자동 판단이 틀렸을 때)."""
+        buf = self._bufs[self._shown]
+        if self._lut is None or not buf.available:
+            return
+        self._lut_override[buf.key] = not self._lut_wanted(buf)
+        self._lut_on = True
+        self._show_standard()
+        self._sync_all()
 
     def _on_preset_picked(self, name: str) -> None:
         if not self._preset_names or name not in self._preset_names:
@@ -1074,6 +1868,7 @@ class ConfirmWindow(QWidget):
             return
         self._standard = result if isinstance(result, ProjectStandard) else None
         self._run_checks()
+        self._load_project_lut()
         self._sync_all()
 
     # ── 목록에서 열기 ────────────────────────────────────────────
@@ -1099,56 +1894,39 @@ class ConfirmWindow(QWidget):
 
     def _open_task(self, task: Dict[str, Any]) -> None:
         """목록에서 고른 샷 — 바로 반응을 보이고, 서버에서 작업본 영상을 찾아 연다."""
-        row = dict(task)
+        row = self._with_sent_status(task)
         shot = str(row.get("shot_code") or "")
         if self._drawer.isVisible():
             self._toggle_drawer()
+        self._pending_index = None
+        if self._seq is not None or self._strip.isVisible():
+            cut = self._seq.index_of(row) if self._seq is not None else -1
+            if cut >= 0 and self._seq is not None:  # 이어 보는 컷 — 그 컷의 첫 프레임으로 옮긴다
+                self._seq_halt()
+                self._seq_open_at(position(self._seq.counts(), cut, 0))
+                return
+            self._stop_sequence()  # 다른 샷을 열면 이어 재생은 끝난다
+        # 세고 있던 보내기는 여기서 끊는다 — 머리 줄이 새 샷으로 바뀐 뒤에 나가면
+        # 앞 샷의 메모·그림·상태가 새 샷으로 간다
+        self._cancel_pending()
         self._pause()
         self._task = row  # 위 막대가 바로 고른 샷으로 바뀐다
         self._shot_root = None
         self._drawer.set_current_task(row.get("task_id"))
         self._sync_header()
-        self._set_busy(f"{shot} 여는 중…", "서버에서 영상 파일 찾는 중")
+        looking = "서버에서 원본(ORG plate) 찾는 중" if self._annotation else ""
+        self._set_busy(f"{shot} 여는 중…", looking or "서버에서 영상 파일 찾는 중")
         self._open_started = time.perf_counter()
+        pre = None if self._annotation else self._take_preload(row)
+        if pre is not None:  # 미리 올려 둔 샷 — 찾기·읽기를 건너뛰고 바로 보여 준다
+            self.open_movie(pre.movie, row, preloaded=pre)
+            return
+        self._drop_preload()
         self._load_token += 1
         token = self._load_token
 
-        def _resolve() -> str:
-            from bpe.core.feedback_project_paths import effective_project_for_paths
-            from bpe.core.nk_finder import (
-                find_server_root_auto,
-                resolve_local_comp_mov_for_feedback,
-            )
-            from bpe.core.nuke_render_paths import normalize_path_str
-
-            proj = effective_project_for_paths(row)
-            root = (os.environ.get("BPE_FEEDBACK_SERVER_ROOT") or "").strip()
-            if not root:
-                auto = find_server_root_auto(proj)
-                root = str(auto) if auto else (os.environ.get("BPE_SERVER_ROOT") or "").strip()
-            root = normalize_path_str(root).strip() if root else ""
-            sg_path = row.get("latest_version_sg_path") or ""
-            version_code = (row.get("latest_version_code") or "").strip()
-            if not sg_path:  # 내부 샷: 늘 있는 자리부터 본다(넓게 찾기는 몇 초 걸림)
-                quick = quick_version_movie(
-                    root,
-                    proj,
-                    row.get("shot_code") or "",
-                    version_code,
-                    (str(row.get("task_content") or ""), "comp", "precomp"),
-                )
-                if quick is not None:
-                    return normalize_path_str(str(quick))
-            mov, _tried, _warn = resolve_local_comp_mov_for_feedback(
-                row.get("shot_code") or "",
-                proj,
-                root,
-                sg_movie_raw=sg_path,
-                version_code=version_code or None,
-            )
-            return normalize_path_str(str(mov)) if mov is not None else ""
-
-        w = ShotGridWorker(_resolve)
+        resolve = _resolve_plate_movie if self._annotation else _resolve_task_movie
+        w = ShotGridWorker(lambda: resolve(row))
         w.finished.connect(lambda r, t=token, tk=row: self._on_task_resolved(r, t, tk))
         w.error.connect(lambda e, t=token: self._on_prepare_failed(e, t))
         w.start()
@@ -1156,6 +1934,13 @@ class ConfirmWindow(QWidget):
 
     def _on_task_resolved(self, result: object, token: int, task: Dict[str, Any]) -> None:
         if token != self._load_token or self._closed:
+            return
+        if (not isinstance(result, str) or not result) and self._annotation:
+            self._set_busy(
+                "원본(ORG plate)을 찾지 못했습니다",
+                f"{task.get('shot_code') or ''} — 샷 폴더의 plate/org 에 영상이 아직 없습니다",
+                error=True,
+            )
             return
         if not isinstance(result, str) or not result:
             ver = str(task.get("latest_version_code") or task.get("shot_code") or "")
@@ -1168,6 +1953,9 @@ class ConfirmWindow(QWidget):
         self.open_movie(result, task)
 
     def _nav_shot(self, delta: int) -> None:
+        if self._seq is not None:
+            self._seq_nav(delta)
+            return
         rows = self._drawer.shown_rows()
         cur = self._task.get("task_id")
         idx = next((i for i, r in enumerate(rows) if r.get("task_id") == cur), -1)
@@ -1182,8 +1970,15 @@ class ConfirmWindow(QWidget):
             return
         key = self._decode_queue.pop(0)
         buf = self._bufs[key]
+        start = self._decode_from.pop(key, 0)
         w = StreamDecodeWorker(
-            key, str(buf.path), buf.size[0], buf.size[1], frame_count=self._count
+            key,
+            str(buf.path),
+            buf.size[0],
+            buf.size[1],
+            start_index=start,
+            frame_count=max(1, self._count - start),
+            resample=buf.resample,
         )
         token = self._load_token
         w.frame_ready.connect(lambda k, i, d, t=token: self._on_frame(k, i, d, t))
@@ -1199,6 +1994,8 @@ class ConfirmWindow(QWidget):
         buf = self._bufs[key]
         buf.frames[index] = data
         self._ondemand_pending.pop((key, index), None)
+        if len(self._look_tried) < 3:
+            self._measure_looks()
         if not buf.full and len(buf.frames) > _ONDEMAND_KEEP:
             far = sorted(buf.frames, key=lambda i: abs(i - self._index), reverse=True)
             for old in far[: len(buf.frames) - _ONDEMAND_KEEP]:
@@ -1226,6 +2023,7 @@ class ConfirmWindow(QWidget):
             return
         self._decoding = None
         self._start_next_decode()
+        self._maybe_preload()
 
     def _on_decode_failed(self, key: str, msg: str, token: int) -> None:
         if token != self._load_token:
@@ -1237,12 +2035,23 @@ class ConfirmWindow(QWidget):
         self._start_next_decode()
         self._sync_all()
 
-    def _request_frame(self, buf: _Buffer, index: int) -> None:
-        """메모리에 다 못 올린 판 — 필요한 프레임 한 장만 그때 푼다."""
-        if buf.full or (buf.key, index) in self._ondemand_pending or not buf.available:
+    def _request_frame(self, buf: _Buffer, index: int, force: bool = False) -> None:
+        """메모리에 다 못 올린 판 — 필요한 프레임 한 장만 그때 푼다.
+
+        *force* 면 다 올리는 판이어도 그 한 장을 먼저 푼다(이어 재생에서 멈춘 자리).
+        """
+        if (buf.full and not force) or not buf.available:
+            return
+        if (buf.key, index) in self._ondemand_pending or index in buf.frames:
             return
         w = StreamDecodeWorker(
-            buf.key, str(buf.path), buf.size[0], buf.size[1], start_index=index, frame_count=1
+            buf.key,
+            str(buf.path),
+            buf.size[0],
+            buf.size[1],
+            start_index=index,
+            frame_count=1,
+            resample=buf.resample,
         )
         token = self._load_token
         w.frame_ready.connect(lambda k, i, d, t=token: self._on_frame(k, i, d, t))
@@ -1258,8 +2067,98 @@ class ConfirmWindow(QWidget):
             w.wait(_WORKER_WAIT_MS)
         self._decoders.clear()
         self._decode_queue = []
+        self._decode_from = {}
         self._decoding = None
         self._ondemand_pending = {}
+
+    # ── 다음 샷 미리 올려 두기 ───────────────────────────────────
+
+    def _maybe_preload(self) -> None:
+        """지금 샷이 다 올라와 한가할 때만 목록의 다음 샷을 미리 준비한다."""
+        if self._closed or self._count <= 0 or self._decoding is not None or self._decode_queue:
+            return
+        if self._annotation:  # 원본은 크다 — 다음 샷을 미리 올리지 않는다
+            return
+        if self._seq is not None:  # 이어 재생의 그림이 이미 올라와 있다
+            return
+        rows = self._drawer.shown_rows()
+        cur = self._task.get("task_id")
+        idx = next((i for i, r in enumerate(rows) if r.get("task_id") == cur), -1)
+        if cur is None or idx < 0 or idx + 1 >= len(rows):
+            return
+        row = dict(rows[idx + 1])
+        if self._preload is not None and self._preload.matches(row):
+            return
+        self._drop_preload()
+        self._preload = _Preload(row)
+        token = self._preload_token
+        project = (row.get("project_code") or row.get("project_name") or "").strip()
+        picked = dict(get_confirm_settings()["presets"])
+
+        def _work() -> Dict[str, Any]:
+            movie = _resolve_task_movie(row)
+            prepared = _prepare_media(movie, project, picked) if movie else None
+            return {"movie": movie, "prepared": prepared}
+
+        w = ShotGridWorker(_work)
+        w.finished.connect(lambda r, t=token: self._on_preload_ready(r, t))
+        w.error.connect(lambda e: logger.info("confirm preload: failed: %s", e))
+        w.start()
+        self._workers.append(w)
+
+    def _cache_room(self) -> int:
+        """메모리 한도에서 지금 샷이 쓰는 만큼을 뺀 나머지(바이트)."""
+        budget = int(get_confirm_settings()["cache_mb"]) * 1024 * 1024
+        used = sum(
+            len(b.frames) * frame_byte_size(*b.size) for b in self._bufs.values() if b.size[0]
+        )
+        return max(0, budget - used)
+
+    def _on_preload_ready(self, result: object, token: int) -> None:
+        pre = self._preload
+        if token != self._preload_token or self._closed or pre is None:
+            return
+        prepared = result.get("prepared") if isinstance(result, dict) else None
+        info = prepared["infos"].get(KEY_CUR) if isinstance(prepared, dict) else None
+        movie = str(result.get("movie") or "") if isinstance(result, dict) else ""
+        if not movie or info is None:
+            self._preload = None  # 못 찾은 샷 — 열 때 평소대로 찾고 알린다
+            return
+        pre.movie, pre.prepared = movie, prepared
+        size = fit_decode_size(info.width, info.height, _MAX_W, _MAX_H)
+        # 지금 샷이 먼저다 — 남는 메모리만큼만 앞쪽 프레임을 올려 둔다
+        room = self._cache_room() // max(1, frame_byte_size(*size))
+        count = min(max(1, info.frame_count or 1), int(room))
+        if count < 1:
+            return
+        w = StreamDecodeWorker(KEY_CUR, movie, size[0], size[1], frame_count=count)
+        w.frame_ready.connect(lambda _k, i, d, t=token: self._on_preload_frame(i, d, t))
+        pre.decoder = w
+        w.start()
+
+    def _on_preload_frame(self, index: int, data: object, token: int) -> None:
+        if token == self._preload_token and self._preload is not None:
+            self._preload.frames[index] = data
+
+    def _take_preload(self, row: Dict[str, Any]) -> Optional[_Preload]:
+        """미리 올려 둔 것이 이 샷(같은 버전)이면 넘겨받는다. 풀던 것은 멈춘다."""
+        pre = self._preload
+        if pre is None or pre.prepared is None or not pre.matches(row):
+            return None
+        self._preload = None
+        self._release_preload(pre)
+        return pre
+
+    def _drop_preload(self) -> None:
+        pre, self._preload = self._preload, None
+        self._release_preload(pre)
+
+    def _release_preload(self, pre: Optional[_Preload]) -> None:
+        self._preload_token += 1  # 늦게 오는 프레임·결과는 버린다
+        if pre is not None and pre.decoder is not None:
+            pre.decoder.stop()
+            pre.decoder.wait(_WORKER_WAIT_MS)
+            pre.decoder = None
 
     # ── 보기 ────────────────────────────────────────────────────
 
@@ -1294,6 +2193,7 @@ class ConfirmWindow(QWidget):
             self._sync_labels()
             return
         mode = VIEW_MODE_A
+        lut_a, lut_b, lut_post = self._lut_applies(buf), False, False
         self._diff_note = ""
         if self._diff:
             other = self._bufs.get(self._last_shown)
@@ -1310,13 +2210,21 @@ class ConfirmWindow(QWidget):
             else:
                 self._view.set_image(SLOT_B, other_data, other.size[0], other.size[1])
                 mode = VIEW_MODE_DIFF
+                lut_b = self._lut_applies(other)
+                if lut_a == lut_b:
+                    # 두 판의 색 상태가 같다 — 누크에서 뷰어 룩업을 켠 채 빼는 것과 같게:
+                    # 값 그대로(선형에서) 빼고, 결과에만 뷰어 룩업을 씌운다
+                    lut_a, lut_b, lut_post = False, False, lut_a
         self._view.set_image(SLOT_A, data, buf.size[0], buf.size[1])
         self._view.set_view(
             gain=self._gain_value(),
             gamma=self._gamma_value(),
             mode=mode,
             channel=self._channel,
-            lut_on=self._lut_on and self._lut is not None and not self._look_baked(buf),
+            lut_on=lut_a,
+            lut_b_on=lut_b,
+            lut_post=lut_post,
+            curve=self._curve,
         )
         self._layer.set_frame(self.frame_number())
         self._sync_labels()
@@ -1340,9 +2248,9 @@ class ConfirmWindow(QWidget):
         if self._channel != CHANNEL_RGB:
             out.append(_CHANNEL_NAMES.get(self._channel, self._channel) + " 채널")
         if abs(self._gain_value() - 1.0) > 1e-6:
-            out.append(f"게인 {self._gain_value():.2f}")
+            out.append(f"Gain {self._gain_value():.2f}")
         if abs(self._gamma_value() - 1.0) > 1e-6:
-            out.append(f"감마 {self._gamma_value():.2f}")
+            out.append(f"Gamma {self._gamma_value():.2f}")
         return out
 
     def _sync_labels(self) -> None:
@@ -1358,8 +2266,15 @@ class ConfirmWindow(QWidget):
         notes = list(changes)
         if self._diff_note:
             notes.append(self._diff_note)
-        if self._lut_on and self._look_baked(buf):
-            notes.append("룩업이 이미 입혀진 파일 — 룩업 안 씌움")
+        if buf.resample != RESAMPLE_PLAIN:
+            notes.append("누크 방식으로 줄임(선형 · Cubic)")
+        if self._lut_on and self._lut is not None:
+            forced = buf.key in self._lut_override
+            why = "직접 정함" if forced else "자동"
+            if not self._lut_wanted(buf):
+                notes.append(f"룩이 입혀진 영상 — 룩업 안 씌움 ({why})")
+            elif buf.key != KEY_ORG and not (self._annotation and buf.key == KEY_CUR):
+                notes.append(f"로그 영상 — 룩업 씌움 ({why})")
         cur = self._bufs[KEY_CUR]
         if buf.key != KEY_CUR and buf.info and cur.info:
             if (buf.info.width * cur.info.height) != (cur.info.width * buf.info.height):
@@ -1372,6 +2287,7 @@ class ConfirmWindow(QWidget):
         self._timeline.set_current(self._index)
         if not self._frame_edit.hasFocus():
             self._frame_edit.setText(str(self.frame_number()))
+        self._seq_follow()
         self._place_overlays()
         self._sync_info()
 
@@ -1448,38 +2364,70 @@ class ConfirmWindow(QWidget):
         else:
             self._crumb.setText(f'<span style="color:{style.DIM}">영상을 열어 주세요</span>')
         step = (t.get("task_content") or "comp").strip()
+        if self._annotation:
+            step = _ANNOTATION_PLATE_TITLE
         self._ver_chip.setText(f"{step} {cur.version_label}".strip() if cur.available else "")
         self._ver_chip.setVisible(cur.available)
         who = (t.get("uploader_name") or t.get("version_uploader_name") or "").strip()
-        self._who.setText(who)
         status = (t.get("task_status") or "").strip()
-        self._status_lbl.setText(status)
-        self._status_lbl.setStyleSheet(f"color: {status_style.text_color(status)};")
+        status_text = status
+        if self._annotation:  # 샷 한 줄에 태스크가 여럿 — 태스크와 상태를 모두 보인다
+            who = annotation_subtitle(t)
+            status_text = annotation_status_text(t) or status
+        self._who.setText(who)
+        flash = self._status_flash
+        if flash is not None and flash.get("task_id") != t.get("task_id"):
+            flash = None  # 다른 샷으로 넘어갔다 — 이 샷의 강조가 아니다
+        if flash is not None:  # 방금 보냈다 — 바뀐 것을 잠깐 크게 알린다
+            code = str(flash.get("code") or "")
+            bg, fg = status_style.colors(code) if code else (style.OK, style.EDGE)
+            self._status_lbl.setText(str(flash.get("text") or ""))
+            self._status_lbl.setStyleSheet(
+                f"color: {fg}; background: {bg}; font-weight: bold; "
+                f"padding: 2px 8px; border-radius: {style.RADIUS}px;"
+            )
+        else:
+            self._status_lbl.setText(status_text)
+            self._status_lbl.setStyleSheet(f"color: {status_style.text_color(status)};")
         self._status_dot.setVisible(bool(status))
         if status:
             self._status_dot.setPixmap(status_style.chip(status, 16))
-        rows = self._drawer.shown_rows()
+        rows = self._nav_rows()
         idx = next((i for i, r in enumerate(rows) if r.get("task_id") == t.get("task_id")), -1)
-        self._pos.setText(f"{idx + 1} / {len(rows)}" if idx >= 0 else "")
-        self._btn_prev.setEnabled(idx > 0)
-        self._btn_next.setEnabled(0 <= idx < len(rows) - 1)
+        self._panel.set_nav(
+            f"{idx + 1} / {len(rows)}" if idx >= 0 else "",
+            idx > 0,
+            0 <= idx < len(rows) - 1,
+        )
+        self._btn_shot_dir.setEnabled(self._shot_folder() is not None)
+        self._btn_sg.setEnabled(t.get("shot_id") is not None)
         self._btn_list.setText(" " + (self._drawer.summary() or "목록"))
+        for mode, btn in self._mode_btns.items():
+            btn.setChecked((mode == MODE_ANNOTATION) == self._annotation)
 
     def _sync_all(self) -> None:
+        keys = [k for k, _n, _t in _BUFFER_DEFS if not self._annotation or k in _ANNOTATION_KEYS]
         for key, btn in self._buf_btns.items():
             buf = self._bufs[key]
+            btn.setVisible(key in keys)
             btn.set_label(buf.button_label())
             btn.setEnabled(buf.available)
             btn.setToolTip(buf.tip())
             btn.setChecked(key == self._shown)
             mark = style.WARN if self._diff and key == self._last_shown else ""
-            if self._buf_marks.get(key, "") != mark:
-                self._buf_marks[key] = mark
-                btn.setStyleSheet(style.segment_style(_SEGMENT_POS[key], mark_color=mark))
+            pos = "mid"
+            if key in keys:
+                pos = "first" if key == keys[0] else "last" if key == keys[-1] else "mid"
+            if self._buf_marks.get(key, "") != mark or self._buf_pos.get(key) != pos:
+                self._buf_marks[key], self._buf_pos[key] = mark, pos
+                btn.setStyleSheet(style.segment_style(pos, mark_color=mark))
         self._btn_diff.setChecked(self._diff)
         for ch, btn in self._chan_btns.items():
             btn.setChecked(ch == self._channel)
         self._btn_lut.setChecked(self._lut_on)
+        shown = self._bufs[self._shown]
+        self._btn_lut_here.setEnabled(self._lut is not None and shown.available)
+        self._btn_lut_here.setChecked(self._lut is not None and self._lut_wanted(shown))
         self._btn_lut.setEnabled(self._lut is not None)
         self._btn_lut.setStyleSheet(style.lut_toggle_style(loaded=self._lut is not None))
         self._btn_lut_pick.setText(
@@ -1504,8 +2452,9 @@ class ConfirmWindow(QWidget):
         if fail:
             self._banner.setText("  /  ".join(failure_lines(self._checks)))
             self._banner.adjustSize()
-        style.set_icon(self._btn_play, "pause" if self._playing else "play", size=14)
-        ready = bool(self._task.get("shot_id")) and cur.available
+        playing = self._playing or self._seq_playing
+        style.set_icon(self._btn_play, "pause" if playing else "play", size=14)
+        ready = bool(self._task.get("shot_id")) and cur.available and self._task_is_open()
         self._panel.set_sendable(
             ready and not self._submit_busy,
             "" if ready else "샷그리드 정보가 있는 샷에서만 보낼 수 있습니다",
@@ -1554,7 +2503,7 @@ class ConfirmWindow(QWidget):
 
     def _set_busy(self, title: str, detail: str = "", *, error: bool = False) -> None:
         """뷰어 한가운데의 진행 알림. 빈 글이면 감춘다."""
-        if not title:
+        if not title or (self._seq_quiet and not error):
             self._busy.hide()
             return
         edge = style.FAIL if error else style.EDGE
@@ -1650,6 +2599,8 @@ class ConfirmWindow(QWidget):
         self._place_overlays()
 
     def _set_tool(self, tool: str) -> None:
+        if self._seq_playing and tool != TOOL_SELECT:
+            self._seq_pause()  # 그리려면 멈춘다 — 멈춘 컷이 열리고 그 위에 그린다
         self._palette.hide()
         self._layer.set_tool(tool)
         self._sync_all()
@@ -1681,11 +2632,26 @@ class ConfirmWindow(QWidget):
         return (self._task.get("project_code") or self._task.get("project_name") or "").strip()
 
     def _load_project_lut(self) -> None:
-        if self._lut is not None:
+        """이 샷에 쓸 룩업 — 직접 골라 둔 것이 먼저, 없으면 프리셋 누크 틀의 룩업 노드 파일.
+
+        같은 파일이 이미 올라와 있으면 그대로 둔다(끄고 켠 상태도 그대로).
+        """
+        saved = str(get_confirm_settings()["luts"].get(self._project_key() or "_default") or "")
+        auto = self._standard.lut_path if self._standard is not None else ""
+        want = saved or auto
+        if not want:
+            if self._lut is not None:
+                self._show_standard()
             return
-        path = str(get_confirm_settings()["luts"].get(self._project_key() or "_default") or "")
-        if path:
-            self._apply_lut_file(path, remember=False)
+        if self._lut is not None and _same_file(want, self._lut_path):
+            self._show_standard()
+            return
+        if _same_file(want, self._lut_failed):  # 못 읽은 파일을 샷마다 다시 알리지 않는다
+            return
+        self._apply_lut_file(want, remember=False)
+        if not _same_file(want, self._lut_path):
+            self._lut_failed = want
+        self._show_standard()
 
     def _pick_lut(self) -> None:
         start = str(Path(self._lut_path).parent) if self._lut_path else ""
@@ -1700,6 +2666,11 @@ class ConfirmWindow(QWidget):
             return
         self._lut, self._lut_path, self._lut_on = lut, path, True
         self._view.set_lut(lut)
+        if self._seq is not None:  # 이어 재생의 컷들도 새 룩업으로 다시 가린다
+            self._seq.set_lut(lut, bool(self._standard and self._standard.look))
+        # 룩업이 바뀌면 룩이 입혀졌는지도 새 룩업으로 다시 가린다
+        self._look_measured, self._look_tried = {}, set()
+        self._measure_looks()
         if remember:
             luts = dict(get_confirm_settings()["luts"])
             luts[self._project_key() or "_default"] = path
@@ -1724,6 +2695,10 @@ class ConfirmWindow(QWidget):
             self._refresh_view()
 
     def _on_frame_picked(self, index: int) -> None:
+        if self._seq_playing and self._seq is not None:  # 재생 중에 타임라인을 눌렀다
+            self._seq_pos = position(self._seq.counts(), self._seq_cut, index)
+            self._seq_pause()
+            return
         self._pause()
         self._set_index(index)
 
@@ -1732,12 +2707,19 @@ class ConfirmWindow(QWidget):
             frame = int(self._frame_edit.text().strip())
         except ValueError:
             frame = self.frame_number()
+        if self._seq_playing and self._seq is not None:
+            self._seq_pos = position(self._seq.counts(), self._seq_cut, frame - self._frame_start)
+            self._seq_pause()
+            self.setFocus()
+            return
         self._pause()
         self._set_index(frame - self._frame_start)
         self.setFocus()
         self._sync_labels()
 
     def _on_scrub_started(self) -> None:
+        if self._seq_playing:
+            self._seq_pause()  # 화면을 누르면 멈춘다
         self._scrub_from = self._index
 
     def _on_scrub_moved(self, dx: float) -> None:
@@ -1749,18 +2731,33 @@ class ConfirmWindow(QWidget):
         self._set_index(self._scrub_from + int(dx / per_frame))
 
     def _step(self, delta: int) -> None:
+        if self._seq_playing:
+            self._seq_pause()
+            return
         self._pause()
         self._set_index(self._index + delta)
 
     def _go_first(self) -> None:
+        if self._seq_playing:
+            self._seq_pause()
+            return
         self._pause()
         self._set_index(0)
 
     def _go_last(self) -> None:
+        if self._seq_playing:
+            self._seq_pause()
+            return
         self._pause()
         self._set_index(self._count - 1)
 
     def _toggle_play(self) -> None:
+        if self._seq is not None:  # 이어 재생 — 멈추면 그 컷이 열리고, 다시 누르면 거기서 잇는다
+            if self._seq_playing:
+                self._seq_pause()
+            else:
+                self._seq_play()
+            return
         if self._playing:
             self._pause()
         elif self._count > 1:
@@ -1777,6 +2774,9 @@ class ConfirmWindow(QWidget):
             style.set_icon(self._btn_play, "play", size=14)
 
     def _on_play_tick(self) -> None:
+        if self._seq_playing:
+            self._seq_tick()
+            return
         nxt = self._index + 1
         if nxt >= self._count:
             if not self._loop:
@@ -1812,14 +2812,11 @@ class ConfirmWindow(QWidget):
             new = texts.get(sid)
             if new == old:
                 continue
-            if old in lines:
-                i = lines.index(old)
-                if new is None:
-                    del lines[i]
-                else:
-                    lines[i] = new
+            swapped = replace_memo_block(lines, old, new)
+            if swapped is not None:
+                lines = swapped
             elif new is not None:
-                lines.append(new)
+                lines.extend(new.split("\n"))
             if new is None:
                 del self._memo_lines[sid]
             else:
@@ -1827,17 +2824,94 @@ class ConfirmWindow(QWidget):
             changed = True
         for sid, text in texts.items():
             if sid not in self._memo_lines:
-                lines.append(text)
+                lines.extend(text.split("\n"))
                 self._memo_lines[sid] = text
                 changed = True
         if changed:
             self._panel.set_memo_text("\n".join(lines))
-        frames = self._attachment_frames()
+        self._show_attach_text()
+
+    def _show_attach_text(self) -> None:
+        frames, pasted = len(self._attachment_frames()), len(self._pasted)
+        parts = []
+        if frames:
+            parts.append(f"그린 그림 {frames}장(샷 이름·버전·프레임 번호가 찍힘)")
+        if pasted:
+            parts.append(f"붙인 그림 {pasted}장")
         self._panel.set_attach_text(
-            f"그림 {len(frames)}장 첨부 · 샷 이름·버전·프레임 번호가 찍힘"
-            if frames
-            else "그림을 그리면 여기 첨부됩니다"
+            " + ".join(parts) + " 첨부"
+            if parts
+            else "그림을 그리거나 Ctrl+V 로 붙이면 여기 첨부됩니다"
         )
+
+    # ── 메모에 붙여 넣은 그림 ────────────────────────────────────
+
+    def _on_image_pasted(self, image: object) -> None:
+        """복사한 그림을 이 샷의 초안 폴더에 PNG 로 남기고 첨부 줄에 올린다."""
+        base = self._draft_path()
+        if not isinstance(image, QImage) or image.isNull():
+            return
+        if base is None:
+            self._panel.set_result("영상을 연 뒤에 그림을 붙여 주세요", False)
+            return
+        img = image
+        if max(img.width(), img.height()) > _NOTE_IMAGE_MAX_EDGE:
+            img = img.scaled(
+                _NOTE_IMAGE_MAX_EDGE,
+                _NOTE_IMAGE_MAX_EDGE,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        path = base.with_name(f"{base.stem}_paste_{time.time_ns() // 1000000}.png")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            logger.warning("confirm paste: folder failed: %s", e)
+        if not img.save(str(path), "PNG"):
+            self._panel.set_result("붙여 넣은 그림을 저장하지 못했습니다", False)
+            return
+        self._pasted.append(str(path))
+        self._show_pasted()
+
+    def _open_ref_dialog(self) -> None:
+        """다른 샷의 프레임을 샷 이름으로 찾아 붙이는 작은 창을 띄운다."""
+        if self._draft_path() is None:
+            self._panel.set_result("영상을 연 뒤에 그림을 붙여 주세요", False)
+            return
+        if self._ref_dialog is not None:
+            self._ref_dialog.close()
+            self._ref_dialog.deleteLater()
+        project = self._project_key() or self._drawer.project_text()
+        shot = str(self._task.get("shot_code") or "")
+        hint = shot.split("_")[0] + "_" if "_" in shot else ""
+        dlg = RefFrameDialog(
+            self,
+            find_sources=lambda name, p=project: _find_ref_sources(p, name),
+            lut_file=self._lut_path if self._lut is not None else "",
+            frame_start=self._frame_start,
+            shot_hint=hint,
+        )
+        dlg.frame_picked.connect(self._on_ref_frame)
+        self._ref_dialog = dlg
+        dlg.show()
+
+    def _on_ref_frame(self, image: object, caption: str) -> None:
+        """고른 프레임을 붙인 그림으로 올리고, 어느 샷의 것인지 메모에 한 줄 적는다."""
+        before = len(self._pasted)
+        self._on_image_pasted(image)
+        if len(self._pasted) > before and caption:
+            self._panel.append_memo(caption)
+            self._draft_timer.start()
+
+    def _remove_pasted(self, index: int) -> None:
+        if 0 <= index < len(self._pasted):
+            self._remove_files([self._pasted.pop(index)])
+            self._show_pasted()
+
+    def _show_pasted(self) -> None:
+        self._panel.set_pasted_images(self._pasted)
+        self._show_attach_text()
+        self._draft_timer.start()
 
     def _insert_failures(self) -> None:
         for line in failure_lines(self._checks):
@@ -1860,7 +2934,7 @@ class ConfirmWindow(QWidget):
         doc = self._layer.doc()
         memo = self._panel.memo_text()
         try:
-            if doc.is_empty() and not memo.strip():
+            if doc.is_empty() and not memo.strip() and not self._pasted:
                 if path.is_file():
                     path.unlink()
             else:
@@ -1871,6 +2945,7 @@ class ConfirmWindow(QWidget):
                         "shapes": doc.to_list(),
                         "memo": memo,
                         "memo_lines": {str(k): v for k, v in self._memo_lines.items()},
+                        "images": list(self._pasted),
                     },
                 )
         except OSError as e:
@@ -1880,15 +2955,21 @@ class ConfirmWindow(QWidget):
         path = self._draft_path()
         doc = AnnotationDoc()
         memo, lines = "", {}
+        images: List[str] = []
         if path is not None:
             data = read_json_file(path, {})
             if isinstance(data, dict):
+                stored_images = data.get("images")
+                if isinstance(stored_images, list):
+                    images = [str(p) for p in stored_images if p and Path(str(p)).is_file()]
                 doc.load_list(data.get("shapes"))
                 memo = str(data.get("memo") or "")
                 stored = data.get("memo_lines")
                 if isinstance(stored, dict):
                     lines = {int(k): str(v) for k, v in stored.items() if str(k).isdigit()}
         self._memo_lines = lines
+        self._pasted = images
+        self._panel.set_pasted_images(images)
         self._panel.set_memo_text(memo)
         self._layer.set_doc(doc)
         self._timeline.set_marks(doc.marked_frames())
@@ -1908,7 +2989,7 @@ class ConfirmWindow(QWidget):
                 data,
                 cur.size[0],
                 cur.size[1],
-                lut_on=self._lut is not None and not self._look_baked(cur),
+                lut_on=self._lut is not None and self._lut_wanted(cur),
             )
             if img is None:
                 continue
@@ -1948,6 +3029,8 @@ class ConfirmWindow(QWidget):
         cur = self._bufs[KEY_CUR]
         who = (t.get("uploader_name") or t.get("version_uploader_name") or "").strip()
         meta = " · ".join(x for x in (who, cur.version_label, t.get("task_status") or "") if x)
+        if self._annotation and t:
+            meta = annotation_subtitle(t) or "태스크 정보 없음"
         self._panel.set_work_info(
             (t.get("vfx_work_order") or "").strip(),
             (t.get("shot_description") or "").strip(),
@@ -1980,6 +3063,32 @@ class ConfirmWindow(QWidget):
             return
         cur_code = (self._task.get("latest_version_code") or "").strip()
         self._panel.set_past_notes(result, cur_code)
+        self._load_note_images(result, token)
+
+    def _load_note_images(self, notes: List[Dict[str, Any]], token: int) -> None:
+        """샷그리드 노트에 붙은 그림을 뒤에서 내려받아 Note 목록에 보인다."""
+        ids = [
+            int(n["note_id"]) for n in notes if isinstance(n, dict) and n.get("note_id") is not None
+        ][:_NOTE_IMAGE_NOTES]
+        if not ids:
+            return
+
+        def _fetch() -> Dict[int, List[bytes]]:
+            from bpe.shotgrid.client import get_default_sg
+            from bpe.shotgrid.confirm_context import note_images
+
+            return note_images(get_default_sg(), ids)
+
+        w = ShotGridWorker(_fetch)
+        w.finished.connect(lambda r, t=token: self._on_note_images(r, t))
+        w.error.connect(lambda e: logger.warning("confirm: note images failed: %s", e))
+        w.start()
+        self._workers.append(w)
+
+    def _on_note_images(self, result: object, token: int) -> None:
+        if token != self._load_token or self._closed or not isinstance(result, dict):
+            return
+        self._panel.set_note_images(result)
 
     def _on_past_note(self, note: Dict[str, Any]) -> None:
         """지난 지적을 누르면 — 그 버전(전 버전 판에 있으면)과 지금 버전을 바로 비교하게 한다."""
@@ -1991,9 +3100,28 @@ class ConfirmWindow(QWidget):
             self._diff = False
             self._sync_all()
 
-    def _on_status_requested(self, code: str) -> None:
-        if self._submit_busy or not self._task.get("shot_id"):
+    def _task_is_open(self) -> bool:
+        """머리 줄의 샷과 화면에 올라와 있는 영상이 같은 샷인가.
+
+        목록에서 다른 샷을 고르면 머리 줄은 바로 바뀌지만 영상은 서버에서 찾은 뒤에야 바뀐다.
+        그 사이와, 새 샷의 영상을 못 찾았을 때는 화면의 메모·그림이 앞 샷 것이라 보내면 안 된다.
+        """
+        return self._task.get("task_id") == self._loaded_task_id
+
+    def _on_note_requested(self) -> None:
+        """Annotation 모드의 「Note 보내기」 — 상태는 그대로 두고 메모·그림만 보낸다."""
+        if self._submit_busy or not self._task.get("shot_id") or not self._task_is_open():
             return
+        self._layer.commit_text_edit()  # 화면에 치던 글도 노트에 들어가게
+        if not (self._panel.memo_text().strip() or self._attachment_frames() or self._pasted):
+            self._panel.set_result("메모를 쓰거나 그림을 남긴 뒤 보내 주세요", False)
+            return
+        self._on_status_requested("")
+
+    def _on_status_requested(self, code: str) -> None:
+        if self._submit_busy or not self._task.get("shot_id") or not self._task_is_open():
+            return
+        self._layer.commit_text_edit()  # 화면에 치던 글도 노트에 들어가게
         self._pending_status = code
         self._pending_left = _SEND_DELAY_SECS
         self._sent_note_id = None
@@ -2003,11 +3131,20 @@ class ConfirmWindow(QWidget):
 
     def _pending_summary(self) -> str:
         lines = sum(1 for ln in self._panel.memo_text().split("\n") if ln.strip())
-        frames = len(self._attachment_frames())
+        frames = len(self._attachment_frames()) + len(self._pasted)
         if not lines and not frames:
-            return f"상태만 {self._pending_status} 로 바꿈"
+            return f"상태만 {self._pending_status} 로 바꿈 (태스크·버전)"
         warn = f" · {self._version_note}" if self._version_note else ""
-        return f"노트(메모 {lines}줄, 그림 {frames}장) 보내고 상태 {self._pending_status}{warn}"
+        cc = len(self._panel.cc_users())
+        cc_text = f", 참조 {cc}명" if cc else ""
+        if not self._pending_status:
+            to = len(self._task.get("task_assignees") or [])
+            to_text = f"담당 {to}명에게" if to else "받는 사람 없이"
+            return f"노트(메모 {lines}줄, 그림 {frames}장{cc_text}) {to_text} 보냄 · 상태는 그대로"
+        return (
+            f"노트(메모 {lines}줄, 그림 {frames}장{cc_text}) 보내고 "
+            f"상태 {self._pending_status}{warn}"
+        )
 
     def _show_pending(self) -> None:
         self._panel.set_pending(f"{self._pending_left}초 뒤 실행: {self._pending_summary()}")
@@ -2030,15 +3167,36 @@ class ConfirmWindow(QWidget):
             self._panel.set_result("보내기를 취소했습니다", False)
 
     def _retry_status_only(self) -> None:
-        code = self._last_status_code
-        if code and self._sent_note_id is not None:
-            self._submit(code, existing_note_id=self._sent_note_id)
+        r = self._retry
+        if r is None or not r.get("code") or r.get("note_id") is None:
+            return
+        # 보냈던 그 샷의 상태를 다시 바꾼다(그 사이 다른 샷을 열었어도 그 샷으로)
+        self._submit(str(r["code"]), existing_note_id=int(r["note_id"]), task=dict(r["task"]))
 
-    def _submit(self, code: str, existing_note_id: Optional[int] = None) -> None:
-        t = dict(self._task)
+    def _submit(
+        self,
+        code: str,
+        existing_note_id: Optional[int] = None,
+        task: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if task is None and not self._task_is_open():
+            self._panel.set_result("샷이 바뀌어 보내지 않았습니다", False)
+            return
+        t = dict(task if task is not None else self._task)
+        # 결과가 돌아올 때 어느 샷의 것인지 알도록 같이 들려 보낸다
+        ticket: Dict[str, Any] = {
+            "task_id": t.get("task_id"),
+            "shot": str(t.get("shot_code") or ""),
+            "draft": self._draft_path() if task is None else None,
+            "retry": existing_note_id is not None,
+            "code": code,
+            "task": t,
+        }
         body = self._panel.memo_text().strip()
         frames = self._attachment_frames() if existing_note_id is None else []
         images = self._render_note_images() if existing_note_id is None else []
+        pasted = list(self._pasted) if existing_note_id is None else []
+        cc = self._panel.cc_users()
         if len(images) < len(frames):
             # 그림을 남긴 프레임이 아직 메모리에 안 올라왔다 — 그림이 빠진 노트를 보내지 않는다
             self._remove_files(images)
@@ -2073,15 +3231,18 @@ class ConfirmWindow(QWidget):
                 status_field=(t.get("status_field") or None),
                 subject=note_subject(me, cur_code, (t.get("shot_code") or "").strip()),
                 content=body,
-                attachment_paths=images,
+                attachment_paths=images + pasted,
                 author_user=me,
                 addressings_to=addressings_for_confirm(t.get("task_assignees")),
+                addressings_cc=cc or None,
                 existing_note_id=existing_note_id,
             )
 
         w = ShotGridWorker(_work)
-        w.finished.connect(lambda r, imgs=images: self._on_submitted(r, imgs))
-        w.error.connect(lambda e, imgs=images: self._on_submit_error(e, imgs))
+        w.finished.connect(
+            lambda r, imgs=images, p=pasted, tk=ticket: self._on_submitted(r, imgs, p, tk)
+        )
+        w.error.connect(lambda e, imgs=images, tk=ticket: self._on_submit_error(e, imgs, tk))
         w.start()
         self._workers.append(w)
 
@@ -2093,42 +3254,189 @@ class ConfirmWindow(QWidget):
             except OSError:
                 pass
 
-    def _on_submit_error(self, msg: str, images: List[str]) -> None:
+    def _result_is_for_open_shot(self, ticket: Optional[Dict[str, Any]]) -> bool:
+        """돌아온 보내기 결과가 지금 열려 있는 샷의 것인가(그 사이 다른 샷으로 넘어갔을 수 있다)."""
+        if ticket is None:
+            return True
+        return ticket.get("task_id") == self._task.get("task_id") and self._task_is_open()
+
+    @staticmethod
+    def _named(ticket: Optional[Dict[str, Any]], here: bool, text: str) -> str:
+        """다른 샷의 결과면 어느 샷 것인지 앞에 적는다."""
+        shot = str((ticket or {}).get("shot") or "")
+        return text if here or not shot else f"{shot}: {text}"
+
+    def _on_submit_error(
+        self, msg: str, images: List[str], ticket: Optional[Dict[str, Any]] = None
+    ) -> None:
         self._remove_files(images)
         self._submit_busy = False
-        self._panel.set_result(f"보내지 못했습니다: {msg}", False)
+        here = self._result_is_for_open_shot(ticket)
+        self._panel.set_result(self._named(ticket, here, f"보내지 못했습니다: {msg}"), False)
         self._sync_all()
 
-    def _on_submitted(self, res: Any, images: List[str]) -> None:
+    def _on_submitted(
+        self,
+        res: Any,
+        images: List[str],
+        pasted: Optional[List[str]] = None,
+        ticket: Optional[Dict[str, Any]] = None,
+    ) -> None:
         self._remove_files(images)
         self._submit_busy = False
+        # 보내는 사이 다른 샷으로 넘어갔으면 지금 화면(그 샷의 메모·그림·상태)은 건드리지 않는다
+        here = self._result_is_for_open_shot(ticket)
+        retry = bool((ticket or {}).get("retry"))  # 상태만 다시 바꾼 것 — 노트는 전에 갔다
         parts: List[str] = []
-        if res.note_needed:
+        fresh_note = False
+        if res.note_needed and not retry:
             if res.note_ok:
-                self._sent_note_id = res.note_id
-                parts.append(
-                    "노트 보냄"
-                    if res.attachment_ok
-                    else f"노트 보냄(그림 실패: {res.attachment_error})"
-                )
-                self._memo_lines = {}
-                self._panel.clear_memo()
-                self._layer.set_doc(AnnotationDoc())
-                self._on_doc_changed()
+                if here:
+                    fresh_note = self._sent_note_id != res.note_id
+                    self._sent_note_id = res.note_id
+                sent = list(pasted or [])
+                if not res.attachment_ok:
+                    # 글은 갔지만 그림이 안 올라갔다 — 그린 그림·붙인 그림은 지우지 않는다
+                    parts.append(
+                        f"노트 보냄(그림 실패: {res.attachment_error}) — 그림은 남겨 두었습니다"
+                    )
+                    if here:
+                        self._memo_lines = {}
+                        self._panel.clear_memo()
+                        self._panel.clear_cc()
+                else:
+                    parts.append("노트 보냄")
+                    # 보낸 붙임 그림은 지운다(다른 샷으로 넘어간 뒤 끝났어도 그 파일만)
+                    self._remove_files(sent)
+                    self._pasted = [p for p in self._pasted if p not in sent]
+                    if here:
+                        self._memo_lines = {}
+                        self._panel.clear_memo()
+                        self._panel.set_pasted_images(self._pasted)
+                        self._panel.clear_cc()
+                        self._layer.set_doc(AnnotationDoc())
+                        self._on_doc_changed()
+                    else:
+                        # 떠나면서 남긴 그 샷의 초안 — 이미 보냈으니 다시 열 때
+                        # 또 나오지 않게 지운다
+                        self._remove_files([str(p) for p in [(ticket or {}).get("draft")] if p])
             else:
                 parts.append(f"노트 실패: {res.note_error}")
+        code = str(ticket["code"]) if ticket is not None else self._last_status_code
+        old_status = str(self._task.get("task_status") or "") if here else ""
         if res.status_needed:
             if res.status_ok:
-                parts.append(f"상태 {self._last_status_code} 로 바꿈")
-                self._task["task_status"] = self._last_status_code
+                parts.append(f"태스크 상태 {code} 로 바꿈")
+                if here:
+                    self._task["task_status"] = code
             else:
-                parts.append(f"상태 실패: {res.status_error}")
-        can_retry = bool(res.status_needed and not res.status_ok and res.note_ok)
-        self._panel.set_result(
-            " · ".join(parts) or "보낼 것이 없습니다", res.all_ok, can_retry=can_retry
-        )
-        self._fill_work_info()
+                parts.append(f"태스크 상태 실패: {res.status_error}")
+        if res.version_needed:
+            if res.version_ok:
+                parts.append(f"버전 상태 {code} 로 바꿈({res.version_count}개)")
+            else:
+                parts.append(f"버전 상태 실패: {res.version_error}")
+        status_failed = bool(res.status_needed and not res.status_ok)
+        version_failed = bool(res.version_needed and not res.version_ok)
+        note_fine = res.note_ok or not res.note_needed
+        can_retry = bool((status_failed or version_failed) and note_fine)
+        self._retry = None
+        if can_retry:  # 다시 바꿀 때는 보냈던 그 샷의 값으로
+            sent_task = (ticket or {}).get("task") or dict(self._task)
+            self._retry = {"task": dict(sent_task), "code": code, "note_id": res.note_id}
+        text = " · ".join(parts) or "보낼 것이 없습니다"
+        self._panel.set_result(self._named(ticket, here, text), res.all_ok, can_retry=can_retry)
+        # 바뀐 것이 눈에 보이게 — 목록의 그 줄은 바로 「보냄」(다른 샷으로 넘어간 뒤 끝났어도),
+        # 지금 열린 샷이면 머리 줄 상태 칸도 잠깐 강조한다
+        status_done = bool(res.status_needed and res.status_ok)
+        note_done = bool(res.note_needed and res.note_ok and not retry)
+        if status_done or note_done:
+            sent_task = (ticket or {}).get("task") or self._task
+            self._drawer.mark_sent(
+                sent_task.get("task_id"), code if status_done else "", sent_task.get("shot_id")
+            )
+            if here:
+                if status_done and old_status and old_status != code:
+                    self._flash_status(f"{old_status} → {code}", code)
+                elif status_done:
+                    self._flash_status(code, code)
+                else:
+                    self._flash_status("Note 보냄", "")
+        if here:
+            self._fill_work_info()
         self._sync_all()
+        if fresh_note:
+            # 방금 보낸 노트가 이 샷의 Note 목록에 바로 보이게 다시 읽는다
+            self._load_sg_context()
+
+    def _flash_status(self, text: str, code: str) -> None:
+        """머리 줄 상태 칸을 잠깐 강조한다 — *code* 의 상태 색으로, 없으면 초록(Note 만 보냄)."""
+        self._status_flash = {"task_id": self._task.get("task_id"), "text": text, "code": code}
+        self._flash_timer.start()
+        self._sync_header()
+
+    def _end_status_flash(self) -> None:
+        self._flash_timer.stop()
+        if self._status_flash is None:
+            return
+        self._status_flash = None
+        if not self._closed:
+            self._sync_header()
+
+    def _with_sent_status(self, task: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """목록에서 온 줄을 여는 값으로 — 이 창에서 보내 바꾼 상태가 있으면 그것이 지금 상태다."""
+        row = dict(task or {})
+        sent = str(row.get("sent_status") or "") or self._drawer.sent_status_of(row.get("task_id"))
+        if sent:
+            row["task_status"] = sent
+        return row
+
+    # ── 참조(CC) 사람 찾기 ───────────────────────────────────────
+
+    def _search_cc(self, text: str) -> None:
+        self._cc_req += 1
+        req = self._cc_req
+
+        def _fetch() -> List[Dict[str, Any]]:
+            from bpe.shotgrid.client import get_default_sg
+            from bpe.shotgrid.users import search_human_users
+
+            return search_human_users(get_default_sg(), text, limit=8)
+
+        w = ShotGridWorker(_fetch)
+        w.finished.connect(lambda r, q=req: self._on_cc_found(r, q))
+        w.error.connect(lambda e: logger.warning("confirm: cc search failed: %s", e))
+        w.start()
+        self._workers.append(w)
+
+    def _on_cc_found(self, rows: object, req: int) -> None:
+        if req != self._cc_req or self._closed:
+            return
+        self._panel.set_cc_results(rows if isinstance(rows, list) else [])
+
+    # ── 바로 가기 ────────────────────────────────────────────────
+
+    def _shot_folder(self) -> Optional[Path]:
+        """이 샷의 작업 폴더 — 샷 폴더를 못 찾았으면 지금 보는 영상이 든 폴더."""
+        if self._shot_root is not None:
+            return self._shot_root
+        cur = self._bufs[KEY_CUR].path
+        return cur.parent if cur is not None else None
+
+    def _open_shot_folder(self) -> None:
+        folder = self._shot_folder()
+        if folder is None or not folder.is_dir():
+            self._panel.set_result("샷 폴더를 찾지 못했습니다", False)
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+    def _open_shot_in_shotgrid(self) -> None:
+        shot_id = self._task.get("shot_id")
+        if shot_id is None:
+            return
+        from bpe.gui.shotgrid_open_shot import open_shot_canvas_in_browser
+
+        open_shot_canvas_in_browser(int(shot_id))
 
     # ── 키보드 ───────────────────────────────────────────────────
 
@@ -2167,6 +3475,8 @@ class ConfirmWindow(QWidget):
             self._layer.undo()
         elif ctrl and letter == "Y":
             self._layer.redo()
+        elif ctrl and letter == "C" and self._panel.copy_note_selection():
+            pass  # 지난 Note 에서 끌어 고른 글을 복사했다
         elif ctrl:
             super().keyPressEvent(event)
         elif Qt.Key.Key_1 <= key <= Qt.Key.Key_4:
@@ -2181,6 +3491,10 @@ class ConfirmWindow(QWidget):
             self._go_first()
         elif key == Qt.Key.Key_End:
             self._go_last()
+        elif key == Qt.Key.Key_PageUp:
+            self._nav_shot(-1)
+        elif key == Qt.Key.Key_PageDown:
+            self._nav_shot(1)
         elif key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
             self._layer.delete_selected()
         elif key == Qt.Key.Key_F11:
@@ -2194,7 +3508,10 @@ class ConfirmWindow(QWidget):
         elif letter in ("A", "Y"):
             self._set_channel(CHANNEL_LUMA)
         elif letter == "L":
-            self._toggle_lut()
+            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                self._toggle_lut_here()
+            else:
+                self._toggle_lut()
         elif letter == "F":
             self._view_fit()
         elif letter == "H":
@@ -2224,11 +3541,17 @@ class ConfirmWindow(QWidget):
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         self._closed = True
+        self._stop_sequence()
+        if self._ref_dialog is not None:
+            self._ref_dialog.close()
         self._pause()
         self._send_timer.stop()
+        self._flash_timer.stop()
         self._save_draft()
         self._stop_decoders()
+        self._drop_preload()
         self._drawer.shutdown()
+        self._view.release_gl()  # 그래픽 물건은 지금 지운다(뒷정리에 맡기면 죽는다)
         for buf in self._bufs.values():
             buf.frames = {}
         for w in self._workers:

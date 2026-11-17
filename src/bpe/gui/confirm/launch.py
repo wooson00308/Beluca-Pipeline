@@ -8,9 +8,6 @@
 
 from __future__ import annotations
 
-import os
-import sys
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from PySide6.QtCore import Qt, QTimer
@@ -30,15 +27,6 @@ _open_windows: List[Any] = []
 
 def wants_standalone(argv: List[str]) -> bool:
     return FLAG_CONFIRM in argv or FLAG_PROBE in argv
-
-
-def confirm_unlocked_build() -> bool:
-    """시험판(개발 실행·``*_dev.exe``)에서는 잠금 없이 컨펌 창 버튼을 보여 준다."""
-    if (os.environ.get("BPE_CONFIRM_OPEN") or "").strip() == "1":
-        return True
-    if not getattr(sys, "frozen", False):
-        return True
-    return Path(sys.executable).stem.lower().endswith("_dev")
 
 
 def _as_independent_window(win: QWidget) -> None:

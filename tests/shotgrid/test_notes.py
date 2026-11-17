@@ -426,3 +426,38 @@ class TestCreateNote:
         assert res.attachment_ok is False
         assert res.attachment_error is not None
         assert res.note.get("type") == "Note"
+
+
+def test_attachments_for_notes_in_one_query_then_per_note_fallback() -> None:
+    from bpe.shotgrid.notes import get_attachments_for_notes
+
+    class _Sg:
+        def __init__(self, batch: bool) -> None:
+            self.batch, self.calls = batch, 0
+
+        def find(self, entity: str, filters: Any, fields: Any, **_k: Any) -> Any:
+            self.calls += 1
+            assert entity == "Attachment"
+            op = filters[0][1]
+            row = {
+                "id": 5,
+                "filename": "guide.png",
+                "this_file": {"url": "https://x/guide.png"},
+                "attachment_links": [{"type": "Note", "id": 11}, {"type": "Version", "id": 3}],
+            }
+            pdf = {"id": 6, "filename": "doc.pdf", "this_file": {"url": "https://x/doc.pdf"},
+                   "attachment_links": [{"type": "Note", "id": 12}]}  # fmt: skip
+            if op == "in":
+                if not self.batch:
+                    raise RuntimeError("in 조회 안 됨")
+                return [row, pdf]
+            return [row] if filters[0][2]["id"] == 11 else []
+
+    one = _Sg(batch=True)
+    got = get_attachments_for_notes(one, [11, 12])
+    assert list(got) == [11] and got[11][0]["att_id"] == 5 and one.calls == 1  # 그림만, 한 번에
+
+    each = _Sg(batch=False)
+    got = get_attachments_for_notes(each, [11, 12])
+    assert list(got) == [11] and each.calls > 1  # 한 번에 안 되면 노트마다
+    assert get_attachments_for_notes(each, []) == {}

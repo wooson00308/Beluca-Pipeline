@@ -31,8 +31,10 @@ class StreamDecodeWorker(QThread):
         *,
         start_index: int = 0,
         frame_count: Optional[int] = None,
+        resample: str = "plain",
     ) -> None:
         super().__init__()
+        self._resample = resample
         self.key = key
         self._path = path
         self._w, self._h = width, height
@@ -63,6 +65,7 @@ class StreamDecodeWorker(QThread):
             height=self._h,
             start_index=self._start,
             frame_count=self._count,
+            resample=self._resample,
         )
         try:
             self._proc = subprocess.Popen(

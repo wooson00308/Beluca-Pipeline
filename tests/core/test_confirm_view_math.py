@@ -58,8 +58,14 @@ def test_select_channel() -> None:
 def test_view_pixel_order_mode_gain_gamma_channel() -> None:
     assert view_pixel(A, B, mode=VIEW_MODE_A) == A
     assert view_pixel(A, B, mode=VIEW_MODE_B) == B
+    # 차이는 선형 빛에서 뺀 뒤 게인을 곱하고, 다시 곡선을 입혀 보여 준다(누크 뷰어 순서)
+    from bpe.core.confirm_view_math import from_linear, to_linear
+
+    la, lb = to_linear(A), to_linear(B)
+    want = from_linear((abs(la[0] - lb[0]) * 4.0,) * 3)[0]
     got = view_pixel(A, B, mode=VIEW_MODE_DIFF, gain=4.0, gamma=1.0, channel=CHANNEL_R)
-    assert got == pytest.approx((1.0, 1.0, 1.0))
+    assert got == pytest.approx((want, want, want))
+    assert view_pixel(A, A, mode=VIEW_MODE_DIFF, gain=64.0, gamma=4.0) == (0.0, 0.0, 0.0)
 
 
 def test_channel_index_matches_shader_uniform() -> None:
@@ -80,3 +86,49 @@ def test_fit_rect_letterbox_and_pillarbox() -> None:
 
 def test_fit_rect_bad_sizes() -> None:
     assert fit_rect(0, 0, 100, 50) == (0, 0, 100, 50)
+
+
+def test_difference_matches_looks_before_subtracting() -> None:
+    from bpe.core.confirm_view_math import VIEW_MODE_DIFF, view_pixel
+
+    def look(c: tuple) -> tuple:
+        return (c[0] * 2.0, c[1] * 2.0, c[2] * 2.0)
+
+    log_plate = (0.2, 0.2, 0.2)
+    baked_work = (0.4, 0.4, 0.4)  # 같은 그림에 룩이 입혀진 것
+    # 로그 판에만 룩업을 씌운 뒤 빼면 차이가 0 이다
+    assert view_pixel(log_plate, baked_work, mode=VIEW_MODE_DIFF, lut=look) == (0.0, 0.0, 0.0)
+    assert view_pixel(baked_work, log_plate, mode=VIEW_MODE_DIFF, lut_b=look) == (0.0, 0.0, 0.0)
+    # 아무것도 안 맞추면 색 차이가 그대로 남는다
+    raw = view_pixel(log_plate, baked_work, mode=VIEW_MODE_DIFF)
+    assert all(c > 0.1 for c in raw)
+
+
+def test_curves_round_trip_and_match_known_points() -> None:
+    from bpe.core.confirm_view_math import CURVE_GAMMA22, CURVE_REC709, from_linear, to_linear
+
+    for curve in (CURVE_REC709, CURVE_GAMMA22):
+        for v in (0.0, 0.02, 0.081, 0.18, 0.5, 1.0):
+            back = from_linear(to_linear((v, v, v), curve), curve)
+            assert back[0] == pytest.approx(v, abs=5e-4)  # 곧은 구간과 굽은 구간이 만나는 곳의 틈
+    assert to_linear((0.045, 0.5, 1.0), CURVE_REC709)[0] == pytest.approx(0.01)  # 곧은 구간
+    assert to_linear((0.5, 0.5, 0.5), CURVE_GAMMA22)[0] == pytest.approx(0.5**2.2)
+    assert to_linear((-0.2, 0.0, 0.0), CURVE_REC709)[0] == 0.0  # 음수는 0
+
+
+def test_tiny_difference_vanishes_under_the_viewer_lut_like_in_nuke() -> None:
+    from bpe.core.confirm_view_math import VIEW_MODE_DIFF, view_pixel
+
+    def log_look(c: tuple) -> tuple:
+        # 로그용 룩업 흉내: 0.09 아래는 검정, 그 위로 대비를 키운다
+        return tuple(max(0.0, (x - 0.09) * 2.0) for x in c)
+
+    a = (0.400, 0.400, 0.400)
+    b = (0.4004, 0.4004, 0.4004)  # 다시 압축해서 생기는 정도의 아주 작은 차이
+    # 뷰어 룩업 없이 게인을 크게 주면 회색으로 보인다
+    assert view_pixel(a, b, mode=VIEW_MODE_DIFF, gain=16.0)[0] > 0.01
+    # 누크처럼 뷰어 룩업을 켠 채 보면 룩업의 검은 쪽에 묻혀 안 보인다
+    assert view_pixel(a, b, mode=VIEW_MODE_DIFF, gain=16.0, lut_post=log_look) == (0.0, 0.0, 0.0)
+    # 진짜로 다른 곳은 그대로 보인다
+    c = (0.55, 0.55, 0.55)
+    assert view_pixel(a, c, mode=VIEW_MODE_DIFF, gain=4.0, lut_post=log_look)[0] > 0.5

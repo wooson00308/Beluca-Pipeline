@@ -171,3 +171,57 @@ def test_quick_version_movie_goes_straight_to_the_usual_place(tmp_path: Path) ->
     assert quick("") is None
     assert quick_version_movie(root, "PROJ_001", "ep99_s001_0010", "x_v001") is None
     assert quick_version_movie("", "PROJ_001", "ep06_s020_0012", "x_v001") is None
+
+
+def test_twin_version_key_ignores_lut_suffix_and_case() -> None:
+    from bpe.core.confirm_media import twin_version_key
+
+    a = twin_version_key("ep08_s014_0040_comp_v003")
+    assert a == twin_version_key("EP08_s014_0040_comp_v003_lut")
+    assert a == twin_version_key("ep08_s014_0040_comp_v003_LUT.mov")
+    assert a != twin_version_key("ep08_s014_0040_comp_v002_lut")
+    assert twin_version_key("") == ""
+
+
+def test_plate_media_puts_plate_in_current_slot(tmp_path: Path) -> None:
+    from bpe.core.confirm_media import find_plate_media, shot_root_from_plate, usual_shot_root
+
+    shot = tmp_path / "PRJ" / "04_sq" / "ep01" / "ep01_s010_0010"
+    plate = shot / "plate" / "org" / "v002" / "mov" / "ep01_s010_0010_org.mov"
+    plate.parent.mkdir(parents=True)
+    plate.write_bytes(b"x")
+    edit = shot / "edit" / "v001" / "ep01_s010_0010_edit.mov"
+    edit.parent.mkdir(parents=True)
+    edit.write_bytes(b"x")
+
+    assert usual_shot_root(str(tmp_path), "PRJ", "ep01_s010_0010") == shot
+    assert usual_shot_root(str(tmp_path), "PRJ", "ep01_s999_0010") is None
+    assert usual_shot_root(str(tmp_path), "", "ep01_s010_0010") is None
+    assert shot_root_from_plate(plate) == shot
+    assert shot_root_from_plate(tmp_path / "somewhere" / "a.mov") is None
+
+    media = find_plate_media(plate)
+    assert media.shot_root == shot
+    assert media.current is not None and media.current.path == plate
+    assert media.current.version == 2 and not media.current.has_lut_baked  # 버전은 폴더 이름에서
+    assert media.previous is None and media.org is None
+    assert media.edit == edit
+
+
+def test_reference_sources_lists_latest_work_first(tmp_path: Path) -> None:
+    from bpe.core.confirm_media import reference_sources
+
+    shot = tmp_path / "ep01_s010_0010"
+    files = [
+        shot / "comp" / "devl" / "renders" / "ep01_s010_0010_comp_v001.mov",
+        shot / "comp" / "devl" / "renders" / "ep01_s010_0010_comp_v003.mov",
+        shot / "plate" / "org" / "v001" / "mov" / "ep01_s010_0010_org.mov",
+        shot / "edit" / "ep01_s010_0010_edit.mov",
+    ]
+    for f in files:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(b"x")
+    got = reference_sources(shot)
+    assert [name for name, _p in got] == ["comp v003", "ORG plate", "edit"]
+    assert got[0][1] == files[1]
+    assert reference_sources(tmp_path / "none") == []

@@ -113,3 +113,15 @@ def test_json_roundtrip_and_bad_data() -> None:
     assert doc2.add(_rect()) == 3
     doc2.load_list(None)
     assert doc2.is_empty()
+
+
+def test_replace_memo_block_swaps_or_drops_a_run_of_lines() -> None:
+    from bpe.core.confirm_annotations import replace_memo_block
+
+    lines = ["앞", "a", "b", "뒤"]
+    assert replace_memo_block(lines, "a\nb", "c") == ["앞", "c", "뒤"]
+    assert replace_memo_block(lines, "a\nb", "x\ny\nz") == ["앞", "x", "y", "z", "뒤"]
+    assert replace_memo_block(lines, "a\nb", None) == ["앞", "뒤"]
+    assert replace_memo_block(lines, "a\n뒤", "c") is None  # 이어진 묶음이 아니면 건드리지 않는다
+    assert replace_memo_block([], "a", "b") is None
+    assert lines == ["앞", "a", "b", "뒤"]  # 받은 목록은 그대로 둔다

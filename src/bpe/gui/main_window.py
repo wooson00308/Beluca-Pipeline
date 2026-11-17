@@ -90,15 +90,13 @@ class MainWindow(QMainWindow):
             sb.addWidget(btn)
             self._tab_buttons[tab_def["key"]] = btn
 
-        # 시험판에서만: 잠금 없이 새 컨펌 창을 여는 버튼
-        from bpe.gui.confirm.launch import confirm_unlocked_build
-
-        if confirm_unlocked_build():
-            confirm_btn = QPushButton("Confirm (시험)")
-            confirm_btn.setProperty("selected", False)
-            confirm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            confirm_btn.clicked.connect(self._open_confirm_window)
-            sb.addWidget(confirm_btn)
+        # 컨펌 창을 여는 버튼 — 비밀번호를 맞히면 BPE 를 끌 때까지 다시 묻지 않는다
+        self._confirm_unlocked = False
+        confirm_btn = QPushButton("Confirm")
+        confirm_btn.setProperty("selected", False)
+        confirm_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        confirm_btn.clicked.connect(self._open_confirm_window)
+        sb.addWidget(confirm_btn)
 
         sb.addStretch()
 
@@ -415,7 +413,29 @@ Remove-Item -LiteralPath $Ps1Path -Force -ErrorAction SilentlyContinue
         if hasattr(self, "_toast"):
             self._toast.reposition()
 
+    def _ask_confirm_password(self) -> bool:
+        """기존 잠금 화면(LockOverlay)으로 비밀번호를 묻는다. 맞으면 True."""
+        from PySide6.QtWidgets import QDialog
+
+        from bpe.gui.widgets.lock_overlay import LockOverlay
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Confirm")
+        dlg.setMinimumSize(420, 320)
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(0, 0, 0, 0)
+        overlay = LockOverlay(dlg, title="Confirm", hint="비밀번호를 입력하세요.")
+        overlay.unlocked.connect(dlg.accept)
+        lay.addWidget(overlay)
+        ok = dlg.exec() == QDialog.DialogCode.Accepted
+        dlg.deleteLater()
+        return ok
+
     def _open_confirm_window(self) -> None:
+        if not self._confirm_unlocked:
+            if not self._ask_confirm_password():
+                return
+            self._confirm_unlocked = True
         try:
             from bpe.gui.confirm.launch import open_confirm_window
 

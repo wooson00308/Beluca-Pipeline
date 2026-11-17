@@ -5,7 +5,11 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from bpe.core.logging import get_logger
-from bpe.shotgrid.notes import list_notes_for_shots
+from bpe.shotgrid.notes import (
+    download_attachment_bytes,
+    get_attachments_for_notes,
+    list_notes_for_shots,
+)
 
 logger = get_logger("shotgrid.confirm_context")
 
@@ -59,6 +63,25 @@ def version_comments(
                 "content": text,
             }
         )
+    return out
+
+
+def note_images(sg: Any, note_ids: List[int], *, max_images: int = 40) -> Dict[int, List[bytes]]:
+    """노트에 붙은 그림들의 내용 → ``{노트 id: [그림 바이트…]}``.
+
+    *note_ids* 순서대로(보통 최근 노트부터) 전체 *max_images* 장까지만 내려받는다.
+    """
+    metas = get_attachments_for_notes(sg, note_ids)
+    out: Dict[int, List[bytes]] = {}
+    count = 0
+    for nid in note_ids:
+        for meta in metas.get(int(nid), []):
+            if count >= max_images:
+                return out
+            data = download_attachment_bytes(sg, meta)
+            if isinstance(data, bytes) and data:
+                out.setdefault(int(nid), []).append(data)
+                count += 1
     return out
 
 

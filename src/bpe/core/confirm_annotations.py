@@ -6,7 +6,8 @@
 from __future__ import annotations
 
 import copy
-from typing import Any, Dict, List, Optional, Tuple
+import math
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 KIND_RECT = "rect"
 KIND_ELLIPSE = "ellipse"
@@ -19,6 +20,7 @@ BOX_KINDS = (KIND_RECT, KIND_ELLIPSE)  # 두 점이 감싸는 네모로 정해�
 DEFAULT_COLOR = "#ff5a52"
 DEFAULT_WIDTH = 3
 DEFAULT_TEXT_SIZE = 0.03  # 영상 높이에 대한 비율
+TEXT_WRAP_WIDTH = 0.3  # 화면 글씨 한 줄의 폭(영상 폭에 대한 비율) — 넘치면 아래로 줄이 바뀐다
 
 Point = Tuple[float, float]
 Shape = Dict[str, Any]
@@ -54,6 +56,14 @@ def make_shape(
         "text_size": float(text_size),
         "in_memo": True,
     }
+
+
+def _text_extent_guess(shape: Shape) -> Tuple[float, float]:
+    """글씨 도형의 (폭, 높이) 어림 — 글자 수로 세고, 한 줄 폭을 넘는 글은 줄이 바뀐 것으로 친다."""
+    size = float(shape.get("text_size") or DEFAULT_TEXT_SIZE)
+    widths = [len(r) * size * 0.6 for r in str(shape.get("text") or "").split("\n")]
+    lines = sum(max(1, math.ceil(w / TEXT_WRAP_WIDTH)) for w in widths)
+    return (min(max(widths + [size * 0.6]), TEXT_WRAP_WIDTH), size * 1.4 * lines)
 
 
 def shape_bounds(shape: Shape) -> Tuple[float, float, float, float]:
@@ -102,15 +112,24 @@ class AnnotationDoc:
     def is_empty(self) -> bool:
         return not self._shapes
 
-    def hit_test(self, frame: int, x: float, y: float) -> Optional[int]:
-        """(x, y) 에 있는 도형 id — 나중에 그린 것 우선."""
+    def hit_test(
+        self,
+        frame: int,
+        x: float,
+        y: float,
+        text_extent: Optional[Callable[[Shape], Tuple[float, float]]] = None,
+    ) -> Optional[int]:
+        """(x, y) 에 있는 도형 id — 나중에 그린 것 우선.
+
+        *text_extent* 는 글씨 도형이 화면에서 차지하는 (폭, 높이)를 0~1 로 알려 주는 함수다
+        (그리는 쪽이 실제 글꼴로 잰 값 — 줄이 바뀐 글의 아랫줄도 잡힌다). 없으면 글자 수로 어림한다.
+        """
         for s in reversed(self.shapes_at(frame)):
             x0, y0, x1, y1 = shape_bounds(s)
             m = _HIT_MARGIN
             if s["kind"] == KIND_TEXT:
-                n = max(1, len(s.get("text") or ""))
-                x1 = x0 + n * s["text_size"] * 0.6
-                y1 = y0 + s["text_size"] * 1.4
+                w, h = text_extent(s) if text_extent is not None else _text_extent_guess(s)
+                x1, y1 = x0 + w, y0 + h
             if x0 - m <= x <= x1 + m and y0 - m <= y <= y1 + m:
                 return int(s["id"])
         return None
@@ -235,6 +254,21 @@ def memo_lines(doc: AnnotationDoc) -> List[Tuple[int, str, bool]]:
     return [
         (int(s["id"]), f"{frame_label(s)} {s['text'].strip()}", bool(s["in_memo"])) for s in rows
     ]
+
+
+def replace_memo_block(lines: List[str], old: str, new: Optional[str]) -> Optional[List[str]]:
+    """메모 줄들에서 *old*(여러 줄일 수 있음)와 똑같이 이어진 줄 묶음을 *new* 로 바꾼다.
+
+    *new* 가 ``None`` 이면 그 묶음을 뺀다. 묶음을 못 찾으면 ``None`` (사용자가 그 줄을 직접
+    고쳐 놓은 경우 — 부르는 쪽이 건드리지 않는다).
+    """
+    block = old.split("\n")
+    n = len(block)
+    for i in range(0, len(lines) - n + 1):
+        if lines[i : i + n] == block:
+            fresh = [] if new is None else new.split("\n")
+            return lines[:i] + fresh + lines[i + n :]
+    return None
 
 
 def compose_note_body(doc: AnnotationDoc, extra_text: str = "") -> str:

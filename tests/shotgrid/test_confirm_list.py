@@ -137,3 +137,22 @@ def test_version_lookup_failure_still_returns_list(monkeypatch: pytest.MonkeyPat
     sg = MockShotgun()
     sg._add_entity("Task", _bare_task(1, "S_0010"))
     assert len(list_confirm_tasks(sg, 1)) == 1
+
+
+def test_annotation_list_takes_any_task_in_wtg_or_assign() -> None:
+    from bpe.shotgrid.confirm_list import list_annotation_shots
+
+    sg = MockShotgun()
+    for tid, shot_id, shot, content, status in (
+        (1, 10, "S_0010", "comp", "wtg"),
+        (2, 10, "S_0010", "roto", "assign"),
+        (3, 20, "S_0020", "matte", "assign"),
+        (4, 30, "S_0030", "comp", "sv"),  # 컨펌 대기는 Annotation 목록에 안 나온다
+    ):
+        t = _bare_task(tid, shot, status)
+        t["content"] = content
+        t["entity"] = {"type": "Shot", "id": shot_id, "name": shot, "code": shot}
+        sg._add_entity("Task", t)
+    rows = list_annotation_shots(sg, 1)
+    assert [r["shot_code"] for r in rows] == ["S_0010", "S_0020"]
+    assert [t["task_content"] for t in rows[0]["tasks"]] == ["comp", "roto"]

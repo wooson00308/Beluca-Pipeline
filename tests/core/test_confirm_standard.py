@@ -127,3 +127,22 @@ def test_load_standard_reads_preset_and_template(tmp_app_dir: Path) -> None:
     (tmp_app_dir / "PROJ_001_template.nk").write_text(_TEMPLATE, encoding="utf-8")
     s = load_standard("PROJ_001")
     assert s is not None and s.mov_sizes == ((1920, 1080),) and s.fps == 23.976
+
+
+def test_lut_path_is_read_from_the_template_lut_node() -> None:
+    from bpe.core.confirm_standard import lut_path_from_template
+
+    vf = (
+        "Read {\n file W:/plate/a.mov\n name Read1\n}\n"
+        "Vectorfield {\n vfield_file //srv/lut/ARRI_LogC3-to-Rec709.cube\n"
+        " file_type cube\n colorspaceIn rec709\n name VIEWER_INPUT\n}\n"
+    )
+    assert lut_path_from_template(vf) == "//srv/lut/ARRI_LogC3-to-Rec709.cube"
+    ocio = 'OCIOFileTransform {\n file "W:/ref/my lut/Slog3 to s709.cube"\n name O1\n}\n'
+    assert lut_path_from_template(ocio) == "W:/ref/my lut/Slog3 to s709.cube"
+    # 식이 든 경로·.cube 가 아닌 것·룩업 노드가 아닌 곳의 경로는 쓰지 않는다
+    expr = "Vectorfield {\n vfield_file [value root.lut].cube\n name V\n}\n"
+    assert lut_path_from_template(expr) == ""
+    assert lut_path_from_template("Read {\n file W:/x/y.cube\n name R\n}\n") == ""
+    assert lut_path_from_template("Vectorfield {\n vfield_file W:/x/y.3dl\n name V\n}\n") == ""
+    assert lut_path_from_template("") == ""

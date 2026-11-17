@@ -25,6 +25,44 @@ LUMA_709: RGB = (0.2126, 0.7152, 0.0722)
 
 _MIN_GAMMA = 1e-6
 
+# 영상에 저장된 값 ↔ 선형 빛. 누크가 MOV 를 읽을 때 쓰는 곡선과 같다.
+CURVE_REC709 = "rec709"
+CURVE_GAMMA22 = "gamma22"
+CURVES: Tuple[str, ...] = (CURVE_REC709, CURVE_GAMMA22)
+
+
+def curve_index(curve: str) -> int:
+    """셰이더 ``curve`` 유니폼 값 (0 Rec.709, 1 Gamma 2.2)."""
+    return 1 if curve == CURVE_GAMMA22 else 0
+
+
+def _to_linear_1(v: float, curve: str) -> float:
+    v = max(v, 0.0)
+    if curve == CURVE_GAMMA22:
+        return v**2.2
+    return v / 4.5 if v < 0.081 else ((v + 0.099) / 1.099) ** (1.0 / 0.45)
+
+
+def _from_linear_1(x: float, curve: str) -> float:
+    x = max(x, 0.0)
+    if curve == CURVE_GAMMA22:
+        return x ** (1.0 / 2.2)
+    return x * 4.5 if x < 0.018 else 1.099 * (x**0.45) - 0.099
+
+
+def to_linear(rgb: RGB, curve: str = CURVE_REC709) -> RGB:
+    """저장된 값 → 선형 빛."""
+    return (_to_linear_1(rgb[0], curve), _to_linear_1(rgb[1], curve), _to_linear_1(rgb[2], curve))
+
+
+def from_linear(rgb: RGB, curve: str = CURVE_REC709) -> RGB:
+    """선형 빛 → 저장된 값(화면에 내보내는 값)."""
+    return (
+        _from_linear_1(rgb[0], curve),
+        _from_linear_1(rgb[1], curve),
+        _from_linear_1(rgb[2], curve),
+    )
+
 
 def channel_index(channel: str) -> int:
     """셰이더 ``channel`` 유니폼 값 (0 RGB, 1 R, 2 G, 3 B, 4 밝기)."""
@@ -70,13 +108,26 @@ def view_pixel(
     gamma: float = 1.0,
     channel: str = CHANNEL_RGB,
     lut: Optional[Callable[[RGB], RGB]] = None,
+    lut_b: Optional[Callable[[RGB], RGB]] = None,
+    lut_post: Optional[Callable[[RGB], RGB]] = None,
+    curve: str = CURVE_REC709,
 ) -> RGB:
     """한 픽셀의 화면 값: 보기 판 고르기 → 게인 → 룩업 → 감마 → 채널.
 
-    차이 보기에서는 룩업을 씌우지 않는다(값 차이 그대로 본다).
+    차이 보기는 누크 뷰어와 같은 순서로 계산한다:
+    (판마다 색 상태를 맞춤: *lut* 는 A 판, *lut_b* 는 B 판에 먼저 씌우는 룩업)
+    → 선형 빛으로 바꿔 뺀다 → 게인 → 감마 → 다시 곡선을 입힌다 → 뷰어 룩업(*lut_post*).
+    두 판이 다 로그면 먼저 씌우는 룩업 없이 빼고 마지막에 뷰어 룩업만 씌운다(누크에서 룩업을
+    켠 채 Difference 를 보는 것과 같다 — 아주 작은 차이는 룩업의 검은 쪽에 묻혀 안 보인다).
     """
     if mode == VIEW_MODE_DIFF:
-        c = difference(a, b)
+        la = to_linear(lut(a) if lut is not None else a, curve)
+        lb = to_linear(lut_b(b) if lut_b is not None else b, curve)
+        d = apply_gain_gamma(difference(la, lb), gain, gamma)
+        out = from_linear(d, curve)
+        if lut_post is not None:
+            out = lut_post(out)
+        return select_channel(out, channel)
     elif mode == VIEW_MODE_B:
         c = b
     else:

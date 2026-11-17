@@ -76,3 +76,24 @@ def test_history_survives_a_failed_version_lookup(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(cc, "version_comments", _boom)
     rows = list_shot_history(_sg(), 101, task_id=1)
     assert [r["kind"] for r in rows] == ["note"]
+
+
+def test_note_images_are_found_per_note_and_capped(monkeypatch: Any) -> None:
+    import bpe.shotgrid.confirm_context as cc
+
+    metas = {
+        11: [{"att_id": 1, "filename": "a.png", "url": "u1"}],
+        12: [
+            {"att_id": 2, "filename": "b.png", "url": "u2"},
+            {"att_id": 3, "filename": "c.png", "url": ""},
+        ],
+    }
+    monkeypatch.setattr(cc, "get_attachments_for_notes", lambda _sg, ids: metas)
+    monkeypatch.setattr(
+        cc,
+        "download_attachment_bytes",
+        lambda _sg, m: None if m["att_id"] == 3 else b"IMG%d" % m["att_id"],
+    )
+    got = cc.note_images(object(), [12, 11, 99])
+    assert got == {12: [b"IMG2"], 11: [b"IMG1"]}  # 못 받은 그림은 빠지고, 그림 없는 노트는 없다
+    assert cc.note_images(object(), [12, 11], max_images=1) == {12: [b"IMG2"]}

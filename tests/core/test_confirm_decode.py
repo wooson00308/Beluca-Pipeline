@@ -63,7 +63,9 @@ def test_build_decode_command_size_start_count_alpha() -> None:
         "ffmpeg", "a.mov", width=960, height=540, start_index=40, frame_count=1, alpha=True
     )
     vf = cmd[cmd.index("-vf") + 1]
-    assert vf == "select=gte(n\\,40),scale=960:540:in_color_matrix=bt709"
+    assert vf == (
+        "select=gte(n\\,40),scale=960:540:flags=bicubic:param0=0:param1=0:in_color_matrix=bt709"
+    )
     assert cmd[cmd.index("-frames:v") + 1] == "1"
     assert cmd[cmd.index("-pix_fmt") + 1] == "rgba64le"
 
@@ -123,3 +125,56 @@ def test_real_ffmpeg_start_index_is_frame_accurate(tmp_path: Path) -> None:
     ).stdout
     got = list(read_exact_frames(io.BytesIO(part), size))
     assert got == frames[3:7]
+
+
+def test_linear_resample_splits_linearize_scale_and_back() -> None:
+    from bpe.core.confirm_decode import RESAMPLE_LINEAR_22, RESAMPLE_LINEAR_709
+
+    cmd = build_decode_command(
+        "ffmpeg", "a.mov", width=1920, height=1080, resample=RESAMPLE_LINEAR_709
+    )
+    steps = cmd[cmd.index("-vf") + 1].split(",")
+    assert steps[0].startswith("scale=iw:ih:in_color_matrix=bt709")  # 먼저 원래 크기로 RGB 로 푼다
+    assert steps[1] == "format=gbrpf32le"
+    assert steps[2].startswith("zscale=transferin=709:transfer=linear")
+    assert steps[3] == "zscale=w=1920:h=1080:filter=bicubic:param_a=0:param_b=0"  # 누크 Cubic
+    assert steps[4].startswith("zscale=transferin=linear:transfer=709")
+    gamma = build_decode_command(
+        "ffmpeg", "a.mov", width=1920, height=1080, resample=RESAMPLE_LINEAR_22
+    )
+    assert "transferin=bt470m:transfer=linear" in gamma[gamma.index("-vf") + 1]
+    # 크기를 안 바꾸면 줄이는 방법과 상관없이 그대로 푼다
+    same = build_decode_command("ffmpeg", "a.mov", resample=RESAMPLE_LINEAR_709)
+    assert same[same.index("-vf") + 1] == "scale=iw:ih:in_color_matrix=bt709"
+
+
+def test_ffmpeg_has_filter_reads_the_filter_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    import bpe.core.confirm_decode as cd
+
+    class _Done:
+        stdout = b"Filters:\n .S zscale            V->V       Apply resizing\n .. scale  V->V  x\n"
+
+    cd.ffmpeg_has_filter.cache_clear()
+    monkeypatch.setattr(cd.subprocess, "run", lambda *a, **k: _Done())
+    assert cd.ffmpeg_has_filter("ffmpeg-a", "zscale") and cd.ffmpeg_has_filter("ffmpeg-a", "scale")
+    assert not cd.ffmpeg_has_filter("ffmpeg-a", "lut3d")
+
+    def _boom(*_a: object, **_k: object) -> object:
+        raise OSError("no ffmpeg")
+
+    monkeypatch.setattr(cd.subprocess, "run", _boom)
+    assert not cd.ffmpeg_has_filter("ffmpeg-b", "zscale")
+    cd.ffmpeg_has_filter.cache_clear()
+
+
+def test_still_command_picks_one_frame_and_escapes_the_lut_path() -> None:
+    from bpe.core.confirm_decode import build_still_command, lut3d_filter
+
+    cmd = build_still_command("ffmpeg", "a.mov", 12, max_edge=960)
+    vf = cmd[cmd.index("-vf") + 1]
+    assert "select=eq(n\\,12)" in vf and "min(iw,960)" in vf and "lut3d" not in vf
+    assert cmd[cmd.index("-frames:v") + 1] == "1" and cmd[-1] == "-" and "png" in cmd
+    with_lut = build_still_command("ffmpeg", "a.mov", 0, lut_file="W:\\lut\\a b.cube")
+    vf = with_lut[with_lut.index("-vf") + 1]
+    assert vf.endswith("lut3d=file='W\\:/lut/a b.cube':interp=trilinear")
+    assert lut3d_filter("C:/x.cube") == "lut3d=file='C\\:/x.cube':interp=trilinear"

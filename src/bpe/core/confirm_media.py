@@ -54,6 +54,19 @@ def is_lut_baked(name: str) -> bool:
     return bool(_LUT_RE.search(Path(name).stem))
 
 
+def twin_version_key(code: str) -> str:
+    """같은 판의 쌍둥이(``_v003`` 과 ``_v003_lut``)를 한 묶음으로 보는 이름 — ``_lut`` 를 뗀 소문자.
+
+    확장자가 붙어 온 이름(``…_v003.mov``)은 확장자도 뗀다.
+    """
+    name = (code or "").strip()
+    for ext in (".mov", ".mp4", ".mxf", ".m4v"):
+        if name.lower().endswith(ext):
+            name = name[: -len(ext)]
+            break
+    return _LUT_RE.sub("", name).lower()
+
+
 def shot_root_from_movie(movie: Path) -> Optional[Path]:
     """작업본 경로에서 샷 폴더를 찾는다.
 
@@ -130,6 +143,18 @@ def _task_videos(base: Path) -> List[Tuple[Path, Optional[int]]]:
     return out
 
 
+def usual_shot_root(server_root: str, project_folder: str, shot_code: str) -> Optional[Path]:
+    """샷 폴더가 늘 있는 자리(``<서버>/<프로젝트>/04_sq/<ep>/<샷>``). 그 자리에 없으면 ``None``."""
+    code = (shot_code or "").strip()
+    if not server_root or not project_folder or "_" not in code:
+        return None
+    root = Path(server_root) / project_folder / "04_sq" / code.split("_")[0] / code
+    try:
+        return root if root.is_dir() else None
+    except OSError:
+        return None
+
+
 def quick_version_movie(
     server_root: str,
     project_folder: str,
@@ -143,15 +168,9 @@ def quick_version_movie(
     서버 전체를 훑는 찾기는 몇 초가 걸려서, 먼저 이 지름길을 써 본다. 폴더가 그 자리에
     없거나 버전 이름과 같은 영상이 없으면 ``None`` — 그때는 넓게 찾는 쪽으로 넘어간다.
     """
-    code = (shot_code or "").strip()
     want = (version_code or "").strip().lower()
-    if not server_root or not project_folder or not want or "_" not in code:
-        return None
-    root = Path(server_root) / project_folder / "04_sq" / code.split("_")[0] / code
-    try:
-        if not root.is_dir():
-            return None
-    except OSError:
+    root = usual_shot_root(server_root, project_folder, shot_code) if want else None
+    if root is None:
         return None
     seen: List[str] = []
     for task in task_dirs:
@@ -210,6 +229,30 @@ def find_edit(shot_root: Path) -> Optional[Path]:
     return _latest_in_versioned(shot_root / "edit", ("",))
 
 
+def shot_root_from_plate(plate: Path) -> Optional[Path]:
+    """원본 영상 경로에서 샷 폴더를 찾는다 — ``plate`` 폴더의 부모."""
+    parts = plate.parts
+    for i in range(len(parts) - 1, 0, -1):
+        if parts[i].lower() == "plate":
+            return Path(*parts[:i])
+    return None
+
+
+def find_plate_media(plate: Path, shot_root: Optional[Path] = None) -> ShotMedia:
+    """작업본이 아직 없는 샷(Annotation) — 원본을 「지금 보는 판」 자리에 놓고 편집본만 찾는다."""
+    root = shot_root or shot_root_from_plate(plate)
+    version = parse_version(plate.name)
+    if version is None:
+        for part in reversed(plate.parts[:-1]):
+            m = _VERSION_DIR_RE.match(part)
+            if m:
+                version = int(m.group(1))
+                break
+    current = VersionMovie(version or 0, plate, False)
+    edit = find_edit(root) if root is not None else None
+    return ShotMedia(root, current, None, [current], None, edit)
+
+
 def find_shot_media(current_movie: Path, shot_root: Optional[Path] = None) -> ShotMedia:
     """지금 보는 작업본에서 출발해 같은 샷의 재료를 모은다."""
     root = shot_root or shot_root_from_movie(current_movie)
@@ -229,3 +272,19 @@ def find_shot_media(current_movie: Path, shot_root: Optional[Path] = None) -> Sh
     older = [v for v in versions if v.version < current.version]
     previous = older[-1] if older else None
     return ShotMedia(root, current, previous, versions, find_org(root), find_edit(root))
+
+
+def reference_sources(shot_root: Path) -> List[Tuple[str, Path]]:
+    """다른 샷을 참고 그림으로 쓸 때 고를 수 있는 영상들 — (이름, 파일). 최신 작업본이 맨 앞."""
+    out: List[Tuple[str, Path]] = []
+    for task in _TASK_DIRS:
+        versions = find_versions(shot_root, task)
+        if versions:
+            out.append((f"{task} {versions[-1].label}", versions[-1].path))
+    org = find_org(shot_root)
+    if org is not None:
+        out.append(("ORG plate", org))
+    edit = find_edit(shot_root)
+    if edit is not None:
+        out.append(("edit", edit))
+    return out

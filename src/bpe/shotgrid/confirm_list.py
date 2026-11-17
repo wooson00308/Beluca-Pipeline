@@ -9,12 +9,13 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence
 
+from bpe.core.confirm_list import ANNOTATION_STATUSES, LIST_STATUSES, group_rows_by_shot
 from bpe.core.logging import get_logger
 from bpe.shotgrid.tasks import list_review_tasks_for_project
 
 logger = get_logger("shotgrid.confirm_list")
 
-DEFAULT_STATUSES = ("sv", "tm")
+DEFAULT_STATUSES = LIST_STATUSES  # sv · tm · cgi
 _CHUNK = 100
 _VERSION_FIELDS = [
     "id",
@@ -100,6 +101,27 @@ def _apply_version(row: Dict[str, Any], v: Dict[str, Any]) -> None:
     row["uploader_type"] = str(user.get("type") or "")
     row["uploader_name"] = str(user.get("name") or maker.get("name") or "").strip()
     row["version_uploader_name"] = row["uploader_name"]
+
+
+def list_annotation_shots(
+    sg: Any,
+    project_id: int,
+    *,
+    statuses: Optional[Sequence[str]] = None,
+    limit: int = 3000,
+) -> List[Dict[str, Any]]:
+    """Annotation 모드 목록 — 어느 태스크든 상태가 wtg·assign 인 샷을 샷마다 한 줄로.
+
+    아직 작업본이 없는 샷들이라 버전은 찾지 않는다.
+    """
+    rows = list_review_tasks_for_project(
+        sg,
+        int(project_id),
+        statuses=list(statuses or ANNOTATION_STATUSES),
+        task_content="",
+        limit=limit,
+    )
+    return group_rows_by_shot(rows)
 
 
 def list_confirm_tasks(

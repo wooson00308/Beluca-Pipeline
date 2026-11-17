@@ -23,7 +23,14 @@ from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import QWidget
 
 from bpe.core.confirm_decode import frame_byte_size
-from bpe.core.confirm_view_math import CHANNEL_RGB, VIEW_MODE_A, channel_index, fit_rect
+from bpe.core.confirm_view_math import (
+    CHANNEL_RGB,
+    CURVE_REC709,
+    VIEW_MODE_A,
+    channel_index,
+    curve_index,
+    fit_rect,
+)
 from bpe.core.logging import get_logger
 from bpe.core.lut_cube import CubeLut, identity_lut
 
@@ -62,19 +69,48 @@ uniform float gamma;
 uniform int mode;
 uniform int channel;
 uniform int lutOn;
+uniform int lutBOn;
+uniform int lutPost;
+uniform int curve;
 uniform float lutSize;
 uniform vec3 lutMin;
 uniform vec3 lutMax;
+vec3 look(vec3 c) {
+    vec3 t = clamp((c - lutMin) / max(lutMax - lutMin, vec3(0.000001)), 0.0, 1.0);
+    return texture(lutTex, t * ((lutSize - 1.0) / lutSize) + 0.5 / lutSize).rgb;
+}
+vec3 toLinear(vec3 v) {
+    v = max(v, vec3(0.0));
+    if (curve == 1) return pow(v, vec3(2.2));
+    vec3 lo = v / 4.5;
+    vec3 hi = pow((v + 0.099) / 1.099, vec3(1.0 / 0.45));
+    return mix(lo, hi, step(vec3(0.081), v));
+}
+vec3 fromLinear(vec3 x) {
+    x = max(x, vec3(0.0));
+    if (curve == 1) return pow(x, vec3(1.0 / 2.2));
+    vec3 lo = x * 4.5;
+    vec3 hi = 1.099 * pow(x, vec3(0.45)) - 0.099;
+    return mix(lo, hi, step(vec3(0.018), x));
+}
 void main() {
     vec3 a = texture(texA, uv).rgb;
     vec3 b = texture(texB, uv).rgb;
-    vec3 c = mode == 1 ? abs(a - b) : (mode == 2 ? b : a);
-    c = c * gain;
-    if (lutOn == 1 && mode != 1) {
-        vec3 t = clamp((c - lutMin) / max(lutMax - lutMin, vec3(0.000001)), 0.0, 1.0);
-        c = texture(lutTex, t * ((lutSize - 1.0) / lutSize) + 0.5 / lutSize).rgb;
+    vec3 c;
+    if (mode == 1) {
+        // 차이 보기 — 누크 뷰어와 같은 순서:
+        // (판마다 색 상태 맞춤) → 선형으로 바꿔 뺌 → 게인 → 감마 → 곡선 → 뷰어 룩업
+        vec3 la = toLinear(lutOn == 1 ? look(a) : a);
+        vec3 lb = toLinear(lutBOn == 1 ? look(b) : b);
+        c = abs(la - lb) * gain;
+        c = pow(max(c, vec3(0.0)), vec3(1.0 / max(gamma, 0.000001)));
+        c = fromLinear(c);
+        if (lutPost == 1) c = look(c);
+    } else {
+        c = (mode == 2 ? b : a) * gain;
+        if (lutOn == 1) c = look(c);
+        c = pow(max(c, vec3(0.0)), vec3(1.0 / max(gamma, 0.000001)));
     }
-    c = pow(max(c, vec3(0.0)), vec3(1.0 / max(gamma, 0.000001)));
     if (channel == 1) c = c.rrr;
     else if (channel == 2) c = c.ggg;
     else if (channel == 3) c = c.bbb;
@@ -197,6 +233,9 @@ class ViewRenderer:
         mode: int,
         channel: str,
         lut_on: bool = False,
+        lut_b_on: bool = False,
+        lut_post: bool = False,
+        curve: str = CURVE_REC709,
     ) -> None:
         prog, vao = self._prog, self._vao
         tex_a = self._tex.get(SLOT_A)
@@ -217,6 +256,9 @@ class ViewRenderer:
         prog.setUniformValue1i(loc("mode"), int(mode))
         prog.setUniformValue1i(loc("channel"), channel_index(channel))
         prog.setUniformValue1i(loc("lutOn"), 1 if lut_on else 0)
+        prog.setUniformValue1i(loc("lutBOn"), 1 if lut_b_on else 0)
+        prog.setUniformValue1i(loc("lutPost"), 1 if lut_post else 0)
+        prog.setUniformValue1i(loc("curve"), curve_index(curve))
         prog.setUniformValue1f(loc("lutSize"), float(self._lut.size))
         lo, hi = self._lut.domain_min, self._lut.domain_max
         prog.setUniformValue(loc("lutMin"), float(lo[0]), float(lo[1]), float(lo[2]))
@@ -236,7 +278,9 @@ class ViewRenderer:
         if self._vao is not None:
             self._vao.destroy()
             self._vao = None
-        self._prog = None
+        prog, self._prog = self._prog, None
+        if prog is not None:
+            prog.removeAllShaders()
 
 
 class ConfirmGLView(QOpenGLWidget):
@@ -260,7 +304,11 @@ class ConfirmGLView(QOpenGLWidget):
         self._mode = VIEW_MODE_A
         self._channel = CHANNEL_RGB
         self._lut_on = False
+        self._lut_b_on = False
+        self._lut_post = False
+        self._curve = CURVE_REC709
         self._gl_ok = False
+        self._blank = False  # 그림을 비운 상태(다음 그림이 올 때까지)
         self._img_size: Optional[Tuple[int, int]] = None
         self._zoom = 1.0
         self._pan = QPointF(0.0, 0.0)
@@ -276,9 +324,17 @@ class ConfirmGLView(QOpenGLWidget):
     def set_image(self, slot: int, data: Any, width: int, height: int) -> None:
         """다음 그리기 때 올릴 그림을 맡긴다(업로드는 paintGL 안에서)."""
         self._pending[slot] = (data, width, height)
+        if slot == SLOT_A:
+            self._blank = False
         if slot == SLOT_A and self._img_size != (width, height):
             self._img_size = (width, height)
             self.view_changed.emit()
+        self.update()
+
+    def clear_images(self) -> None:
+        """그림을 비운다 — 다음 그림이 올 때까지 빈 화면."""
+        self._pending.clear()
+        self._blank = True
         self.update()
 
     def set_lut(self, lut: Optional[CubeLut]) -> None:
@@ -293,6 +349,9 @@ class ConfirmGLView(QOpenGLWidget):
         mode: Optional[int] = None,
         channel: Optional[str] = None,
         lut_on: Optional[bool] = None,
+        lut_b_on: Optional[bool] = None,
+        lut_post: Optional[bool] = None,
+        curve: Optional[str] = None,
     ) -> None:
         if gain is not None:
             self._gain = gain
@@ -304,6 +363,12 @@ class ConfirmGLView(QOpenGLWidget):
             self._channel = channel
         if lut_on is not None:
             self._lut_on = lut_on
+        if lut_b_on is not None:
+            self._lut_b_on = lut_b_on
+        if lut_post is not None:
+            self._lut_post = lut_post
+        if curve is not None:
+            self._curve = curve
         self.update()
 
     # ── 확대·끌기 ────────────────────────────────────────────────
@@ -459,7 +524,7 @@ class ConfirmGLView(QOpenGLWidget):
         f.glViewport(0, 0, full_w, full_h)
         f.glClearColor(0.078, 0.078, 0.078, 1.0)
         f.glClear(GL_COLOR_BUFFER_BIT)
-        if not self._gl_ok:
+        if not self._gl_ok or self._blank:
             return
         if self._pending_lut is not None:
             self._renderer.set_lut(self._pending_lut[0])
@@ -482,6 +547,9 @@ class ConfirmGLView(QOpenGLWidget):
             mode=self._mode,
             channel=self._channel,
             lut_on=self._lut_on,
+            lut_b_on=self._lut_b_on,
+            lut_post=self._lut_post,
+            curve=self._curve,
         )
 
     def render_frame_image(
@@ -518,7 +586,25 @@ class ConfirmGLView(QOpenGLWidget):
             self.update()
 
     def _release_gl(self) -> None:
-        self.makeCurrent()
-        self._renderer.destroy()
-        self.doneCurrent()
+        self.release_gl()
+
+    def release_gl(self) -> None:
+        """셰이더·텍스처를 그래픽 연결이 살아 있는 동안 지운다 — 창을 닫을 때 부른다.
+
+        이 물건들이 남아 있다가 나중에 파이썬 뒷정리(GC)에서 지워지면, 이미 사라진 그래픽
+        연결을 건드려 프로그램이 죽는다. 여러 번 불러도 된다.
+        """
+        if not self._renderer.ready:
+            self._gl_ok = False
+            return
         self._gl_ok = False
+        self._pending.clear()
+        self._pending_lut = None
+        ctx = self.context()
+        if ctx is None or not ctx.isValid():
+            return
+        self.makeCurrent()
+        try:
+            self._renderer.destroy()
+        finally:
+            self.doneCurrent()

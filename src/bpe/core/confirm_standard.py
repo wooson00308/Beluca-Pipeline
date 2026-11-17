@@ -59,6 +59,7 @@ class ProjectStandard(NamedTuple):
     look: str
     color_tags: Tuple[str, ...]
     viewer: str
+    lut_path: str = ""  # 프리셋 누크 틀의 룩업 노드가 읽는 .cube (없으면 빈 글)
 
     @property
     def codec_title(self) -> str:
@@ -228,6 +229,25 @@ def mov_size_from_template(text: str) -> Optional[Tuple[int, int]]:
     return sizes[0] if sizes else None
 
 
+_LUT_NODE = re.compile(r"^(Vectorfield|OCIOFileTransform) \{\n(.*?)^\}", re.M | re.S)
+_LUT_FILE_KNOB = re.compile(
+    r'^\s*(?:vfield_file|file)\s+(?:"([^"\n]+)"|\{([^}\n]+)\}|(\S+))\s*$', re.M
+)
+
+
+def lut_path_from_template(text: str) -> str:
+    """프리셋 누크 틀의 룩업 노드(Vectorfield·OCIOFileTransform)가 읽는 ``.cube`` 경로.
+
+    여러 개면 틀에 먼저 나오는 것. 식(``[...]``·``$``)이 든 경로와 .cube 가 아닌 것은 건너뛴다.
+    """
+    for node in _LUT_NODE.finditer(text or ""):
+        for m in _LUT_FILE_KNOB.finditer(node.group(2)):
+            path = (m.group(1) or m.group(2) or m.group(3) or "").strip()
+            if path.lower().endswith(".cube") and "[" not in path and "$" not in path:
+                return path
+    return ""
+
+
 def _color_tags_for_view(view: str) -> Tuple[str, ...]:
     """뷰 이름으로 미루어, MOV 파일의 색 표시(color_space)로 받아들일 값들."""
     low = view.lower()
@@ -252,6 +272,7 @@ def build_standard(name: str, preset: Dict[str, Any], template_text: str = "") -
         look=look,
         color_tags=_color_tags_for_view(view),
         viewer=str(preset.get("viewer_process") or "").strip(),
+        lut_path=lut_path_from_template(template_text) if template_text else "",
     )
 
 

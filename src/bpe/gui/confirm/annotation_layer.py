@@ -12,16 +12,20 @@ from typing import Any, List, Optional, Tuple
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
     QColor,
+    QFocusEvent,
     QFont,
     QFontMetricsF,
+    QKeyEvent,
     QMouseEvent,
     QPainter,
     QPainterPath,
     QPaintEvent,
     QPen,
     QPolygonF,
+    QTextLayout,
+    QTextOption,
 )
-from PySide6.QtWidgets import QLineEdit, QWidget
+from PySide6.QtWidgets import QPlainTextEdit, QWidget
 
 from bpe.core.confirm_annotations import (
     BOX_KINDS,
@@ -33,6 +37,7 @@ from bpe.core.confirm_annotations import (
     KIND_PEN,
     KIND_RECT,
     KIND_TEXT,
+    TEXT_WRAP_WIDTH,
     AnnotationDoc,
     Shape,
     make_shape,
@@ -52,6 +57,9 @@ TOOLS = (TOOL_SELECT, TOOL_RECT, TOOL_ELLIPSE, TOOL_PEN, TOOL_ARROW, TOOL_TEXT)
 
 _MIN_DRAG = 0.008
 _PEN_STEP = 0.003
+_WRAP_REF_H = 1080.0  # 글씨 줄 나눔을 계산하는 기준 그림 높이
+_EDIT_PAD_W = 14  # 글 칸의 테두리·안쪽 여백(좌우 합) — 글이 놓이는 폭은 칸 폭에서 이만큼 뺀 것
+_EDIT_MIN_W = 120.0
 _GHOST_COLOR = "#f0c060"
 Rect = Tuple[float, float, float, float]
 
@@ -141,17 +149,99 @@ def text_origin(shape: Shape, rect: Rect) -> QPointF:
     return pt
 
 
-def _paint_text(p: QPainter, shape: Shape, rect: Rect, text: str, color: QColor) -> None:
-    font = text_font(shape, rect)
-    p.setFont(font)
-    fm = QFontMetricsF(font)
+def _ref_font(shape: Shape) -> QFont:
+    """줄 나눔을 계산할 때 쓰는 글꼴 — 높이 1080 짜리 그림에 놓였을 때의 크기."""
+    f = QFont()
+    f.setBold(True)
+    size = float(shape.get("text_size") or DEFAULT_TEXT_SIZE)
+    f.setPixelSize(max(11, int(round(size * _WRAP_REF_H))))
+    return f
+
+
+def _wrap(text: str, font: QFont, width: float) -> List[str]:
+    """글을 *width*(화소) 안에 들어가게 줄로 나눈다 — 낱말 사이에서, 긴 낱말은 글자 사이에서."""
+    rows: List[str] = []
+    option = QTextOption()
+    option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+    for para in text.split("\n"):
+        if not para:
+            rows.append("")
+            continue
+        layout = QTextLayout(para, font)
+        layout.setTextOption(option)
+        layout.beginLayout()
+        while True:
+            line = layout.createLine()
+            if not line.isValid():
+                break
+            line.setLineWidth(max(1.0, width))
+            start = line.textStart()
+            rows.append(para[start : start + line.textLength()].rstrip())
+        layout.endLayout()
+    return rows or [""]
+
+
+def _wrap_ref_width(rect: Rect) -> float:
+    """한 줄 폭(기준 크기의 화소) — 영상 폭의 ``TEXT_WRAP_WIDTH``."""
+    aspect = rect[2] / rect[3] if rect[2] > 0 and rect[3] > 0 else 16.0 / 9.0
+    return TEXT_WRAP_WIDTH * _WRAP_REF_H * aspect
+
+
+def wrap_rows(shape: Shape, rect: Rect, text: str) -> List[str]:
+    """화면 글씨의 줄들. 한 줄 폭은 영상 폭의 30% 로 고정이고 넘치면 아래로 줄이 바뀐다.
+
+    줄 나눔은 늘 같은 기준 크기에서 계산한다 — 그래서 창 크기·확대와 상관없이, 그리고
+    Note 에 붙는 그림에서도 같은 자리에서 줄이 바뀐다.
+    """
+    return _wrap(text, _ref_font(shape), _wrap_ref_width(rect))
+
+
+def text_box(shape: Shape, rect: Rect, text: str) -> Tuple[List[str], QRectF]:
+    """글씨의 줄들과, 그 글이 화면에서 차지하는 네모(검은 바탕 포함)."""
+    fm = QFontMetricsF(text_font(shape, rect))
     origin = text_origin(shape, rect)
-    box = QRectF(origin.x(), origin.y(), fm.horizontalAdvance(text) + 14, fm.height() + 6)
+    rows = wrap_rows(shape, rect, text)
+    wide = max(fm.horizontalAdvance(r) for r in rows)
+    tall = fm.height() + fm.lineSpacing() * (len(rows) - 1)
+    return rows, QRectF(origin.x(), origin.y(), wide + 14, tall + 6)
+
+
+def _paint_text(p: QPainter, shape: Shape, rect: Rect, text: str, color: QColor) -> None:
+    p.setFont(text_font(shape, rect))
+    rows, box = text_box(shape, rect, text)
     p.setPen(Qt.PenStyle.NoPen)
     p.setBrush(QColor(0, 0, 0, 190))
     p.drawRect(box)
     p.setPen(color)
-    p.drawText(box.adjusted(7, 3, -7, -3), Qt.AlignmentFlag.AlignVCenter, text)
+    flags = Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
+    p.drawText(box.adjusted(7, 3, -7, -3), flags, "\n".join(rows))
+
+
+class _TextEdit(QPlainTextEdit):
+    """화면 글씨 칸 — Enter 는 확정, Shift+Enter·Alt+Enter 는 줄 바꿈, Esc 는 버리기."""
+
+    committed = Signal()
+    cancelled = Signal()
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
+        key = event.key()
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            newline = Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.AltModifier
+            if event.modifiers() & newline:
+                self.insertPlainText("\n")
+            else:
+                self.committed.emit()
+            event.accept()
+            return
+        if key == Qt.Key.Key_Escape:
+            self.cancelled.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def focusOutEvent(self, event: QFocusEvent) -> None:  # noqa: N802
+        super().focusOutEvent(event)
+        self.committed.emit()
 
 
 class AnnotationLayer(QWidget):
@@ -176,11 +266,19 @@ class AnnotationLayer(QWidget):
         self._editing_new = False
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setMouseTracking(True)
-        self._edit = QLineEdit(self)
-        self._edit.setPlaceholderText("지적 내용을 쓰고 Enter")
+        self._edit = _TextEdit(self)
+        self._edit.setPlaceholderText("피드백을 쓰고 Enter · 줄 바꿈은 Shift+Enter")
+        # 칸 폭은 고정이고(영상 폭의 30%) 넘치는 글은 아래로 줄이 바뀐다 — 옆으로 커지지 않는다
+        self._edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self._edit.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        self._edit.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._edit.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._edit.setTabChangesFocus(True)
+        self._edit.document().setDocumentMargin(3)
         self._edit.hide()
-        self._edit.returnPressed.connect(self._commit_edit)
-        self._edit.editingFinished.connect(self._commit_edit)
+        self._edit.committed.connect(self._commit_edit)
+        self._edit.cancelled.connect(self.cancel_text_edit)
+        self._edit.textChanged.connect(self._place_edit)
         view.view_changed.connect(self._on_view_changed)
         self.setGeometry(view.rect())
 
@@ -275,6 +373,15 @@ class AnnotationLayer(QWidget):
             return (min(1.0, max(0.0, x)), min(1.0, max(0.0, y)))
         return (x, y) if 0.0 <= x <= 1.0 and 0.0 <= y <= 1.0 else None
 
+    def _text_extent(self, shape: Shape) -> Tuple[float, float]:
+        """글씨 도형이 화면에서 차지하는 (폭, 높이)를 영상 기준 0~1 로 — 눌러서 고를 범위."""
+        rect = self._rect()
+        text = (shape.get("text") or "").strip()
+        if rect is None or rect[2] <= 0 or rect[3] <= 0 or not text:
+            return (0.0, 0.0)
+        _rows, box = text_box(shape, rect, text)
+        return (box.width() / rect[2], box.height() / rect[3])
+
     def _on_view_changed(self) -> None:
         self.setGeometry(self._view.rect())
         self._place_edit()
@@ -322,7 +429,7 @@ class AnnotationLayer(QWidget):
             event.ignore()
             return
         if self._tool == TOOL_SELECT:
-            hit = self._doc.hit_test(self._frame, n[0], n[1])
+            hit = self._doc.hit_test(self._frame, n[0], n[1], self._text_extent)
             if hit != self._selected:
                 self._selected = hit
                 self.selection_changed.emit()
@@ -385,17 +492,21 @@ class AnnotationLayer(QWidget):
         new_id = self._doc.add(draft)
         self._selected = new_id
         self.selection_changed.emit()
-        self._changed()
-        if draft["kind"] in BOX_KINDS or draft["kind"] == KIND_ARROW:
-            self._begin_edit(new_id, is_new=False)
+        self._changed()  # 도형은 그리면 끝 — 글은 글씨 도구(T)로 따로 쓴다
         event.accept()
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         n = self._norm(event.position(), clamp=False)
-        hit = self._doc.hit_test(self._frame, n[0], n[1]) if n else None
+        hit = self._doc.hit_test(self._frame, n[0], n[1], self._text_extent) if n else None
         if hit is not None:
             self._selected = hit
-            self._begin_edit(hit, is_new=False)
+            s = self._doc.get(hit)
+            # 글씨, 그리고 예전에 글을 달아 둔 도형만 글을 고친다(글 없는 도형은 고르기만)
+            if s is not None and (s["kind"] == KIND_TEXT or (s.get("text") or "").strip()):
+                self._begin_edit(hit, is_new=False)
+            else:
+                self.selection_changed.emit()
+                self.update()
             event.accept()
             return
         event.ignore()
@@ -412,7 +523,7 @@ class AnnotationLayer(QWidget):
         self._editing_id = shape_id
         self._editing_new = is_new
         self._edit.blockSignals(True)
-        self._edit.setText(s.get("text") or "")
+        self._edit.setPlainText(s.get("text") or "")
         self._edit.blockSignals(False)
         self._place_edit()
         self._edit.show()
@@ -427,23 +538,36 @@ class AnnotationLayer(QWidget):
             return
         font = text_font(s, rect)
         self._edit.setFont(font)
-        origin = text_origin(s, rect)
-        w, h = 320, QFontMetricsF(font).height() + 10
-        x = max(4.0, min(self.width() - w - 4.0, origin.x()))
-        y = max(4.0, min(self.height() - h - 4.0, origin.y()))
-        self._edit.setGeometry(int(x), int(y), int(w), int(h))
+        # 글 칸의 글씨도 확정된 글과 같은 크기·굵기로 — 그래야 칸 안에서 줄이 바뀌는 자리가
+        # 확정 뒤와 같다(스타일시트의 글씨 크기가 setFont 를 덮으므로 여기에도 적는다)
         self._edit.setStyleSheet(
             f"background: {style.FIELD}; color: {s.get('color') or DEFAULT_COLOR}; "
             f"border: 1px solid {s.get('color') or DEFAULT_COLOR}; "
-            f"border-radius: {style.RADIUS}px; padding: 0 6px;"
+            f"border-radius: {style.RADIUS}px; padding: 0px 3px; "
+            f"min-width: 0px; min-height: 0px; "
+            f"font-size: {font.pixelSize()}px; font-weight: bold;"
         )
+        self._edit.ensurePolished()
+        shown_font = self._edit.font()  # 칸이 실제로 쓰는 글꼴로 잰다
+        origin = text_origin(s, rect)
+        fm = QFontMetricsF(shown_font)
+        # 칸 폭은 글 길이와 상관없이 고정 — 확정된 글이 그려질 때와 같은 한 줄 폭
+        scale = font.pixelSize() / max(1, _ref_font(s).pixelSize())
+        inner = max(_EDIT_MIN_W, _wrap_ref_width(rect) * scale)
+        w = min(inner + _EDIT_PAD_W, max(_EDIT_MIN_W, self.width() - 8.0))
+        shown = self._edit.toPlainText() or self._edit.placeholderText()
+        rows = _wrap(shown, shown_font, w - _EDIT_PAD_W)
+        h = fm.height() + fm.lineSpacing() * (len(rows) - 1) + 12
+        x = max(4.0, min(self.width() - w - 4.0, origin.x()))
+        y = max(4.0, min(self.height() - h - 4.0, origin.y()))
+        self._edit.setGeometry(int(x), int(y), int(w), int(h))
 
     def _commit_edit(self) -> None:
         if self._editing_id is None:
             return
         shape_id, is_new = self._editing_id, self._editing_new
         self._editing_id = None
-        text = self._edit.text().strip()
+        text = "\n".join(r.rstrip() for r in self._edit.toPlainText().split("\n")).strip()
         self._edit.hide()
         s = self._doc.get(shape_id)
         if s is not None:
@@ -467,6 +591,11 @@ class AnnotationLayer(QWidget):
         if s is not None and s["kind"] == KIND_TEXT and not (s.get("text") or "").strip():
             self._doc.remove(shape_id)
         self.update()
+
+    def commit_text_edit(self) -> None:
+        """쓰던 글을 확정한다(Enter 를 친 것과 같다). 쓰는 중이 아니면 아무 일도 없다."""
+        if self._editing_id is not None:
+            self._commit_edit()
 
     def cancel_text_edit(self) -> None:
         """Esc — 쓰던 글을 버린다(글씨만 있는 빈 도형은 지운다)."""

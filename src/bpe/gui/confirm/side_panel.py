@@ -6,24 +6,31 @@ import re
 from html import escape
 from typing import Any, Dict, List, Optional, Tuple
 
-from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtCore import QMimeData, QPoint, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QContextMenuEvent, QGuiApplication, QImage, QMouseEvent, QPixmap
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListView,
+    QListWidget,
+    QListWidgetItem,
+    QMenu,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
 from bpe.core.confirm_checks import STATE_FAIL, STATE_PASS, CheckResult
 from bpe.gui.confirm import status_style, style
+from bpe.gui.widgets.clickable_image import ClickableImage
 
 PANEL_WIDTH = style.PANEL_WIDTH
 _NO_VERSION = "버전 없음"
@@ -35,6 +42,13 @@ _STATUS_LIST_W = 300
 _FRAME_REF = re.compile(r"\[(\d+)((?:\s*[-–~]\s*\d+)?)\]")
 _FRAME_LINK = "frame:"
 _PATH_BREAK = re.compile(r"[\\/_]")
+_ZWSP = "\u200b"  # 폭 0 빈칸 — 긴 경로가 줄 바뀔 자리(복사할 때는 뺀다)
+_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".tif", ".tiff")
+_THUMB_W, _THUMB_H = 60, 38
+_NOTE_THUMB_W, _NOTE_THUMB_H = 150, 94  # Note 에 붙은 그림(한 줄에 둘)
+_CC_REMOVE = "cc-remove:"
+_CC_SEARCH_DELAY_MS = 300
+_CC_LIST_MAX_H = 112
 _CODE_TOKEN = re.compile(r"^[A-Za-z0-9_.\-]*\d[A-Za-z0-9_.\-]*$|^[a-z]{2,6}$")
 
 
@@ -75,7 +89,7 @@ def _frame_links(text: str) -> str:
         )
 
     # 긴 경로가 칸 밖으로 잘리지 않게, 경로 구분 글자 뒤에서 줄이 바뀔 수 있게 한다
-    safe = _PATH_BREAK.sub(lambda m: m.group(0) + "​", escape(text))
+    safe = _PATH_BREAK.sub(lambda m: m.group(0) + _ZWSP, escape(text))
     return _FRAME_REF.sub(repl, safe).replace("\n", "<br>")
 
 
@@ -107,19 +121,39 @@ def _short_version(code: str) -> str:
     return code[low.rfind("_v") + 1 :] if "_v" in low else code
 
 
+def _clean_copied(text: str) -> str:
+    """복사할 글 다듬기 — 줄 바꿈용으로 끼워 둔 안 보이는 글자를 빼고 줄 구분 글자를 줄 바꿈으로."""
+    return text.replace(_ZWSP, "").replace("\u2028", "\n").replace("\u2029", "\n")
+
+
+def _note_plain(note: Any) -> str:
+    """Note 본문 원문(「이 Note 전체 복사」용) — 내용이 없으면 제목."""
+    if not isinstance(note, dict):
+        return ""
+    return (note.get("content") or "").strip() or (note.get("subject") or "").strip()
+
+
 class _ClickRow(QLabel):
-    """누를 수 있는 한 줄(지난 지적)."""
+    """누를 수 있는 한 줄(지난 지적). 글을 끌어 고르면 복사할 수 있다."""
 
     clicked = Signal(object)
     frame_clicked = Signal(int)
+    selecting = Signal(object)  # 이 줄에서 글 고르기를 시작했다(다른 줄의 고름은 푼다)
 
     def __init__(self, html: str, payload: Any) -> None:
         super().__init__(html)
         self._payload = payload
+        self._press_pos: Optional[QPoint] = None
         self.setWordWrap(True)
         self.setIndent(0)
         self.setTextFormat(Qt.TextFormat.RichText)
-        self.setTextInteractionFlags(Qt.TextInteractionFlag.LinksAccessibleByMouse)
+        self.setTextInteractionFlags(
+            Qt.TextInteractionFlag.LinksAccessibleByMouse
+            | Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        # 글을 고를 수 있어도 키보드 초점은 받지 않는다 — 받으면 ←/→·PgUp/PgDn 을
+        # 스크롤 칸이 가져가 프레임·샷 넘기기 단축키가 죽는다. Ctrl+C 는 창이 받아 넘겨준다.
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setOpenExternalLinks(False)
         self.linkActivated.connect(self._on_link)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -140,14 +174,141 @@ class _ClickRow(QLabel):
     def payload(self) -> Any:
         return self._payload
 
+    def clear_selection(self) -> None:
+        if self.hasSelectedText():
+            self.setSelection(0, 0)
+
+    def copied_text(self) -> str:
+        """끌어 고른 글(복사용으로 다듬은 것). 고른 글이 없으면 빈 글."""
+        return _clean_copied(self.selectedText()) if self.hasSelectedText() else ""
+
+    def copy_selection(self) -> bool:
+        text = self.copied_text()
+        if text:
+            QGuiApplication.clipboard().setText(text)
+        return bool(text)
+
+    def copy_note(self) -> bool:
+        text = _note_plain(self._payload)
+        if text:
+            QGuiApplication.clipboard().setText(text)
+        return bool(text)
+
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
-            self.clicked.emit(self._payload)
+            self._press_pos = event.position().toPoint()
+            self.selecting.emit(self)
+            # 메모 칸 등에 있던 초점을 창으로 돌려, 뒤이은 Ctrl+C 가 이 줄의 글을 복사하게 한다
+            top = self.window()
+            if top is not None and top is not self:
+                top.setFocus(Qt.FocusReason.MouseFocusReason)
         super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
+        pressed, self._press_pos = self._press_pos, None
+        if event.button() == Qt.MouseButton.LeftButton and pressed is not None:
+            moved = (event.position().toPoint() - pressed).manhattanLength()
+            # 끌어서 글을 고른 것이 아니라 그냥 누른 것일 때만 「누름」으로 친다
+            if moved < QApplication.startDragDistance() and not self.hasSelectedText():
+                self.clicked.emit(self._payload)
+        super().mouseReleaseEvent(event)
+
+    def contextMenuEvent(self, event: QContextMenuEvent) -> None:  # noqa: N802
+        menu = QMenu(self)
+        act_copy = menu.addAction("복사")
+        act_copy.setEnabled(self.hasSelectedText())
+        act_all = menu.addAction("이 Note 전체 복사")
+        act_all.setEnabled(bool(_note_plain(self._payload)))
+        picked = menu.exec(event.globalPos())
+        if picked is act_copy:
+            self.copy_selection()
+        elif picked is act_all:
+            self.copy_note()
+        event.accept()
+
+
+def _images_in_mime(source: QMimeData) -> List[QImage]:
+    """클립보드에 든 그림들 — 그림 자체, 또는 탐색기에서 복사한 그림 파일."""
+    out: List[QImage] = []
+    if source.hasImage():
+        data = source.imageData()
+        img = data.toImage() if isinstance(data, QPixmap) else data
+        if isinstance(img, QImage) and not img.isNull():
+            out.append(img)
+    elif source.hasUrls():
+        for url in source.urls():
+            path = url.toLocalFile()
+            if path and path.lower().endswith(_IMAGE_EXTS):
+                img = QImage(path)
+                if not img.isNull():
+                    out.append(img)
+    return out
+
+
+class _MemoEdit(QPlainTextEdit):
+    """메모 글 칸 — 복사한 그림을 Ctrl+V 로 붙이면 글 대신 그림 첨부로 받는다."""
+
+    image_pasted = Signal(object)
+
+    def canInsertFromMimeData(self, source: QMimeData) -> bool:  # noqa: N802
+        return source.hasImage() or source.hasUrls() or super().canInsertFromMimeData(source)
+
+    def insertFromMimeData(self, source: QMimeData) -> None:  # noqa: N802
+        # 표 계산 프로그램처럼 글과 그림이 같이 오는 복사는 글을 붙인다
+        if not source.hasText() or source.hasUrls():
+            images = _images_in_mime(source)
+            if images:
+                for img in images:
+                    self.image_pasted.emit(img)
+                return
+        super().insertFromMimeData(source)
+
+
+class _Thumb(QLabel):
+    """붙여 넣은 그림 하나 — 오른쪽 위 × 로 뺀다."""
+
+    remove_clicked = Signal(int)
+
+    def __init__(self, index: int, path: str) -> None:
+        super().__init__()
+        self._index = index
+        self.setFixedSize(_THUMB_W, _THUMB_H)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setStyleSheet(f"background: {style.FIELD}; border: 1px solid {style.EDGE};")
+        pm = QPixmap(path)
+        if not pm.isNull():
+            self.setPixmap(
+                pm.scaled(
+                    _THUMB_W - 2,
+                    _THUMB_H - 2,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+        self.setToolTip("붙여 넣은 그림 — 노트에 함께 보냅니다")
+        x = QPushButton("×", self)
+        x.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        x.setCursor(Qt.CursorShape.PointingHandCursor)
+        x.setToolTip("이 그림 빼기")
+        x.setFixedSize(16, 16)
+        x.move(_THUMB_W - 17, 1)
+        x.setStyleSheet(
+            f"QPushButton {{ background: {style.HEADER}; color: {style.TEXT_STRONG}; "
+            f"border: 1px solid {style.EDGE}; border-radius: 0px; padding: 0px; "
+            f"min-width: 0px; min-height: 0px; font-weight: bold; }}"
+            f"QPushButton:hover {{ background: {style.FAIL}; }}"
+        )
+        x.clicked.connect(lambda: self.remove_clicked.emit(self._index))
 
 
 class ConfirmSidePanel(QWidget):
     status_requested = Signal(str)
+    note_requested = Signal()
+    ref_frame_requested = Signal()
+    nav_requested = Signal(int)
+    image_pasted = Signal(object)
+    image_remove_requested = Signal(int)
+    cc_search_requested = Signal(str)
     cancel_requested = Signal()
     retry_requested = Signal()
     past_note_clicked = Signal(object)
@@ -167,6 +328,14 @@ class ConfirmSidePanel(QWidget):
         )
         self._past: List[Dict[str, Any]] = []
         self._past_rows: List[_ClickRow] = []
+        self._note_images: Dict[int, List[bytes]] = {}  # 노트 id → 붙은 그림들
+        self._image_hosts: Dict[int, QWidget] = {}
+        self._cc_users: List[Dict[str, Any]] = []
+        self._cc_found: List[Dict[str, Any]] = []
+        self._cc_timer = QTimer(self)
+        self._cc_timer.setSingleShot(True)
+        self._cc_timer.setInterval(_CC_SEARCH_DELAY_MS)
+        self._cc_timer.timeout.connect(self._emit_cc_search)
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -264,20 +433,86 @@ class ConfirmSidePanel(QWidget):
         ex.setContentsMargins(10, 8, 10, 6)
         ex.setSpacing(4)
         # 화면에 쓴 글이 한 줄씩 그대로 적히는 글 칸 — 여기서 바로 고치거나 덧붙여 쓴다
-        self._memo_edit = QPlainTextEdit()
+        self._memo_edit = _MemoEdit()
         self._memo_edit.setPlaceholderText(
-            "화면에 네모·원·화살표를 그리고 쓴 글이 여기에 그대로 적힙니다.\n"
-            "직접 고치거나 경로·설명을 덧붙여 써도 됩니다."
+            "화면에 글씨 도구(T)로 쓴 글이 여기에 그대로 적힙니다.\n"
+            "직접 고치거나 경로·설명을 덧붙여 써도 됩니다.\n"
+            "복사한 그림은 Ctrl+V 로 붙입니다."
         )
+        self._memo_edit.image_pasted.connect(self.image_pasted)
         self._memo_edit.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self._memo_edit.setMinimumHeight(64)
         self._memo_edit.document().setDocumentMargin(4)
         self._memo_edit.setStyleSheet("QPlainTextEdit { padding: 2px 4px; }")
         self._memo_edit.textChanged.connect(self.memo_edited)
         ex.addWidget(self._memo_edit, 1)
+        # 붙여 넣은 그림 — 작은 그림으로 줄지어 보이고 × 로 뺀다
+        self._thumb_box = QWidget()
+        self._thumb_row = QHBoxLayout(self._thumb_box)
+        self._thumb_row.setContentsMargins(0, 0, 0, 0)
+        self._thumb_row.setSpacing(4)
+        self._thumb_scroll = QScrollArea()
+        self._thumb_scroll.setWidgetResizable(True)
+        self._thumb_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._thumb_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._thumb_scroll.setFixedHeight(_THUMB_H + 14)
+        self._thumb_scroll.setStyleSheet(
+            f"QScrollArea, QScrollArea > QWidget > QWidget {{ background: {style.PANEL}; }}"
+        )
+        self._thumb_scroll.setWidget(self._thumb_box)
+        self._thumb_scroll.hide()
+        ex.addWidget(self._thumb_scroll)
         self._attach = QLabel("")
         self._attach.setStyleSheet(f"color: {style.DIM}; font-size: {style.FONT_SMALL_PX}px;")
-        ex.addWidget(self._attach)
+        attach_row = QHBoxLayout()
+        attach_row.setContentsMargins(0, 0, 0, 0)
+        attach_row.setSpacing(6)
+        # 안내 글이 길어도 옆 버튼을 밀어내지 않게 한다
+        self._attach.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        attach_row.addWidget(self._attach, 1)
+        # 다른 샷의 프레임을 샷 이름으로 찾아 참고 그림으로 붙인다
+        self._btn_ref = QPushButton("다른 샷 프레임")
+        self._btn_ref.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._btn_ref.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_ref.setToolTip("다른 샷의 프레임을 샷 이름으로 찾아 참고 그림으로 붙입니다")
+        self._btn_ref.setStyleSheet(
+            f"QPushButton {{ padding: 2px 8px; background: {style.PANEL}; color: {style.TEXT}; "
+            f"border: 1px solid {style.EDGE}; font-size: {style.FONT_SMALL_PX}px; }}"
+            f"QPushButton:hover {{ background: {style.RAISED}; }}"
+        )
+        self._btn_ref.clicked.connect(self.ref_frame_requested)
+        self._btn_ref.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        attach_row.addWidget(self._btn_ref)
+        ex.addLayout(attach_row)
+        # 참조(CC) — 이름을 찾아 넣으면 노트의 참조 칸에 들어간다
+        self._cc_chips = QLabel("")
+        self._cc_chips.setWordWrap(True)
+        self._cc_chips.setIndent(0)
+        self._cc_chips.setTextFormat(Qt.TextFormat.RichText)
+        self._cc_chips.setTextInteractionFlags(Qt.TextInteractionFlag.LinksAccessibleByMouse)
+        self._cc_chips.setOpenExternalLinks(False)
+        self._cc_chips.linkActivated.connect(self._on_cc_link)
+        self._cc_chips.hide()
+        ex.addWidget(self._cc_chips)
+        self._cc_input = QLineEdit()
+        self._cc_input.setPlaceholderText("참조(CC)할 사람 이름 검색")
+        self._cc_input.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        self._cc_input.setClearButtonEnabled(True)
+        self._cc_input.textChanged.connect(self._on_cc_text)
+        self._cc_input.returnPressed.connect(self._add_first_cc)
+        ex.addWidget(self._cc_input)
+        self._cc_list = QListWidget()
+        self._cc_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._cc_list.setMaximumHeight(_CC_LIST_MAX_H)
+        self._cc_list.setStyleSheet(
+            f"QListWidget {{ background: {style.FIELD}; border: 1px solid {style.EDGE}; "
+            f"border-radius: 0px; padding: 0px; outline: none; }}"
+            f"QListWidget::item {{ padding: 4px 8px; border-bottom: 1px solid {style.EDGE}; }}"
+            f"QListWidget::item:hover {{ background: {style.RAISED}; }}"
+        )
+        self._cc_list.itemClicked.connect(self._on_cc_item)
+        self._cc_list.hide()
+        ex.addWidget(self._cc_list)
         col.addLayout(ex, 3)
 
         foot = QFrame()
@@ -325,6 +560,20 @@ class ConfirmSidePanel(QWidget):
         self._btn_cfrm.clicked.connect(lambda: self.status_requested.emit("cfrm"))
         actions.addWidget(self._btn_retake, 1)
         actions.addWidget(self._btn_cfrm, 1)
+        # Annotation 모드: 상태는 그대로 두고 노트만 보낸다(상태 버튼 자리에 이 버튼 하나)
+        self._annotation = False
+        self._btn_note = QPushButton(" Note 보내기")
+        self._btn_note.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._btn_note.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_note.setStyleSheet(
+            f"QPushButton {{ height: 32px; background: {style.ACCENT}; color: {style.ON_ACCENT}; "
+            f"border: 1px solid {style.EDGE}; {style.mono(13, bold=True)} }}"
+            f"QPushButton:hover {{ border: 1px solid {style.TEXT_STRONG}; }}"
+            f"QPushButton:disabled {{ color: #6a6a6a; background: #2c2c2c; }}"
+        )
+        self._btn_note.clicked.connect(self.note_requested)
+        self._btn_note.hide()
+        actions.addWidget(self._btn_note, 1)
         # 그 밖의 상태 — 펼치면 줄마다 상태 색·아이콘이 보이는 큼직한 목록
         self._other = QComboBox()
         self._other.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -347,6 +596,36 @@ class ConfirmSidePanel(QWidget):
         self._other.activated.connect(self._on_other)
         actions.addWidget(self._other)
         fcol.addLayout(actions)
+        # 샷 넘기기 — 상태 버튼 바로 아래, 같은 높이의 긴 버튼
+        nav = QHBoxLayout()
+        nav.setContentsMargins(0, 0, 0, 0)
+        nav.setSpacing(6)
+        self._btn_prev = QPushButton(" 이전 샷")
+        self._btn_next = QPushButton(" 다음 샷")
+        style.set_icon(self._btn_prev, "chev_left", size=14)
+        style.set_icon(self._btn_next, "chev_right", size=14)
+        self._btn_next.setLayoutDirection(Qt.LayoutDirection.RightToLeft)
+        self._btn_prev.setToolTip("이전 샷 (PageUp)")
+        self._btn_next.setToolTip("다음 샷 (PageDown)")
+        for b in (self._btn_prev, self._btn_next):
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setStyleSheet(
+                f"QPushButton {{ height: 32px; background: {style.PANEL}; color: {style.TEXT}; "
+                f"border: 1px solid {style.EDGE}; }}"
+                f"QPushButton:hover {{ background: {style.RAISED}; }}"
+                f"QPushButton:disabled {{ color: #6a6a6a; }}"
+            )
+        self._btn_prev.clicked.connect(lambda: self.nav_requested.emit(-1))
+        self._btn_next.clicked.connect(lambda: self.nav_requested.emit(1))
+        self._nav_pos = QLabel("")
+        self._nav_pos.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._nav_pos.setMinimumWidth(64)
+        self._nav_pos.setStyleSheet(f"color: {style.DIM}; border: none; {style.mono()}")
+        nav.addWidget(self._btn_prev, 1)
+        nav.addWidget(self._nav_pos)
+        nav.addWidget(self._btn_next, 1)
+        fcol.addLayout(nav)
         col.addWidget(foot)
         self.refresh_status_styles()
         self.set_work_info("", "", "")
@@ -398,22 +677,14 @@ class ConfirmSidePanel(QWidget):
         return self._v_order.text()
 
     def set_checks(self, results: List[CheckResult]) -> None:
-        """전부 통과면 한 줄로 줄이고, 실패·모름이 있으면 줄마다 보여 준다."""
+        """검사 항목을 줄마다 보여 준다 — 전부 통과여도 줄이지 않는다(통과는 초록 글씨)."""
         colors = {STATE_PASS: style.OK, STATE_FAIL: style.FAIL}
-        passed = sum(1 for r in results if r.state == STATE_PASS)
-        if results and passed == len(results):
-            lines = [
-                f'<span style="color:{style.OK}; {style.mono()}">'
-                f"{passed}/{len(results)} 통과</span>"
-            ]
-            self._v_checks.setToolTip("\n".join(r.message for r in results))
-        else:
-            lines = [
-                f'<span style="color:{colors.get(r.state, style.DIM)}; {style.mono()}">'
-                f"{escape(r.message)}</span>"
-                for r in results
-            ]
-            self._v_checks.setToolTip("")
+        lines = [
+            f'<span style="color:{colors.get(r.state, style.DIM)}; {style.mono()}">'
+            f"{escape(r.message)}</span>"
+            for r in results
+        ]
+        self._v_checks.setToolTip("")
         self._v_checks.setText("<br>".join(lines))
         self._btn_failures.setVisible(any(r.state == STATE_FAIL for r in results))
 
@@ -448,6 +719,8 @@ class ConfirmSidePanel(QWidget):
         ``kind`` 가 ``"version"`` 인 줄은 작업자가 버전을 올리며 적은 글이다.
         """
         self._past = list(notes)
+        alive = {int(n["note_id"]) for n in self._past if n.get("note_id") is not None}
+        self._note_images = {k: v for k, v in self._note_images.items() if k in alive}
         versions: List[str] = []
         for n in self._past:
             v = str(n.get("version_code") or _NO_VERSION)
@@ -463,8 +736,47 @@ class ConfirmSidePanel(QWidget):
         self._past_versions.blockSignals(False)
         self._fill_past()
 
+    def set_note_images(self, images: Dict[int, List[bytes]]) -> None:
+        """노트에 붙은 그림을 그 노트 아래에 작은 그림으로 보인다 — 누르면 크게 뜬다."""
+        for note_id, blobs in images.items():
+            self._note_images[int(note_id)] = list(blobs)
+            self._fill_note_images(int(note_id))
+
+    def note_image_count(self, note_id: int) -> int:
+        host = self._image_hosts.get(int(note_id))
+        return host.layout().count() if host is not None else 0
+
+    def _fill_note_images(self, note_id: int) -> None:
+        host = self._image_hosts.get(note_id)
+        if host is None:
+            return
+        grid = host.layout()
+        while grid.count():
+            w = grid.takeAt(0).widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+        shown: List[ClickableImage] = []
+        for data in self._note_images.get(note_id) or []:
+            ci = ClickableImage(host)
+            ci.THUMB_W, ci.THUMB_H = _NOTE_THUMB_W, _NOTE_THUMB_H
+            ci.set_image_bytes(data)
+            if ci.original_pixmap() is None:  # 그림으로 못 읽는 첨부
+                ci.setParent(None)
+                ci.deleteLater()
+                continue
+            ci.setToolTip("누르면 크게 봅니다")
+            grid.addWidget(ci, len(shown) // 2, len(shown) % 2)
+            shown.append(ci)
+        pixmaps = [ci.original_pixmap() for ci in shown]
+        if len(shown) > 1:
+            for i, ci in enumerate(shown):
+                ci.set_siblings(pixmaps, i)  # 크게 본 창에서 앞뒤 그림으로 넘긴다
+        host.setVisible(bool(shown))
+
     def _fill_past(self, *_args: Any) -> None:
         self._past_rows = []
+        self._image_hosts = {}
         while self._past_col.count():
             item = self._past_col.takeAt(0)
             w = item.widget()
@@ -503,8 +815,19 @@ class ConfirmSidePanel(QWidget):
             row = _ClickRow(html, n)
             row.clicked.connect(self._on_past_clicked)
             row.frame_clicked.connect(self.past_frame_clicked)
+            row.selecting.connect(self._on_past_selecting)
             self._past_rows.append(row)
             self._past_col.addWidget(row)
+            if n.get("note_id") is not None:
+                host = _clear_block()
+                grid = QGridLayout(host)
+                grid.setContentsMargins(8, 6, 8, 8)
+                grid.setSpacing(6)
+                grid.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+                host.hide()
+                self._image_hosts[int(n["note_id"])] = host
+                self._past_col.addWidget(host)
+                self._fill_note_images(int(n["note_id"]))
         self._past_col.addStretch(1)
 
     def past_count(self) -> int:
@@ -527,6 +850,139 @@ class ConfirmSidePanel(QWidget):
     def set_attach_text(self, text: str) -> None:
         self._attach.setText(text)
 
+    # ── 샷 넘기기 ────────────────────────────────────────────────
+
+    def set_nav(self, text: str, can_prev: bool, can_next: bool) -> None:
+        """「8 / 44」 글과 이전·다음 버튼 켜짐."""
+        self._nav_pos.setText(text)
+        self._btn_prev.setEnabled(can_prev)
+        self._btn_next.setEnabled(can_next)
+
+    def nav_text(self) -> str:
+        return self._nav_pos.text()
+
+    def nav_enabled(self) -> Tuple[bool, bool]:
+        return (self._btn_prev.isEnabled(), self._btn_next.isEnabled())
+
+    # ── 붙여 넣은 그림 ───────────────────────────────────────────
+
+    def set_pasted_images(self, paths: List[str]) -> None:
+        while self._thumb_row.count():
+            item = self._thumb_row.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        for i, path in enumerate(paths):
+            thumb = _Thumb(i, path)
+            thumb.remove_clicked.connect(self.image_remove_requested)
+            self._thumb_row.addWidget(thumb)
+        self._thumb_row.addStretch(1)
+        self._thumb_scroll.setVisible(bool(paths))
+
+    def pasted_count(self) -> int:
+        return sum(
+            1
+            for i in range(self._thumb_row.count())
+            if isinstance(self._thumb_row.itemAt(i).widget(), _Thumb)
+        )
+
+    # ── 참조(CC) ─────────────────────────────────────────────────
+
+    def cc_users(self) -> List[Dict[str, Any]]:
+        """노트의 참조 칸에 넣을 사람들: ``{"type": "HumanUser", "id": …}``."""
+        return [{"type": "HumanUser", "id": int(u["id"])} for u in self._cc_users]
+
+    def cc_names(self) -> List[str]:
+        return [str(u.get("name") or "") for u in self._cc_users]
+
+    def clear_cc(self) -> None:
+        self._cc_users = []
+        self._cc_input.clear()
+        self._hide_cc_list()
+        self._paint_cc()
+
+    def add_cc_user(self, user: Dict[str, Any]) -> bool:
+        try:
+            uid = int(user["id"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        if any(int(u["id"]) == uid for u in self._cc_users):
+            return False
+        name = str(user.get("name") or user.get("login") or uid).strip()
+        self._cc_users.append({"id": uid, "name": name})
+        self._paint_cc()
+        return True
+
+    def set_cc_results(self, rows: List[Dict[str, Any]]) -> None:
+        """검색 결과를 입력 칸 아래에 펼친다. 이미 넣은 사람은 뺀다."""
+        have = {int(u["id"]) for u in self._cc_users}
+        self._cc_found = [
+            r
+            for r in rows
+            if isinstance(r, dict) and r.get("id") is not None and r["id"] not in have
+        ]
+        self._cc_list.clear()
+        if not self._cc_input.text().strip():
+            self._cc_found = []
+        for r in self._cc_found:
+            name = str(r.get("name") or "").strip()
+            login = str(r.get("login") or "").strip()
+            item = QListWidgetItem(f"{name}  ({login})" if login and login != name else name)
+            item.setData(Qt.ItemDataRole.UserRole, r)
+            self._cc_list.addItem(item)
+        if self._cc_found:
+            self._cc_list.setFixedHeight(
+                min(_CC_LIST_MAX_H, self._cc_list.sizeHintForRow(0) * len(self._cc_found) + 4)
+            )
+        self._cc_list.setVisible(bool(self._cc_found))
+
+    def _paint_cc(self) -> None:
+        chips = "  ".join(
+            f'<span style="color:{style.TEXT_STRONG}">{escape(str(u["name"]))}</span>'
+            f'<a href="{_CC_REMOVE}{u["id"]}" style="color:{style.DIM}; '
+            f'text-decoration:none"> ×</a>'
+            for u in self._cc_users
+        )
+        self._cc_chips.setText(f'<span style="color:{style.DIM}">참조</span>  {chips}')
+        self._cc_chips.setVisible(bool(self._cc_users))
+
+    def _hide_cc_list(self) -> None:
+        self._cc_found = []
+        self._cc_list.clear()
+        self._cc_list.hide()
+
+    def _on_cc_text(self, text: str) -> None:
+        self._cc_timer.stop()
+        if text.strip():
+            self._cc_timer.start()
+        else:
+            self._hide_cc_list()
+
+    def _emit_cc_search(self) -> None:
+        text = self._cc_input.text().strip()
+        if text:
+            self.cc_search_requested.emit(text)
+
+    def _take_cc(self, user: Dict[str, Any]) -> None:
+        self.add_cc_user(user)
+        self._cc_input.clear()
+        self._hide_cc_list()
+
+    def _on_cc_item(self, item: QListWidgetItem) -> None:
+        user = item.data(Qt.ItemDataRole.UserRole)
+        if isinstance(user, dict):
+            self._take_cc(user)
+
+    def _add_first_cc(self) -> None:
+        if self._cc_found:
+            self._take_cc(self._cc_found[0])
+
+    def _on_cc_link(self, href: str) -> None:
+        if href.startswith(_CC_REMOVE) and href[len(_CC_REMOVE) :].isdigit():
+            uid = int(href[len(_CC_REMOVE) :])
+            self._cc_users = [u for u in self._cc_users if int(u["id"]) != uid]
+            self._paint_cc()
+
     def set_pending(self, text: Optional[str]) -> None:
         self._pending.setVisible(bool(text))
         self._pending_lbl.setText(text or "")
@@ -544,11 +1000,33 @@ class ConfirmSidePanel(QWidget):
         for b in (self._btn_retake, self._btn_cfrm, self._other):
             b.setEnabled(on)
             b.setToolTip(tip)
+        self._btn_note.setEnabled(on)
+        self._btn_note.setToolTip(tip or "메모·그림을 이 샷의 Note 로 보냅니다 (상태는 그대로)")
 
     def can_send(self) -> bool:
-        return self._btn_retake.isEnabled()
+        return (self._btn_note if self._annotation else self._btn_retake).isEnabled()
+
+    def set_annotation(self, on: bool) -> None:
+        """Annotation 모드 — 상태 버튼들 대신 「Note 보내기」 하나만 보인다."""
+        self._annotation = bool(on)
+        for b in (self._btn_retake, self._btn_cfrm, self._other):
+            b.setVisible(not on)
+        self._btn_note.setVisible(on)
+
+    def is_annotation(self) -> bool:
+        return self._annotation
 
     # ── 신호 ─────────────────────────────────────────────────────
+
+    def _on_past_selecting(self, row: object) -> None:
+        """한 줄에서 글 고르기를 시작하면 다른 줄에 남은 고름은 푼다."""
+        for other in self._past_rows:
+            if other is not row:
+                other.clear_selection()
+
+    def copy_note_selection(self) -> bool:
+        """지난 Note 에서 끌어 고른 글을 클립보드에 넣는다(창의 Ctrl+C). 고른 글이 없으면 False."""
+        return any(row.copy_selection() for row in self._past_rows)
 
     def _on_past_clicked(self, note: object) -> None:
         for row in self._past_rows:

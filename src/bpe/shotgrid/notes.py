@@ -514,6 +514,45 @@ def get_note_attachments(sg: Any, note_id: int) -> List[Dict[str, Any]]:
     return out
 
 
+def get_attachments_for_notes(sg: Any, note_ids: List[int]) -> Dict[int, List[Dict[str, Any]]]:
+    """노트 여러 개에 붙은 그림 첨부를 한 번에 찾는다 → ``{노트 id: [첨부 정보…]}``.
+
+    한 번에 묻는 조회가 안 되는 사이트에서는 노트마다 따로 묻는다.
+    """
+    ids = [int(n) for n in note_ids if n is not None]
+    out: Dict[int, List[Dict[str, Any]]] = {}
+    if not ids:
+        return out
+    wanted = set(ids)
+    links = [{"type": "Note", "id": n} for n in ids]
+    try:
+        raw = list(
+            sg.find(
+                "Attachment",
+                [["attachment_links", "in", links]],
+                _ATTACHMENT_FIELDS + ["attachment_links"],
+            )
+            or []
+        )
+    except Exception as exc:
+        logger.debug("get_attachments_for_notes batch failed: %s", exc)
+        raw = []
+    for att in raw:
+        meta = _format_attachment_meta(att)
+        if meta is None or not _is_image_attachment(meta.get("filename") or "", meta["url"]):
+            continue
+        for lk in att.get("attachment_links") or []:
+            if isinstance(lk, dict) and lk.get("type") == "Note" and lk.get("id") in wanted:
+                out.setdefault(int(lk["id"]), []).append(meta)
+    if raw:
+        return out
+    for nid in ids:
+        metas = get_note_attachments(sg, nid)
+        if metas:
+            out[nid] = metas
+    return out
+
+
 def download_attachment_bytes(sg: Any, meta: Dict[str, Any]) -> Optional[bytes]:
     """Download bytes for one attachment (URL, then SG API fallbacks)."""
     import urllib.request

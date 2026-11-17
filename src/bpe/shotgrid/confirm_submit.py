@@ -1,4 +1,4 @@
-"""컨펌 창의 보내기 — 노트 만들기와 태스크 상태 바꾸기를 따로 성공/실패로 알려 준다.
+"""컨펌 창의 보내기 — 노트 만들기와 상태 바꾸기(태스크·버전)를 따로 성공/실패로 알려 준다.
 
 기존 피드백 탭은 노트가 간 뒤 상태 변경이 실패하면 전체를 "실패"로 알려서, 다시 누르면
 노트가 두 번 갔다. 여기서는 결과를 나눠 돌려주고, 이미 간 노트는 다시 만들지 않는다.
@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
+from bpe.core.confirm_media import twin_version_key
 from bpe.core.logging import get_logger
 from bpe.shotgrid.client import get_default_sg, get_shotgun_for_version_mutation, resolve_sudo_login
 from bpe.shotgrid.notes import build_native_style_note_subject, create_note_with_result
@@ -30,12 +31,61 @@ class ConfirmSubmitResult(NamedTuple):
     status_needed: bool
     status_ok: bool
     status_error: str
+    # 버전 상태 — 샷그리드 버전 목록의 상태 칸. 태스크 상태와 같은 값으로 함께 바꾼다.
+    version_needed: bool = False
+    version_ok: bool = False
+    version_count: int = 0
+    version_error: str = ""
 
     @property
     def all_ok(self) -> bool:
         note_fine = (not self.note_needed) or (self.note_ok and self.attachment_ok)
         status_fine = (not self.status_needed) or self.status_ok
-        return note_fine and status_fine
+        version_fine = (not self.version_needed) or self.version_ok
+        return note_fine and status_fine and version_fine
+
+
+VERSION_STATUS_FIELD = "sg_status_list"
+
+
+def version_ids_with_twins(sg: Any, version_id: Optional[int]) -> List[int]:
+    """상태를 함께 바꿀 버전들 — 그 버전과, 같은 샷에 올라온 쌍둥이(``_v003`` ↔ ``_v003_lut``).
+
+    쌍둥이를 못 읽어도 원래 버전 하나는 돌려준다.
+    """
+    if version_id is None:
+        return []
+    ids = [int(version_id)]
+    try:
+        me = sg.find_one("Version", [["id", "is", int(version_id)]], ["code", "entity"])
+        code = str((me or {}).get("code") or "").strip()
+        entity = (me or {}).get("entity")
+        if not code or not isinstance(entity, dict) or entity.get("id") is None:
+            return ids
+        key = twin_version_key(code)
+        link = {"type": str(entity.get("type") or "Shot"), "id": int(entity["id"])}
+        for v in sg.find("Version", [["entity", "is", link]], ["id", "code"]) or []:
+            vid = v.get("id")
+            if vid is None or int(vid) in ids:
+                continue
+            if twin_version_key(str(v.get("code") or "")) == key:
+                ids.append(int(vid))
+    except Exception as e:
+        logger.warning("confirm submit: twin version lookup failed: %s", e)
+    return ids
+
+
+def update_version_statuses(sg: Any, version_ids: List[int], status_code: str) -> Tuple[int, str]:
+    """버전들의 상태를 바꾼다 → ``(바뀐 개수, 첫 오류 글)``. 하나가 실패해도 나머지는 시도한다."""
+    done, error = 0, ""
+    for vid in version_ids:
+        try:
+            sg.update("Version", int(vid), {VERSION_STATUS_FIELD: status_code})
+            done += 1
+        except Exception as e:
+            logger.warning("confirm submit: version %s status update failed: %s", vid, e)
+            error = error or (str(e) or type(e).__name__)
+    return done, error
 
 
 def addressings_for_confirm(assignees: Any) -> List[Dict[str, Any]]:
@@ -90,11 +140,13 @@ def submit_confirm(
     addressings_to: Optional[List[Dict[str, Any]]] = None,
     addressings_cc: Optional[List[Dict[str, Any]]] = None,
     existing_note_id: Optional[int] = None,
+    with_version_status: bool = True,
 ) -> ConfirmSubmitResult:
     """노트(메모·그림이 있을 때만)를 보내고, 상태(고른 경우만)를 바꾼다.
 
+    상태는 태스크와 버전(그리고 그 버전의 쌍둥이 ``_lut`` 버전)을 같은 값으로 함께 바꾼다.
     *existing_note_id* 가 있으면 노트는 이미 간 것으로 보고 다시 만들지 않는다
-    (상태만 다시 시도할 때).
+    (상태만 다시 시도할 때 — 이미 바뀐 쪽에 같은 값을 다시 써도 해가 없다).
     """
     text = (content or "").strip()
     paths = [p for p in (attachment_paths or []) if p]
@@ -145,6 +197,15 @@ def submit_confirm(
     elif status_needed:
         status_error = "노트를 보내지 못해 상태는 바꾸지 않았습니다"
 
+    version_needed = bool(code and version_id is not None and with_version_status)
+    version_ok, version_count, version_error = False, 0, ""
+    if version_needed and (note_ok or not note_needed):
+        targets = version_ids_with_twins(sg, version_id)
+        version_count, version_error = update_version_statuses(sg, targets, code)
+        version_ok = bool(targets) and version_count == len(targets)
+    elif version_needed:
+        version_error = "노트를 보내지 못해 버전 상태는 바꾸지 않았습니다"
+
     return ConfirmSubmitResult(
         note_needed=note_needed,
         note_ok=note_ok,
@@ -155,4 +216,8 @@ def submit_confirm(
         status_needed=status_needed,
         status_ok=status_ok,
         status_error=status_error,
+        version_needed=version_needed,
+        version_ok=version_ok,
+        version_count=version_count,
+        version_error=version_error,
     )
