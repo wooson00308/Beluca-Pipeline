@@ -1900,3 +1900,137 @@ def test_confirm_note_carries_the_task_being_confirmed(win: Any, monkeypatch: An
     assert sent["note_task_id"] == 5
     assert sent["status_code"] == "retake" and "empty_note_text" not in sent
     win._submit_busy = False
+
+
+# ── 2026-11-18 추가: 그림이 모자라게 풀리면 「올리는 중」으로 두지 않고 알린다 ─────────
+
+
+def test_short_decode_is_reported_not_left_loading(win: Any) -> None:
+    cur = win._bufs[KEY_CUR]
+    assert cur.short_at is None
+    # 6장짜리라고 적힌 영상이 3장만 풀리고 끝났다(파일이 잘림)
+    for i in (3, 4, 5):
+        cur.frames.pop(i, None)
+    win._on_decode_done(win._load_token, KEY_CUR, 3)
+    assert cur.short_at == 3
+    frames = next(c for c in win._checks if c.name == "프레임")
+    assert frames.state == "fail" and frames.message == "파일이 잘림: 6장 중 3장만 볼 수 있음"
+    assert win._banner.isVisible() and "파일이 잘림" in win._banner.text()
+    # 그림이 있는 프레임은 평소대로, 없는 프레임에서는 어디까지 있는지 알려 준다
+    win._go_first()
+    assert "올리는 중" not in win._hud.text() and "그림 없음" not in win._hud.text()
+    win._go_last()
+    last = win._frame_start + 2
+    assert f"그림 없음 — 파일이 {last} 까지만 있음" in win._hud.text()
+    assert "올리는 중" not in win._hud.text()
+
+    # 다른 샷을 열면 표시가 남지 않는다
+    win._reset_shot()
+    assert all(b.short_at is None for b in win._bufs.values())
+
+    # 늦게 온 옛 샷의 결과와 다 풀린 경우는 건드리지 않는다
+    win._on_decode_done(win._load_token - 1, KEY_CUR, 3)
+    assert cur.short_at is None
+
+
+def test_cut_movie_file_opens_with_a_failed_check(
+    qtbot: Any, tmp_app_dir: Path, shot: Path
+) -> None:
+    """목차가 앞에 있는 MOV 를 중간에서 자른 파일 — 업체가 보내다 끊긴 파일과 같은 모양."""
+    _ = tmp_app_dir
+    ffmpeg = _tool("ffmpeg", resolve_ffmpeg())
+    renders = shot / "comp" / "devl" / "renders"
+    whole = renders / "whole_tmp.mov"
+    made = subprocess.run(
+        [
+            ffmpeg, "-v", "error", "-y", "-f", "lavfi", "-i",
+            f"testsrc=size={_W}x{_H}:rate=24", "-frames:v", "12",
+            "-c:v", "prores_ks", "-profile:v", "3", "-pix_fmt", "yuv422p10le",
+            "-movflags", "+faststart", str(whole),
+        ],
+        capture_output=True,
+    )  # fmt: skip
+    if made.returncode != 0 or not whole.is_file():
+        pytest.skip("시험 영상을 만들 수 없는 ffmpeg")
+    data = whole.read_bytes()
+    whole.unlink()
+    cut = renders / "SHOT_A_comp_v003.mov"
+    cut.write_bytes(data[: len(data) * 45 // 100])  # 뒷부분 55% 가 없다
+
+    w = ConfirmWindow()
+    qtbot.addWidget(w)
+    w.resize(1100, 700)
+    w.show()
+    qtbot.waitExposed(w)
+    w.open_movie(str(cut))
+    qtbot.waitUntil(lambda: w._bufs[KEY_CUR].short_at is not None, timeout=30000)
+    cur = w._bufs[KEY_CUR]
+    assert cur.info is not None and cur.info.is_cut and cur.info.frame_count == 12
+    assert 0 < cur.short_at < 12 and len(cur.frames) == cur.short_at
+    frames = next(c for c in w._checks if c.name == "프레임")
+    assert frames.state == "fail" and "파일이 잘림" in frames.message
+    assert w._banner.isVisible()
+    w._go_last()
+    assert "그림 없음" in w._hud.text()
+    w.close()
+
+
+def test_movie_cut_before_its_index_says_it_is_cut(
+    qtbot: Any, tmp_app_dir: Path, shot: Path
+) -> None:
+    """목차가 뒤에 있는 MOV 가 끊기면 목차까지 없어 열 수 없다 — 왜 못 여는지 알려 준다."""
+    _ = tmp_app_dir
+    renders = shot / "comp" / "devl" / "renders"
+    whole = (renders / "SHOT_A_comp_v002.mov").read_bytes()
+    cut = renders / "SHOT_A_comp_v004.mov"
+    cut.write_bytes(whole[: len(whole) // 2])
+    w = ConfirmWindow()
+    qtbot.addWidget(w)
+    w.resize(1100, 700)
+    w.show()
+    qtbot.waitExposed(w)
+    w.open_movie(str(cut))
+    qtbot.waitUntil(lambda: "열 수 없습니다" in w._busy.text(), timeout=30000)
+    assert "파일이 잘려 열 수 없습니다" in w._busy.text() and w._busy.isVisible()
+    assert "MB 만 있음" in w._busy.text() and "SHOT_A_comp_v004.mov" in w._busy.text()
+    w.close()
+
+
+# ── 2026-11-18 추가: 슬레이트 가림(S) · 메모 칸 상태 색 ────────────────────────
+
+
+def test_slate_mask_toggles_with_s_and_matches_the_edit(win: Any) -> None:
+    from bpe.core.confirm_view_math import slate_bar
+
+    assert not win._slate_on and not win._btn_slate.isChecked()
+    assert win._view._mask_bar == 0.0
+    QTest.keyClick(win, Qt.Key.Key_S)
+    size = win._bufs[KEY_CUR].size
+    assert win._slate_on and win._btn_slate.isChecked()
+    assert abs(win._view._mask_bar - slate_bar(*size)) < 1e-9 and win._view._mask_bar > 0.05
+    # 다른 판·다른 프레임으로 넘겨도 켜진 채로 있다
+    win._show_buffer(KEY_ORG)
+    win._step(1)
+    assert win._view._mask_bar > 0.05
+    # 버튼으로 끄면 원래대로
+    win._btn_slate.click()
+    assert not win._slate_on and win._view._mask_bar == 0.0
+    # 노트에 붙는 그림에는 가림이 들어가지 않는다(화면에서만 가린다)
+    frame = win._bufs[KEY_CUR].frames[0]
+    off = win._view.render_frame_image(frame, *size, lut_on=False)
+    win._toggle_slate()
+    on = win._view.render_frame_image(frame, *size, lut_on=False)
+    win._toggle_slate()
+    assert off is not None and on is not None and on == off
+
+
+def test_memo_box_shows_the_status_of_the_open_shot(win: Any) -> None:
+    assert win._panel.memo_status() == ""  # 샷그리드 정보 없이 파일만 연 상태
+    _as_task(win, 5, "S_A")  # 상태 sv
+    assert win._panel.memo_status() == "sv"
+    win._task["task_status"] = "retake"
+    win._sync_header()
+    assert win._panel.memo_status() == "retake"
+    win._reset_shot()
+    win._sync_header()
+    assert win._panel.memo_status() == ""

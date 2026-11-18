@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from PySide6.QtCore import QMimeData, QPoint, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (
+    QColor,
     QContextMenuEvent,
     QGuiApplication,
     QImage,
@@ -244,6 +245,31 @@ class _ClickRow(QLabel):
         elif picked is act_all:
             self.copy_note()
         event.accept()
+
+
+# 메모 칸을 상태 색으로 물들이는 세기 — 쨍하지 않게(바탕 22%, 테두리 55%)
+_MEMO_TINT, _MEMO_EDGE_TINT = 0.22, 0.55
+
+
+def _blend(base: str, color: str, amount: float) -> str:
+    """*base* 에 *color* 를 *amount*(0~1)만큼 섞은 색."""
+    a, b = QColor(base), QColor(color)
+    t = max(0.0, min(1.0, amount))
+    return QColor(
+        round(a.red() + (b.red() - a.red()) * t),
+        round(a.green() + (b.green() - a.green()) * t),
+        round(a.blue() + (b.blue() - a.blue()) * t),
+    ).name()
+
+
+def _memo_style(code: str) -> str:
+    """메모 칸의 모양 — 상태가 있으면 그 상태 색을 바탕과 테두리에 은은하게 섞는다."""
+    if not code:
+        return "QPlainTextEdit { padding: 2px 4px; }"
+    color = status_style.colors(code)[0]
+    bg = _blend(style.FIELD, color, _MEMO_TINT)
+    edge = _blend(style.FIELD, color, _MEMO_EDGE_TINT)
+    return f"QPlainTextEdit {{ padding: 2px 4px; background: {bg}; border: 1px solid {edge}; }}"
 
 
 class _FlowLayout(QLayout):
@@ -525,7 +551,8 @@ class ConfirmSidePanel(QWidget):
         self._memo_edit.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self._memo_edit.setMinimumHeight(64)
         self._memo_edit.document().setDocumentMargin(4)
-        self._memo_edit.setStyleSheet("QPlainTextEdit { padding: 2px 4px; }")
+        self._memo_status = ""
+        self._memo_edit.setStyleSheet(_memo_style(""))
         self._memo_edit.textChanged.connect(self.memo_edited)
         ex.addWidget(self._memo_edit, 1)
         # 붙여 넣은 그림 — 작은 그림으로 줄지어 보이고 × 로 뺀다
@@ -744,6 +771,8 @@ class ConfirmSidePanel(QWidget):
             f"QPushButton:hover {{ border: 1px solid {style.TEXT_STRONG}; }}"
             f"QPushButton:disabled {{ color: #6a6a6a; background: #2c2c2c; }}"
         )
+        # 메모 칸도 새로 읽은 상태 색으로 다시 칠한다(샷을 연 뒤에 색이 도착할 수 있다)
+        self._memo_edit.setStyleSheet(_memo_style(self._memo_status))
 
     # ── 샷의 글 칸에 적용(Annotation) ─────────────────────────────
 
@@ -1032,6 +1061,18 @@ class ConfirmSidePanel(QWidget):
     def past_count(self) -> int:
         return len(self._past_rows)
 
+    def set_memo_status(self, code: str) -> None:
+        """메모 칸의 바탕을 지금 상태의 색으로 은은하게 물들인다(빈 글이면 평소 색)."""
+        code = (code or "").strip()
+        if code == self._memo_status:
+            return
+        self._memo_status = code
+        self._memo_edit.setStyleSheet(_memo_style(code))
+        self._memo_edit.setToolTip(f"지금 상태: {code}" if code else "")
+
+    def memo_status(self) -> str:
+        return self._memo_status
+
     def memo_text(self) -> str:
         return self._memo_edit.toPlainText()
 
@@ -1048,6 +1089,7 @@ class ConfirmSidePanel(QWidget):
 
     def set_attach_text(self, text: str) -> None:
         self._attach.setText(text)
+        self._attach.setToolTip(text)  # 칸이 좁아 잘려도 올려 두면 다 보인다
 
     # ── 샷 넘기기 ────────────────────────────────────────────────
 

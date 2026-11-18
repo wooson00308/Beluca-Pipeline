@@ -30,7 +30,27 @@ def _fmt_fps(v: Optional[float]) -> str:
     return f"{v:.3f}" if v else "?"
 
 
+def _mb(n: int) -> str:
+    return f"{n / (1024 * 1024):.0f}MB"
+
+
+def cut_file_message(work: VideoInfo) -> str:
+    """현재버전 파일이 중간에 끊겼으면 그 사실을 알리는 글, 아니면 빈 글."""
+    if not work.is_cut:
+        return ""
+    total = work.bytes_present + work.bytes_missing
+    return f"파일이 잘림: {_mb(total)} 중 {_mb(work.bytes_present)} 만 있음 — 뒷부분 그림 없음"
+
+
+def short_decode_message(total: int, shown: int) -> str:
+    """풀어 보니 그림이 모자랄 때의 글 — *total* 장 중 *shown* 장만 풀렸다."""
+    return f"파일이 잘림: {total}장 중 {shown}장만 볼 수 있음"
+
+
 def _frames(work: VideoInfo, ref: Optional[VideoInfo], ref_label: str) -> CheckResult:
+    cut = cut_file_message(work)
+    if cut:  # 머리 글의 프레임 수가 맞아도 그림이 다 들어 있지 않다
+        return CheckResult("프레임", STATE_FAIL, cut)
     wf = work.frame_count
     if ref is None:
         return CheckResult(

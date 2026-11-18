@@ -62,6 +62,7 @@ from bpe.core.confirm_checks import (
     check_work_against_reference,
     failure_lines,
     has_failure,
+    short_decode_message,
 )
 from bpe.core.confirm_decode import (
     RESAMPLE_LINEAR_22,
@@ -89,7 +90,7 @@ from bpe.core.confirm_media import (
     reference_sources,
     usual_shot_root,
 )
-from bpe.core.confirm_probe import VideoInfo, codec_label, probe_video
+from bpe.core.confirm_probe import VideoInfo, codec_label, container_shortfall, probe_video
 from bpe.core.confirm_sequence import (
     SEQ_BUDGET_SHARE,
     SEQ_MIN_CUTS,
@@ -123,6 +124,7 @@ from bpe.core.confirm_view_math import (
     CURVE_REC709,
     VIEW_MODE_A,
     VIEW_MODE_DIFF,
+    slate_bar,
 )
 from bpe.core.ffmpeg_paths import resolve_ffmpeg
 from bpe.core.logging import get_logger
@@ -210,6 +212,7 @@ _SHORTCUTS: Tuple[Tuple[str, Tuple[Tuple[Tuple[str, ...], str], ...]], ...] = (
             (("L",), "룩업 켜고 끄기"),
             (("Shift+L",), "지금 보는 판만 룩업 씌우기 / 빼기"),
             (("F", "H"), "Fit / Fill"),
+            (("S",), "슬레이트 가림 켜고 끄기 (편집본과 같은 2:1)"),
             (("PgUp", "PgDn"), "이전 샷 / 다음 샷"),
             (("휠", "Ctrl+끌기"), "확대"),
             (("Alt+끌기",), "화면 이동"),
@@ -268,6 +271,8 @@ class _Buffer:
         self.resample = RESAMPLE_PLAIN  # 크기를 줄이는 방법(원본만 줄일 때는 누크식 선형)
         self.version_label = ""
         self.error = ""
+        # 다 풀었는데 그림이 모자라게 끝난 자리(0부터 세는 번호) — 파일이 잘렸거나 깨졌다
+        self.short_at: Optional[int] = None
 
     @property
     def available(self) -> bool:
@@ -566,6 +571,7 @@ class ConfirmWindow(QWidget):
         self._channel = CHANNEL_RGB
         self._lut: Optional[CubeLut] = None
         self._lut_on = False
+        self._slate_on = False  # 편집본 슬레이트 자리(위아래 띠) 가림
         self._lut_path = ""
         self._index = 0
         self._count = 0
@@ -857,6 +863,14 @@ class ConfirmWindow(QWidget):
         fseg.addWidget(self._btn_fill)
         style.make_segments([self._btn_fit, self._btn_fill])
         chans.addLayout(fseg)
+        self._btn_slate = _btn(
+            "Slate (S)",
+            checkable=True,
+            tip="편집본 슬레이트 자리(위아래 띠, 2:1)를 가려서 봅니다 — 다시 누르면 끔",
+        )
+        self._btn_slate.clicked.connect(self._toggle_slate)
+        style.make_segments([self._btn_slate])  # Fit·Fill 과 같은 눌린 모양
+        chans.addWidget(self._btn_slate)
         self._btn_fullview = _btn(
             "Fullscreen (F11)", tip="영상만 화면 가득 — 나올 때는 Esc 또는 F11"
         )
@@ -1219,6 +1233,7 @@ class ConfirmWindow(QWidget):
         for buf in self._bufs.values():
             buf.path, buf.info, buf.size, buf.frames = None, None, (0, 0), {}
             buf.full, buf.lut_baked, buf.version_label, buf.error = False, False, "", ""
+            buf.short_at = None
             buf.resample = RESAMPLE_PLAIN
         self._index, self._count = 0, 0
         self._checks = []
@@ -1421,6 +1436,7 @@ class ConfirmWindow(QWidget):
             lut_b_on=False,
             lut_post=False,
             curve=self._curve,
+            mask_bar=self._slate_bar(c.size),
         )
         number = self._frame_start + frame
         self._timeline.set_current(frame)
@@ -1589,7 +1605,21 @@ class ConfirmWindow(QWidget):
         infos: Dict[str, Optional[VideoInfo]] = result["infos"]
         cur_info = infos.get(KEY_CUR)
         if cur_info is None:
-            self._set_busy("영상 규격을 읽지 못했습니다", Path(self._movie).name, error=True)
+            name = Path(self._movie).name
+            missing = container_shortfall(self._movie)
+            if missing > 0:  # 목차까지 날아간 파일 — 보내거나 복사하다 끊겼다
+                try:
+                    have = Path(self._movie).stat().st_size
+                except OSError:
+                    have = 0
+                mb = 1024 * 1024
+                self._set_busy(
+                    "파일이 잘려 열 수 없습니다",
+                    f"{name} — {(have + missing) / mb:.0f}MB 중 {have / mb:.0f}MB 만 있음",
+                    error=True,
+                )
+            else:
+                self._set_busy("영상 규격을 읽지 못했습니다", name, error=True)
             return
         self._shot_root = media.shot_root
         self._curve = CURVE_GAMMA22 if result.get("plate_color") == GAMMA else CURVE_REC709
@@ -2007,7 +2037,7 @@ class ConfirmWindow(QWidget):
         )
         token = self._load_token
         w.frame_ready.connect(lambda k, i, d, t=token: self._on_frame(k, i, d, t))
-        w.finished_ok.connect(lambda _k, _n, t=token: self._on_decode_done(t))
+        w.finished_ok.connect(lambda k, n, t=token, s=start: self._on_decode_done(t, k, s + n))
         w.failed.connect(lambda k, m, t=token: self._on_decode_failed(k, m, t))
         self._decoding = w
         self._decoders.append(w)
@@ -2043,12 +2073,41 @@ class ConfirmWindow(QWidget):
         if index == self._buffer_index(buf) and key in (self._shown, self._diff_base()):
             self._refresh_view()
 
-    def _on_decode_done(self, token: int) -> None:
+    def _on_decode_done(self, token: int, key: str = "", upto: int = 0) -> None:
+        """한 판을 다 풀었다. *upto* 는 그 판에서 그림이 올라온 마지막 번호의 다음(0부터).
+
+        머리 글에 적힌 프레임 수보다 적게 풀렸으면 파일이 잘렸거나 깨진 것이다 — 「올리는 중」
+        으로 두지 않고 알린다(현재버전이면 검사도 실패로 바꾼다).
+        """
         if token != self._load_token:
             return
+        buf = self._bufs.get(key)
+        if buf is not None and buf.available:
+            want = min(self._count, buf.frame_count() or self._count)
+            if 0 < upto < want:
+                buf.short_at = upto
+                logger.warning(
+                    "confirm decode: %s %d장 중 %d장만 풀림 — 파일이 잘렸거나 깨짐 (%s)",
+                    key,
+                    want,
+                    upto,
+                    buf.path.name if buf.path else "",
+                )
+                if key == KEY_CUR:
+                    self._fail_frames_check(short_decode_message(want, upto))
+                self._sync_all()
         self._decoding = None
         self._start_next_decode()
         self._maybe_preload()
+
+    def _fail_frames_check(self, message: str) -> None:
+        """프레임 검사를 실패로 바꾼다(없으면 맨 앞에 넣는다) — 풀어 보니 그림이 모자랄 때."""
+        if self._annotation:
+            return
+        cut = CheckResult("프레임", STATE_FAIL, message)
+        rest = [c for c in self._checks if c.name != "프레임"]
+        self._checks = [cut, *rest]
+        self._panel.set_checks(self._checks)
 
     def _on_decode_failed(self, key: str, msg: str, token: int) -> None:
         if token != self._load_token:
@@ -2250,6 +2309,7 @@ class ConfirmWindow(QWidget):
             lut_b_on=lut_b,
             lut_post=lut_post,
             curve=self._curve,
+            mask_bar=self._slate_bar(buf.size),
         )
         self._layer.set_frame(self.frame_number())
         self._sync_labels()
@@ -2282,8 +2342,12 @@ class ConfirmWindow(QWidget):
         buf = self._bufs[self._shown]
         if buf.available:
             name = buf.path.stem if buf.path else ""
-            ready = buf.frames.get(self._buffer_index(buf)) is not None
+            at = self._buffer_index(buf)
+            ready = buf.frames.get(at) is not None
             loading = "" if ready else "  올리는 중…"
+            if not ready and buf.short_at is not None and at >= buf.short_at:
+                last = self._frame_start + buf.short_at - 1
+                loading = f"  그림 없음 — 파일이 {last} 까지만 있음"
             self._hud.setText(f"{buf.number} {buf.title}  {name}  {self.frame_number()}{loading}")
             self._hud.adjustSize()
             self._hud.show()
@@ -2400,6 +2464,12 @@ class ConfirmWindow(QWidget):
             who = annotation_subtitle(t)
             status_text = annotation_status_text(t) or status
         self._who.setText(who)
+        # 메모 칸 바탕을 지금 상태의 색으로 은은하게 — 어느 상태의 샷인지 한눈에 보이게.
+        # Annotation 에서 태스크마다 상태가 다르면 한 색으로 말할 수 없어 물들이지 않는다.
+        tint = status
+        if self._annotation and len(set(t.get("task_statuses") or [status])) > 1:
+            tint = ""
+        self._panel.set_memo_status(tint)
         flash = self._status_flash
         if flash is not None and flash.get("task_id") != row_ident(t):
             flash = None  # 다른 샷으로 넘어갔다 — 이 샷의 강조가 아니다
@@ -2589,6 +2659,18 @@ class ConfirmWindow(QWidget):
         self._gain.blockSignals(False)
         self._gamma.blockSignals(False)
         self._sync_all()
+
+    def _slate_bar(self, size: Tuple[int, int]) -> float:
+        """슬레이트 가림이 켜져 있으면 위아래 띠 하나의 높이 몫, 꺼져 있으면 0."""
+        return slate_bar(size[0], size[1]) if self._slate_on else 0.0
+
+    def _toggle_slate(self) -> None:
+        """편집본 슬레이트 자리(위아래 띠)를 가렸다 보였다 한다 — 단축키 S."""
+        self._slate_on = not self._slate_on
+        self._btn_slate.setChecked(self._slate_on)
+        cur = self._bufs[self._shown]
+        size = cur.size if cur.size[0] else self._bufs[KEY_CUR].size
+        self._view.set_view(mask_bar=self._slate_bar(size))
 
     def _view_fit(self) -> None:
         self._view.fit()
@@ -2868,9 +2950,7 @@ class ConfirmWindow(QWidget):
         if pasted:
             parts.append(f"붙인 그림 {pasted}장")
         self._panel.set_attach_text(
-            " + ".join(parts) + " 첨부"
-            if parts
-            else "그림을 그리거나 Ctrl+V 로 붙이면 여기 첨부됩니다"
+            " + ".join(parts) + " 첨부" if parts else "그리거나 Ctrl+V 로 그림 첨부"
         )
 
     # ── 메모에 붙여 넣은 그림 ────────────────────────────────────
@@ -3709,6 +3789,8 @@ class ConfirmWindow(QWidget):
             self._view_fit()
         elif letter == "H":
             self._view_fill()
+        elif letter == "S":
+            self._toggle_slate()
         elif letter in ("V", "N", "O", "P", "W", "T"):
             self._set_tool(next(t for t, _i, _l, k in _TOOLS if k == letter))
         else:

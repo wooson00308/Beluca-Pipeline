@@ -75,6 +75,7 @@ uniform int curve;
 uniform float lutSize;
 uniform vec3 lutMin;
 uniform vec3 lutMax;
+uniform float maskBar;
 vec3 look(vec3 c) {
     vec3 t = clamp((c - lutMin) / max(lutMax - lutMin, vec3(0.000001)), 0.0, 1.0);
     return texture(lutTex, t * ((lutSize - 1.0) / lutSize) + 0.5 / lutSize).rgb;
@@ -115,6 +116,8 @@ void main() {
     else if (channel == 2) c = c.ggg;
     else if (channel == 3) c = c.bbb;
     else if (channel == 4) c = vec3(dot(c, vec3(0.2126, 0.7152, 0.0722)));
+    // 슬레이트 가림 — 위아래 띠를 검게(편집본의 슬레이트 자리)
+    if (maskBar > 0.0 && (uv.y < maskBar || uv.y > 1.0 - maskBar)) c = vec3(0.0);
     outColor = vec4(c, 1.0);
 }
 """
@@ -236,6 +239,7 @@ class ViewRenderer:
         lut_b_on: bool = False,
         lut_post: bool = False,
         curve: str = CURVE_REC709,
+        mask_bar: float = 0.0,
     ) -> None:
         prog, vao = self._prog, self._vao
         tex_a = self._tex.get(SLOT_A)
@@ -263,6 +267,7 @@ class ViewRenderer:
         lo, hi = self._lut.domain_min, self._lut.domain_max
         prog.setUniformValue(loc("lutMin"), float(lo[0]), float(lo[1]), float(lo[2]))
         prog.setUniformValue(loc("lutMax"), float(hi[0]), float(hi[1]), float(hi[2]))
+        prog.setUniformValue1f(loc("maskBar"), max(0.0, min(0.5, float(mask_bar))))
         functions.glDrawArrays(GL_TRIANGLES, 0, 3)
         vao.release()
         prog.release()
@@ -307,6 +312,7 @@ class ConfirmGLView(QOpenGLWidget):
         self._lut_b_on = False
         self._lut_post = False
         self._curve = CURVE_REC709
+        self._mask_bar = 0.0  # 슬레이트 가림: 위아래 띠 하나의 높이 몫(0 = 끔)
         self._gl_ok = False
         self._blank = False  # 그림을 비운 상태(다음 그림이 올 때까지)
         self._img_size: Optional[Tuple[int, int]] = None
@@ -352,7 +358,10 @@ class ConfirmGLView(QOpenGLWidget):
         lut_b_on: Optional[bool] = None,
         lut_post: Optional[bool] = None,
         curve: Optional[str] = None,
+        mask_bar: Optional[float] = None,
     ) -> None:
+        if mask_bar is not None:
+            self._mask_bar = mask_bar
         if gain is not None:
             self._gain = gain
         if gamma is not None:
@@ -550,6 +559,7 @@ class ConfirmGLView(QOpenGLWidget):
             lut_b_on=self._lut_b_on,
             lut_post=self._lut_post,
             curve=self._curve,
+            mask_bar=self._mask_bar,
         )
 
     def render_frame_image(

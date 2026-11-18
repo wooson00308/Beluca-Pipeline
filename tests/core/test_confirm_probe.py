@@ -110,3 +110,77 @@ def test_codec_label_reads_like_a_person_would_say_it() -> None:
     assert codec_label(info("h264", "High")) == "H.264 High"
     assert codec_label(info("dnxhd", "")) == "DNxHD"
     assert codec_label(info("", "")) == ""
+
+
+# ── 2026-11-18 추가: 중간에 끊긴 MOV 알아채기 ──────────────────────────────
+
+
+def _box(kind: bytes, body: bytes) -> bytes:
+    import struct
+
+    return struct.pack(">I4s", 8 + len(body), kind) + body
+
+
+def _mov(mdat_declared: int, mdat_written: int) -> bytes:
+    """목차(moov)가 앞에 있는 작은 MOV 흉내 — mdat 는 적힌 크기와 실제 쓴 크기를 따로 준다."""
+    import struct
+
+    head = _box(b"ftyp", b"qt  " + bytes(4)) + _box(b"moov", bytes(40)) + _box(b"wide", b"")
+    return head + struct.pack(">I4s", 8 + mdat_declared, b"mdat") + bytes(mdat_written)
+
+
+def test_whole_mov_has_no_shortfall(tmp_path: Path) -> None:
+    f = tmp_path / "ok.mov"
+    f.write_bytes(_mov(1000, 1000))
+    assert cp.container_shortfall(str(f)) == 0
+    # 목차가 뒤에 있는 파일도 멀쩡하면 0
+    g = tmp_path / "tail.mov"
+    g.write_bytes(_box(b"ftyp", b"qt  ") + _box(b"mdat", bytes(500)) + _box(b"moov", bytes(40)))
+    assert cp.container_shortfall(str(g)) == 0
+
+
+def test_cut_mov_reports_the_missing_bytes(tmp_path: Path) -> None:
+    f = tmp_path / "cut.mov"
+    f.write_bytes(_mov(1000, 160))  # 보내다 끊긴 파일: 그림 자료가 1000 중 160 만 있다
+    assert cp.container_shortfall(str(f)) == 840
+
+
+def test_big_box_and_run_to_end_box(tmp_path: Path) -> None:
+    import struct
+
+    head = _box(b"ftyp", b"qt  ")
+    big = tmp_path / "big.mov"  # 크기를 8바이트로 적는 큰 덩어리
+    big.write_bytes(head + struct.pack(">I4sQ", 1, b"mdat", 16 + 300) + bytes(100))
+    assert cp.container_shortfall(str(big)) == 200
+    rest = tmp_path / "rest.mov"  # 크기 0 = 파일 끝까지 → 모자란지 알 수 없다
+    rest.write_bytes(head + struct.pack(">I4s", 0, b"mdat") + bytes(100))
+    assert cp.container_shortfall(str(rest)) == 0
+
+
+def test_other_files_are_unknown_not_cut(tmp_path: Path) -> None:
+    exr = tmp_path / "a.exr"
+    exr.write_bytes(bytes([0x76, 0x2F, 0x31, 0x01]) + bytes(64))
+    assert cp.container_shortfall(str(exr)) == 0
+    tiny = tmp_path / "tiny.mov"
+    tiny.write_bytes(b"ftyp")
+    assert cp.container_shortfall(str(tiny)) == 0
+    assert cp.container_shortfall(str(tmp_path / "none.mov")) == 0
+
+
+def test_probe_marks_a_cut_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    f = tmp_path / "cut.mov"
+    f.write_bytes(_mov(1000, 160))
+
+    def _run(cmd: list, **kw: object) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(_PRORES).encode(), stderr=b"")
+
+    monkeypatch.setattr(cp.subprocess, "run", _run)
+    info = probe_video(str(f), ffprobe="ffprobe")
+    assert info is not None and info.is_cut
+    assert info.bytes_missing == 840 and info.bytes_present == f.stat().st_size
+    assert info.frame_count == 74  # 머리 글의 프레임 수는 끊긴 파일에서도 그대로 읽힌다
+    # 멀쩡한 파일은 표시가 없다
+    g = tmp_path / "ok.mov"
+    g.write_bytes(_mov(1000, 1000))
+    ok = probe_video(str(g), ffprobe="ffprobe")
+    assert ok is not None and not ok.is_cut and ok.bytes_missing == 0

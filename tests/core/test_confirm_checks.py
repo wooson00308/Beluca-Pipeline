@@ -151,3 +151,22 @@ def test_basis_text() -> None:
     assert basis_text("편집본", True, None) == "프리셋 없음 · 프레임 수는 편집본"
     assert basis_text("편집본", True, _standard()) == "프리셋 PROJ_001 · 프레임 수는 편집본"
     assert basis_text("원본", False, _standard()) == "프리셋 PROJ_001 · 프레임 수 기준 없음"
+
+
+# ── 2026-11-18 추가: 중간에 끊긴 파일은 프레임 수가 맞아도 실패 ────────────────
+
+
+def test_cut_file_fails_even_when_the_frame_count_matches() -> None:
+    from bpe.core.confirm_checks import cut_file_message, short_decode_message
+
+    mb = 1024 * 1024
+    cut = _info()._replace(bytes_missing=180 * mb, bytes_present=36 * mb)
+    res = check_work_against_reference(cut, _info(), "edit", plate=_info())
+    assert res[0].state == STATE_FAIL and res[0].name == "프레임"
+    assert res[0].message == "파일이 잘림: 216MB 중 36MB 만 있음 — 뒷부분 그림 없음"
+    assert has_failure(res) and failure_lines(res)[0].startswith("파일이 잘림")
+    # 기준(edit)이 없어도 잘린 것은 실패로 나온다
+    alone = check_work_against_reference(cut, None, "edit")
+    assert alone[0].state == STATE_FAIL
+    assert cut_file_message(_info()) == ""
+    assert short_decode_message(65, 10) == "파일이 잘림: 65장 중 10장만 볼 수 있음"

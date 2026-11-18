@@ -132,3 +132,17 @@ def test_tiny_difference_vanishes_under_the_viewer_lut_like_in_nuke() -> None:
     # 진짜로 다른 곳은 그대로 보인다
     c = (0.55, 0.55, 0.55)
     assert view_pixel(a, c, mode=VIEW_MODE_DIFF, gain=4.0, lut_post=log_look)[0] > 0.5
+
+
+def test_slate_bar_matches_the_edit_slate() -> None:
+    from bpe.core.confirm_view_math import SLATE_ASPECT, slate_bar
+
+    assert SLATE_ASPECT == 2.0
+    # 16:9 그림: 위아래 5.56% 씩 — 1080 줄이면 60줄, UHD 면 120줄
+    assert abs(slate_bar(1920, 1080) - 60 / 1080) < 1e-9
+    assert abs(slate_bar(3840, 2160) * 2160 - 120) < 1e-6
+    assert abs(slate_bar(2048, 1152) - 60 / 1080) < 1e-9
+    # 이미 2:1 이거나 더 납작하면 가릴 것이 없다
+    assert slate_bar(2000, 1000) == 0.0 and slate_bar(2400, 1000) == 0.0
+    assert slate_bar(0, 1080) == 0.0 and slate_bar(1920, 0) == 0.0
+    assert abs(slate_bar(100, 4000) - 0.49375) < 1e-9  # 세로로 긴 그림도 절반을 넘지 않는다

@@ -410,3 +410,51 @@ def test_shot_text_block_shows_only_in_annotation_and_chips_fill_the_box(panel: 
     assert panel.shot_text(KIND_DESCRIPTION) == ""
     panel.set_annotation(False)
     assert not panel._shot_text_block.isVisibleTo(panel)
+
+
+# ── 2026-11-18 추가: 메모 칸에 상태 색을 은은하게 ─────────────────────────────
+
+
+def test_memo_box_is_tinted_with_the_status_color(panel: Any) -> None:
+    from PySide6.QtGui import QColor
+
+    from bpe.gui.confirm import side_panel as sp
+    from bpe.gui.confirm import status_style, style
+
+    plain = panel._memo_edit.styleSheet()
+    assert "background" not in plain and panel.memo_status() == ""
+    panel.set_memo_status("retake")
+    sheet = panel._memo_edit.styleSheet()
+    color = status_style.colors("retake")[0]
+    bg = sp._blend(style.FIELD, color, sp._MEMO_TINT)
+    assert f"background: {bg}" in sheet and panel.memo_status() == "retake"
+    assert "retake" in panel._memo_edit.toolTip()
+    # 쨍하지 않게 — 상태 색 그대로가 아니라 어두운 바탕에 조금만 섞는다
+    base, tint, full = QColor(style.FIELD), QColor(bg), QColor(color)
+    assert bg not in (style.FIELD, QColor(color).name())
+    assert abs(tint.red() - base.red()) < abs(full.red() - base.red()) or full.red() == base.red()
+    assert sp._MEMO_TINT <= 0.3
+    # 상태가 바뀌면 색도 바뀌고, 없으면 평소 모양으로
+    panel.set_memo_status("cfrm")
+    assert panel._memo_edit.styleSheet() != sheet
+    panel.set_memo_status("")
+    assert panel._memo_edit.styleSheet() == plain and panel._memo_edit.toolTip() == ""
+    assert sp._blend("#000000", "#ffffff", 0.5) == "#808080"
+
+
+def test_memo_tint_follows_the_shotgrid_color_when_it_arrives_late(panel: Any) -> None:
+    """샷을 연 뒤에 샷그리드 상태 색이 도착해도 메모 칸이 그 색으로 다시 칠해진다."""
+    from bpe.gui.confirm import side_panel as sp
+    from bpe.gui.confirm import status_style, style
+
+    panel.set_memo_status("retake")
+    old = panel._memo_edit.styleSheet()
+    try:
+        status_style.set_styles({"retake": {"name": "retake", "color": "#3366ff"}})
+        panel.refresh_status_styles()
+        want = sp._blend(style.FIELD, "#3366ff", sp._MEMO_TINT)
+        assert f"background: {want}" in panel._memo_edit.styleSheet()
+        assert panel._memo_edit.styleSheet() != old
+    finally:
+        status_style.set_styles({})
+        panel.refresh_status_styles()

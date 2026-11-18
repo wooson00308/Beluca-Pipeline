@@ -146,3 +146,19 @@ def fit_rect(src_w: int, src_h: int, dst_w: int, dst_h: int) -> Tuple[int, int, 
     w = max(1, int(round(src_w * scale)))
     h = max(1, int(round(src_h * scale)))
     return ((dst_w - w) // 2, (dst_h - h) // 2, w, h)
+
+
+# 문무 편집본(edit)의 슬레이트 — 위아래 띠 안쪽 그림이 2:1 (1080 줄이면 위아래 60줄씩)
+SLATE_ASPECT = 2.0
+
+
+def slate_bar(width: int, height: int, aspect: float = SLATE_ASPECT) -> float:
+    """슬레이트 띠 하나(위 또는 아래)가 그림 높이에서 차지하는 몫(0 ~ 0.5).
+
+    안쪽 그림이 *aspect* 비율이 되게 위아래를 같은 높이로 가린다. 그림이 이미 그보다
+    납작하면 가릴 것이 없어 0.
+    """
+    if width <= 0 or height <= 0 or aspect <= 0:
+        return 0.0
+    inner = width / aspect
+    return max(0.0, min(0.5, (height - inner) / 2.0 / height))

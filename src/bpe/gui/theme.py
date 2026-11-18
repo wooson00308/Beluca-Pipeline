@@ -64,7 +64,7 @@ TASK_STATUS_COLORS: Dict[str, Tuple[str, str]] = {
     "wtg": ("#FFFF00", "#111111"),
     "assign": ("#E8E4C0", "#111111"),
     "wip": ("#F0A0C0", "#111111"),
-    "retake": ("#FF6600", "#FFFFFF"),
+    "retake": ("#FDCD44", "#111111"),
     "cfrm": ("#CCCCCC", "#111111"),
     "sv": ("#00AA00", "#FFFFFF"),
     "pub-s": ("#003399", "#FFFFFF"),
