@@ -30,8 +30,10 @@ from bpe.core.nk_generator import (
     _preset_first_part,
     _read_file_type_from_plate_basename,
     _replace_knob_in_block,
+    _resolve_edit_media_dir,
     _scan_edit_frame_range,
     _scan_plate_frame_range,
+    _stray_shot_read_warnings,
     _template_sample_path_warnings,
     _to_nk_path,
     _write2_inner_is_exr_delivery_target,
@@ -1758,3 +1760,142 @@ class TestPatchReadEditFrameRange:
         assert "last_frame 1034" in out
         assert "frame_range 1001-1025" in out
         assert " last 34" in out
+
+
+def _make_mov_with_frames(path: Path, n: int) -> None:
+    """프레임 수 n 을 읽을 수 있는 최소 mov 파일."""
+    ftyp = _wrap_box(b"ftyp", b"qt  " + b"\x00" * 4)
+    path.write_bytes(ftyp + _wrap_box(b"moov", _make_trak(b"vide", n)))
+
+
+class TestResolveEditMediaDir:
+    """편집본 폴더 고르기: edit/ 바로 아래 우선, 없으면 edit/v### 최신."""
+
+    def test_direct_mov_keeps_edit_dir(self, tmp_path):
+        edit = tmp_path / "edit"
+        edit.mkdir()
+        (edit / "a_edit_v003.mov").write_bytes(b"")
+        assert _resolve_edit_media_dir(edit) == edit
+
+    def test_direct_exr_sequence_keeps_edit_dir(self, tmp_path):
+        edit = tmp_path / "edit"
+        edit.mkdir()
+        (edit / "a_edit.1001.exr").write_bytes(b"")
+        assert _resolve_edit_media_dir(edit) == edit
+
+    def test_picks_highest_version(self, tmp_path):
+        edit = tmp_path / "edit"
+        for v in ("v001", "v002", "v010"):
+            (edit / v).mkdir(parents=True)
+            (edit / v / f"a_edit_{v}.mov").write_bytes(b"")
+        assert _resolve_edit_media_dir(edit) == edit / "v010"
+
+    def test_skips_empty_newer_version(self, tmp_path):
+        edit = tmp_path / "edit"
+        (edit / "v003").mkdir(parents=True)
+        (edit / "v002").mkdir(parents=True)
+        (edit / "v002" / "a_edit_v002.mov").write_bytes(b"")
+        assert _resolve_edit_media_dir(edit) == edit / "v002"
+
+    def test_direct_files_win_over_version_dirs(self, tmp_path):
+        edit = tmp_path / "edit"
+        (edit / "v001").mkdir(parents=True)
+        (edit / "v001" / "a_edit_v001.mov").write_bytes(b"")
+        (edit / "a_edit_v002.mov").write_bytes(b"")
+        assert _resolve_edit_media_dir(edit) == edit
+
+    def test_non_media_files_ignored(self, tmp_path):
+        edit = tmp_path / "edit"
+        (edit / "v001").mkdir(parents=True)
+        (edit / "Thumbs.db").write_bytes(b"")
+        (edit / "v001" / "a_edit_v001.mov").write_bytes(b"")
+        assert _resolve_edit_media_dir(edit) == edit / "v001"
+
+    def test_missing_or_empty_dir_unchanged(self, tmp_path):
+        missing = tmp_path / "nope" / "edit"
+        assert _resolve_edit_media_dir(missing) == missing
+        empty = tmp_path / "edit"
+        (empty / "v001").mkdir(parents=True)
+        (empty / "other").mkdir()
+        assert _resolve_edit_media_dir(empty) == empty
+
+
+class TestStrayShotReadWarnings:
+    def test_warns_for_other_shot_non_plate_non_edit(self):
+        body = (
+            "Read {\n inputs 0\n file W:/vfx/project_2026/SIL_036/04_sq/yego/yego_0070/org/\n"
+            " name Read2\n}\n"
+        )
+        w = _stray_shot_read_warnings(body, Path("W:/vfx/project_2026/SIL_036/04_sq/s042/X"))
+        assert len(w) == 1
+        assert "Read2" in w[0]
+
+    def test_no_warning_for_plate_edit_current_shot_or_other_paths(self):
+        root = "W:/vfx/project_2026/P/04_sq/E1/E1_0010"
+        body = (
+            "Read {\n file W:/vfx/project_2026/P/04_sq/E9/E9_0010/plate/org/v001/a.mov\n"
+            " name Read1\n}\n"
+            "Read {\n file W:/vfx/project_2026/P/04_sq/E9/E9_0010/edit/a_edit.mov\n"
+            " name Read2\n}\n"
+            "Read {\n file W:/vfx/project_2026/P/04_sq/E9/E9_0010/org/\n name Read_Edit\n}\n"
+            f"Read {{\n file {root}/comp/devl/element/x.####.exr\n name Read4\n}}\n"
+            "Read {\n file W:/vfx/project_2024/SNO_015/03_prod/logo.png\n name Read5\n}\n"
+        )
+        assert _stray_shot_read_warnings(body, Path(root)) == []
+
+
+class TestGenerateNkContentVersionedEdit:
+    """SIL_036 처럼 편집본이 edit/v001/ 안에 있을 때 빌드 결과."""
+
+    def _run(self, tmp_path, template_body):
+        shot = "s042_0220"
+        shot_root = tmp_path / "s042" / "S042_0220"
+        plate_hi = shot_root / "plate" / "org" / "v001"
+        plate_hi.mkdir(parents=True)
+        _make_mov_with_frames(plate_hi / "s042_0220_org_v001.mov", 77)
+        edit_v = shot_root / "edit" / "v001"
+        edit_v.mkdir(parents=True)
+        _make_mov_with_frames(edit_v / "s042_0220_edit_v001.mov", 77)
+        paths = {
+            "shot_root": shot_root,
+            "plate_hi": plate_hi,
+            "edit": shot_root / "edit",
+            "renders": shot_root / "comp" / "devl" / "renders",
+        }
+        before = dict(paths)
+        preset = {"fps": "23.976", "plate_width": 1920, "plate_height": 1080}
+        preset["project_code"] = "SIL_036"
+        with patch("bpe.core.nk_generator.load_preset_template", return_value=template_body):
+            content, warns = generate_nk_content(preset, shot, paths, "v001")
+        assert paths == before  # 호출한 쪽 paths 는 그대로
+        return content, warns, edit_v
+
+    def test_edit_read_points_to_version_folder_and_syncs_retime(self, tmp_path):
+        template = (
+            "version 14.1 v4\n"
+            "Read {\n inputs 0\n file_type mov\n"
+            " file W:/vfx/project_2026/SIL_036/04_sq/s010/s010_0010/edit/v001/"
+            "s010_0010_edit_v001.mov\n last 61\n origlast 61\n origset true\n name Read2\n}\n"
+            "Retime {\n input.last 61\n output.first 1001\n output.first_lock true\n"
+            ' output.last 1061\n time ""\n name Retime1\n}\n'
+            "Read {\n inputs 0\n file_type mov\n"
+            " file W:/vfx/project_2026/SIL_036/04_sq/yego/yego_10/plate/org/v001/"
+            "yego_10_org_v001.mov\n last 15\n origlast 15\n origset true\n name Read1\n}\n"
+        )
+        content, warns, edit_v = self._run(tmp_path, template)
+        edit_nk = str(edit_v).replace("\\", "/")
+        assert f"{edit_nk}/s042_0220_edit_v001.mov" in content
+        assert "s010_0010_edit" not in content
+        assert " input.last 77" in content
+        assert " output.last 1077" in content
+        assert warns == []
+
+    def test_unrecognized_edit_read_warns(self, tmp_path):
+        template = (
+            "version 14.1 v4\n"
+            "Read {\n inputs 0\n file_type exr\n"
+            " file W:/vfx/project_2026/SIL_036/04_sq/yego/yego_0070/org/\n"
+            " origset true\n name Read2\n}\n"
+        )
+        _content, warns, _ = self._run(tmp_path, template)
+        assert any("Read2" in w and "다른 샷 경로" in w for w in warns)

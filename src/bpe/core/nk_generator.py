@@ -362,6 +362,50 @@ def _discover_edit_sequence_basename(edit_dir: Path, shot_name: str) -> Optional
     return None
 
 
+_EDIT_VERSION_DIR_RE = re.compile(r"^v(\d+)$", re.IGNORECASE)
+
+
+def _dir_has_edit_media(folder: Path) -> bool:
+    """폴더 바로 아래에 편집본으로 쓸 영상(mov 등)이나 이미지 시퀀스 파일이 있으면 True."""
+    try:
+        for p in folder.iterdir():
+            if not p.is_file():
+                continue
+            if p.suffix.lower().lstrip(".") in _PLATE_VIDEO_EXTS:
+                return True
+            if _PLATE_SEQ_FRAME_RE.match(p.name):
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def _resolve_edit_media_dir(edit_dir: Path) -> Path:
+    """
+    편집본 파일이 실제로 들어 있는 폴더를 고른다.
+
+    - ``edit/`` 바로 아래에 편집본 파일이 있으면 ``edit/`` (기존 프로젝트 동작 그대로)
+    - 없으면 ``edit/v###`` 중 가장 높은 버전부터 파일이 있는 첫 폴더 (SIL_036 처럼 버전 폴더 사용)
+    - 둘 다 없거나 폴더가 없으면 ``edit/`` 그대로
+    """
+    try:
+        if not edit_dir.is_dir():
+            return edit_dir
+        if _dir_has_edit_media(edit_dir):
+            return edit_dir
+        version_dirs = []
+        for d in edit_dir.iterdir():
+            m = _EDIT_VERSION_DIR_RE.match(d.name)
+            if m and d.is_dir():
+                version_dirs.append((int(m.group(1)), d))
+    except OSError:
+        return edit_dir
+    for _num, vdir in sorted(version_dirs, key=lambda t: t[0], reverse=True):
+        if _dir_has_edit_media(vdir):
+            return vdir
+    return edit_dir
+
+
 def _default_edit_basename(edit_dir: Path, shot_name: str) -> str:
     """디스크 스캔 결과 또는 흔한 edit 파일명 패턴으로 NK ``file`` 베이스명을 정한다."""
     discovered = _discover_edit_sequence_basename(edit_dir, shot_name)
@@ -818,6 +862,36 @@ def _scan_edit_frame_range(edit_dir: Path, basename: str) -> Optional[Tuple[int,
         return None
 
     return None
+
+
+def _stray_shot_read_warnings(body: str, shot_root: Any) -> List[str]:
+    """
+    플레이트·편집본으로 인식되지 않았는데 다른 샷 폴더(``/04_sq/``)를 그대로 가리키는
+    Read 가 있으면 경고 문구를 만든다. 템플릿의 편집본 Read 가 ``/edit/`` 경로가 아니라서
+    BPE 가 바꾸지 못하고 템플릿 샷 경로가 그대로 남는 경우를 알려 준다.
+    현재 샷 폴더 안을 가리키는 Read 는 정상으로 본다.
+    """
+    root_l = _to_nk_path(shot_root).rstrip("/").lower() + "/"
+    out: List[str] = []
+    for _start, _end, inner in _find_blocks_with_positions(body, "Read"):
+        fp = _read_file_path_from_inner(inner)
+        if not fp:
+            continue
+        norm = fp.replace("\\", "/")
+        low = norm.lower()
+        if "/04_sq/" not in low or low.startswith(root_l):
+            continue
+        if _is_plate_read_file_path(fp) or _is_edit_read_file_path(fp):
+            continue
+        if _is_edit_read_block(inner):
+            continue
+        m = re.search(r"(?m)^ name (\S+)", inner)
+        node = m.group(1) if m else "Read"
+        out.append(
+            f"⚠ 템플릿 {node} 가 다른 샷 경로({norm})를 그대로 가리킵니다. "
+            "편집본 Read 라면 템플릿에서 /edit/ 경로의 실제 편집본 파일로 다시 저장하세요."
+        )
+    return out
 
 
 def _body_has_edit_read(body: str) -> bool:
@@ -1404,6 +1478,11 @@ def generate_nk_content(
     warnings: List[str] = []
     task_slug = (task or "comp").strip() or "comp"
 
+    # 편집본이 edit/v### 안에 있는 프로젝트(SIL_036 등) 대응. 호출한 쪽 paths 는 바꾸지 않는다.
+    if paths.get("edit"):
+        paths = dict(paths)
+        paths["edit"] = _resolve_edit_media_dir(Path(paths["edit"]))
+
     preset_name = (preset_data.get("project_code") or "").strip().upper()
     custom_body = load_preset_template(preset_name) if preset_name else None
     if custom_body:
@@ -1433,6 +1512,7 @@ def generate_nk_content(
     # 템플릿이 E107 고정값이 아닌 다른 샷(E102 등)으로 저장된 경우 Read file 경로가 남는 문제
     body = _patch_read_plate_file_paths(body, shot_name, paths)
     body = _patch_read_edit_file_paths(body, shot_name, paths)
+    warnings.extend(_stray_shot_read_warnings(body, paths["shot_root"]))
 
     # Patch task version in Viewer NDISender etc.
     # comp: 기존 정규식 유지 (커스텀 템플릿 _COMP_ casing 회귀 방지)
